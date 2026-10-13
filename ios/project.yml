@@ -15,16 +15,23 @@ targets:
     platform: iOS
     sources:
       - App
+      - Shared
     dependencies:
       - target: RTrainWidget
         embed: true
     info:
       path: App/Info.plist
       properties:
-        CFBundleDisplayName: Next R Train
+        CFBundleDisplayName: Train Times
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
+    # The app and the widget share the chosen station through this App Group
+    entitlements:
+      path: Config/App.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.rtrainwidget.app
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.rtrainwidget.app
@@ -34,12 +41,18 @@ targets:
     platform: iOS
     sources:
       - Widget
+      - Shared
     info:
       path: Widget/Info.plist
       properties:
-        CFBundleDisplayName: Next R Train
+        CFBundleDisplayName: Train Times
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    entitlements:
+      path: Config/Widget.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.rtrainwidget.app
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.rtrainwidget.app.widget

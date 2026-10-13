@@ -5,3 +5,4 @@ ios/Widget/Info.plist
 ios/build/
 ios/Payload/
 *.ipa
+ios/Config/

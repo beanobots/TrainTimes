@@ -1,36 +1,24 @@
 import Foundation
 
-/// What the widget shows: change these for another station or direction.
-enum Settings {
-    /// Prospect Av, Manhattan-bound ("R34S" is toward Bay Ridge).
-    static let stopID = "R34N"
-    /// Add "N" to also show N trains when they run local.
-    static let routes: Set<String> = ["R"]
-    static let station = "Prospect Av"
-    static let heading = "to Manhattan"
-    /// The MTA's real-time feed for the N/Q/R/W lines; no API key needed.
-    static let feedURL = URL(string: "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs-nqrw")!
-    /// Where a train ends up, keyed by the last stop of its trip.
-    static let terminals = ["G08N": "Forest Hills", "G21N": "Queens Plaza", "R27N": "Whitehall St", "R45S": "Bay Ridge"]
-}
-
-/// One train's predicted arrival at the stop.
-struct Arrival: Hashable {
+/// One train's predicted arrival at a stop.
+struct Arrival: Hashable, Sendable {
+    /// A real-time route id, with express versions folded in ("6X" is "6").
     let route: String
     let time: Date
-    /// Where the train ends up, when it's one of `Settings.terminals`.
-    let terminal: String?
+    /// The last stop of the trip, whose station is where the train ends up.
+    let lastStop: String
     /// True when a real train is running this trip, so the time is a live
     /// prediction. False when the MTA hasn't assigned a train to it yet, so
     /// the time is still the timetable's.
     let isLive: Bool
+
+    var terminal: String? { StationDirectory.terminalName(forStop: lastStop) }
 }
 
 enum SubwayFeed {
-    /// The trains due at the stop after `now`, soonest first.
-    static func upcoming(from data: Data, now: Date = Date()) throws -> [Arrival] {
-        try arrivals(at: Settings.stopID, in: data)
-            .filter { Settings.routes.contains($0.route) && $0.time > now }
+    /// The trains of `route` due at the platform `stopID` after `now`, soonest first.
+    static func upcoming(stopID: String, route: String, from data: Data, now: Date = Date()) throws -> [Arrival] {
+        try arrivals(at: stopID, in: data).filter { $0.route == route && $0.time > now }
     }
 
     /// Decodes just enough of a GTFS-realtime feed (gtfs.org/realtime) to list,
@@ -86,9 +74,9 @@ enum SubwayFeed {
                 }
                 if time != 0 {
                     arrivals.append(Arrival(
-                        route: route,
+                        route: Lines.normalized(route),
                         time: Date(timeIntervalSince1970: TimeInterval(time)),
-                        terminal: Settings.terminals[lastStop],
+                        lastStop: lastStop,
                         isLive: isLive
                     ))
                 }

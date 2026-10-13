@@ -34,20 +34,34 @@ jobs:
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             build
 
+      - name: Add the App Group entitlement
+        # The build is unsigned, but AltStore reads each app's entitlements to set up
+        # the App Group the app and widget share. An ad-hoc signature carries them;
+        # AltStore replaces the signature when it installs.
+        working-directory: ios
+        run: |
+          APP=build/Build/Products/Release-iphoneos/NextRTrain.app
+          codesign --force --sign - --timestamp=none --entitlements Config/Widget.entitlements "$APP/PlugIns/RTrainWidget.appex"
+          codesign --force --sign - --timestamp=none --entitlements Config/App.entitlements "$APP"
+          codesign -d --entitlements - "$APP" 2>&1 | grep -A2 application-groups
+          codesign -d --entitlements - "$APP/PlugIns/RTrainWidget.appex" 2>&1 | grep -A2 application-groups
+
       - name: Package the .ipa
         working-directory: ios
         run: |
-          rm -rf Payload NextRTrain.ipa
+          rm -rf Payload TrainTimes.ipa
           mkdir Payload
           cp -R build/Build/Products/Release-iphoneos/NextRTrain.app Payload/
-          # the widget must be inside the app, or the ipa installs without it
+          # the widget must be inside the app, with the station list in both
           test -d Payload/NextRTrain.app/PlugIns/RTrainWidget.appex
-          zip -qr NextRTrain.ipa Payload
+          test -f Payload/NextRTrain.app/stations.json
+          test -f Payload/NextRTrain.app/PlugIns/RTrainWidget.appex/stations.json
+          zip -qr TrainTimes.ipa Payload
 
       - uses: actions/upload-artifact@v4
         with:
           name: NextRTrain-ipa
-          path: ios/NextRTrain.ipa
+          path: ios/TrainTimes.ipa
 
       - name: Publish as the latest release
         if: github.ref == 'refs/heads/main'
@@ -55,7 +69,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete latest --cleanup-tag --yes || true
-          gh release create latest ios/NextRTrain.ipa \
+          gh release create latest ios/TrainTimes.ipa \
             --target "$GITHUB_SHA" \
             --title "Latest build" \
             --notes "Built from ${GITHUB_SHA::7}. Install it with AltStore."

@@ -10,8 +10,8 @@ struct RTrainWidget: Widget {
             TrainWidgetView(entry: entry)
                 .containerBackground(Color.boardBlack, for: .widget)
         }
-        .configurationDisplayName("Next R train")
-        .description("Manhattan-bound R trains at Prospect Av, live from the MTA.")
+        .configurationDisplayName("Next train")
+        .description("Live times for the station, line and direction you choose in the app.")
         .supportedFamilies([.systemSmall, .systemMedium, .accessoryRectangular, .accessoryCircular, .accessoryInline])
     }
 }
@@ -20,9 +20,15 @@ struct RTrainWidget: Widget {
 
 struct TrainEntry: TimelineEntry {
     let date: Date
+    /// What the app has chosen for the widget to show.
+    let selection: Selection
     /// Trains still to come at `date`, soonest first.
     let trains: [Arrival]
     var problem: String? = nil
+
+    var stationName: String { selection.station?.name ?? "Choose a station" }
+    var heading: String { selection.station?.directionLabel(selection.direction) ?? "" }
+    var lineLabel: String { LineStyle.of(selection.route).label }
 }
 
 struct Provider: TimelineProvider {
@@ -52,20 +58,16 @@ struct Provider: TimelineProvider {
     /// on to the following train without going back to the network.
     private static func entries() async -> [TrainEntry] {
         let now = Date.now
+        let selection = SharedStore.load()
         do {
-            let request = URLRequest(url: Settings.feedURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
-            let (data, response) = try await URLSession.shared.data(for: request)
-            if let http = response as? HTTPURLResponse, http.statusCode != 200 {
-                throw URLError(.badServerResponse)
-            }
-            let trains = try SubwayFeed.upcoming(from: data, now: now)
-            var entries = [TrainEntry(date: now, trains: trains)]
+            let trains = try await TrainService.upcoming(for: selection, now: now)
+            var entries = [TrainEntry(date: now, selection: selection, trains: trains)]
             for train in trains.prefix(10) {
-                entries.append(TrainEntry(date: train.time, trains: trains.filter { $0.time > train.time }))
+                entries.append(TrainEntry(date: train.time, selection: selection, trains: trains.filter { $0.time > train.time }))
             }
             return entries
         } catch {
-            return [TrainEntry(date: now, trains: [], problem: "Couldn't reach the MTA")]
+            return [TrainEntry(date: now, selection: selection, trains: [], problem: "Couldn't reach the MTA")]
         }
     }
 }
@@ -88,14 +90,14 @@ struct TrainWidgetView: View {
 
     private var next: Arrival? { entry.trains.first }
     private var later: ArraySlice<Arrival> { entry.trains.dropFirst() }
-    private var route: String { next?.route ?? Settings.routes.sorted().last ?? "R" }
-    private var noTrains: String { entry.problem ?? "No \(Settings.routes.sorted().joined(separator: "/")) trains predicted" }
+    private var route: String { entry.selection.route }
+    private var noTrains: String { entry.problem ?? "No \(entry.lineLabel) trains predicted" }
 
     var body: some View {
         switch family {
         case .accessoryInline:
             if let next {
-                Text("\(next.route) " + ([next] + later.prefix(2)).map(\.time.clock).joined(separator: " · "))
+                Text("\(entry.lineLabel) " + ([next] + later.prefix(2)).map(\.time.clock).joined(separator: " · "))
             } else {
                 Text(noTrains)
             }
@@ -103,7 +105,7 @@ struct TrainWidgetView: View {
             ZStack {
                 AccessoryWidgetBackground()
                 VStack(spacing: 0) {
-                    Text(route).font(.headline)
+                    Text(entry.lineLabel).font(.headline)
                     if let next {
                         countdown(to: next).font(.system(size: 15, weight: .semibold, design: .rounded))
                     } else {
@@ -114,7 +116,7 @@ struct TrainWidgetView: View {
             }
         case .accessoryRectangular:
             VStack(alignment: .leading, spacing: 0) {
-                Text("\(route) · \(Settings.station)").font(.headline)
+                Text("\(entry.lineLabel) · \(entry.stationName)").font(.headline).lineLimit(1)
                 if let next {
                     countdown(to: next)
                         .font(.system(size: 22, weight: .bold, design: .rounded))
@@ -151,13 +153,13 @@ struct TrainWidgetView: View {
 
     private var header: some View {
         HStack(spacing: 7) {
-            RouteBullet(route: route, size: 26)
+            LineBullet(route: route, size: 26)
             VStack(alignment: .leading, spacing: 0) {
-                Text(Settings.station).font(.subheadline.bold()).foregroundStyle(.white)
-                Text(Settings.heading).font(.caption2).foregroundStyle(Color.boardGray)
+                Text(entry.stationName).font(.subheadline.bold()).foregroundStyle(.white)
+                Text(entry.heading).font(.caption2).foregroundStyle(Color.boardGray)
             }
             .lineLimit(1)
-            .minimumScaleFactor(0.8)
+            .minimumScaleFactor(0.7)
         }
     }
 
@@ -211,9 +213,6 @@ struct TrainWidgetView: View {
             }
             ForEach(Array(later.prefix(4).enumerated()), id: \.offset) { _, train in
                 HStack(spacing: 8) {
-                    if Settings.routes.count > 1 {
-                        RouteBullet(route: train.route, size: 16)
-                    }
                     Text(train.time.clock)
                         .font(.subheadline.weight(.semibold))
                         .monospacedDigit()
@@ -248,24 +247,9 @@ struct TrainWidgetView: View {
     }
 }
 
-struct RouteBullet: View {
-    let route: String
-    let size: CGFloat
-
-    var body: some View {
-        Text(route)
-            .font(.system(size: size * 0.62, weight: .bold))
-            .foregroundStyle(.black)
-            .frame(width: size, height: size)
-            .background(Circle().fill(Color.mtaYellow))
-    }
-}
-
 extension Color {
-    static let mtaYellow = Color(red: 252 / 255, green: 204 / 255, blue: 10 / 255)
     static let boardBlack = Color(white: 0.07)
     static let boardGray = Color(white: 0.62)
-    static let liveGreen = Color(red: 0.30, green: 0.85, blue: 0.39)
 }
 
 extension Arrival {
@@ -286,9 +270,9 @@ extension TrainEntry {
     static var preview: TrainEntry {
         let now = Date.now
         let trains = [4.0, 12, 20, 31, 41].map {
-            Arrival(route: "R", time: now.addingTimeInterval($0 * 60), terminal: "Forest Hills", isLive: $0 < 15)
+            Arrival(route: "R", time: now.addingTimeInterval($0 * 60), lastStop: "G08N", isLive: $0 < 15)
         }
-        return TrainEntry(date: now, trains: trains)
+        return TrainEntry(date: now, selection: .fallback, trains: trains)
     }
 }
 
@@ -302,5 +286,5 @@ extension TrainEntry {
     RTrainWidget()
 } timeline: {
     TrainEntry.preview
-    TrainEntry(date: .now, trains: [], problem: "Couldn't reach the MTA")
+    TrainEntry(date: .now, selection: .fallback, trains: [], problem: "Couldn't reach the MTA")
 }
