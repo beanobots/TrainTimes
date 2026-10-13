@@ -52,10 +52,12 @@ jobs:
           rm -rf Payload TrainTimes.ipa
           mkdir Payload
           cp -R build/Build/Products/Release-iphoneos/NextRTrain.app Payload/
-          # the widget must be inside the app, with the station list in both
+          # the widget must be inside the app, with the station and elevator lists in both
           test -d Payload/NextRTrain.app/PlugIns/RTrainWidget.appex
           test -f Payload/NextRTrain.app/stations.json
           test -f Payload/NextRTrain.app/PlugIns/RTrainWidget.appex/stations.json
+          test -f Payload/NextRTrain.app/equipment.json
+          test -f Payload/NextRTrain.app/PlugIns/RTrainWidget.appex/equipment.json
           zip -qr TrainTimes.ipa Payload
 
       - uses: actions/upload-artifact@v4

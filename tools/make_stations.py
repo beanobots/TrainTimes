@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
-"""Builds ios/Shared/stations.json from the MTA's station list.
+"""Builds ios/Shared/stations.json and ios/Shared/equipment.json from MTA data.
 
     curl -o Stations.csv http://web.mta.info/developers/data/nyct/subway/Stations.csv
-    python3 tools/make_stations.py Stations.csv ios/Shared/stations.json
+    curl -o entrances.json 'https://data.ny.gov/resource/i9wp-a4ja.json?$limit=5000'
+    curl -o equipment.json https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fnyct_ene_equipments.json
+    python3 tools/make_stations.py Stations.csv entrances.json equipment.json ios/Shared
 
 Each station keeps its GTFS stop id (the real-time feeds name platforms by adding
-N or S to it), the lines that serve it as real-time route ids, and the labels the
-MTA gives its two directions.
+N or S to it), the lines that serve it as real-time route ids, the labels the MTA
+gives its two directions, where it is and where its entrances are, and how
+accessible it is. The equipment list ties each elevator and escalator to its
+station complex, so the outage feed, which names only the equipment, can be
+matched to a station.
 """
 import csv
 import json
@@ -40,9 +45,44 @@ def short_name(name):
     return first if dash and first and STREET.search(rest) and not STREET.search(first) else name
 
 
-def main(source, target):
+def entrances_by_stop(path):
+    with open(path, encoding="utf-8") as file:
+        rows = json.load(file)
+    entrances = {}
+    for row in rows:
+        entrance = {
+            "lat": round(float(row["entrance_latitude"]), 6),
+            "lon": round(float(row["entrance_longitude"]), 6),
+            "type": row["entrance_type"],
+        }
+        if row.get("entry_allowed") == "NO":
+            entrance["exitOnly"] = True
+        entrances.setdefault(row["gtfs_stop_id"], []).append(entrance)
+    return entrances
+
+
+def equipment(path, complexes):
+    """The elevators and escalators at subway stations, by id, including those a
+    building owner runs rather than the MTA (they're in the outage feed too)."""
+    with open(path, encoding="utf-8") as file:
+        rows = json.load(file)
+    return {
+        row["equipmentno"]: {
+            "complex": row["stationcomplexid"],
+            "elevator": row["equipmenttype"] == "EL",
+            "ada": row["ADA"] == "Y",
+            "serving": row["serving"],
+            "alternative": (row.get("alternativeroute") or "").strip(),
+        }
+        for row in sorted(rows, key=lambda row: row["equipmentno"])
+        if row["stationcomplexid"] in complexes
+    }
+
+
+def main(source, entrances_path, equipment_path, target_dir):
     with open(source, encoding="utf-8-sig", newline="") as file:
         rows = list(csv.DictReader(file))
+    entrances = entrances_by_stop(entrances_path)
     stations = [
         {
             "id": row["GTFS Stop ID"],
@@ -52,14 +92,35 @@ def main(source, target):
             "routes": route_ids(row),
             "north": row["North Direction Label"],
             "south": row["South Direction Label"],
+            "lat": float(row["GTFS Latitude"]),
+            "lon": float(row["GTFS Longitude"]),
+            "complex": row["Complex ID"],
+            # 0: not accessible, 1: accessible, 2: partly (see adaNotes)
+            "ada": int(row["ADA"]),
+            "adaNotes": row["ADA Direction Notes"],
+            "entrances": entrances.get(row["GTFS Stop ID"], []),
         }
         for row in rows
     ]
+    # The entrance list files a complex's shared entrances under one of its stations
+    by_complex = {}
+    for station in stations:
+        by_complex.setdefault(station["complex"], []).extend(station["entrances"])
+    for station in stations:
+        if not station["entrances"]:
+            station["entrances"] = by_complex[station["complex"]]
     stations.sort(key=lambda station: (station["name"].lower(), station["borough"]))
+    target = f"{target_dir}/stations.json"
     with open(target, "w", encoding="utf-8") as file:
         file.write("[\n" + ",\n".join(json.dumps(s, ensure_ascii=False) for s in stations) + "\n]\n")
-    print(f"{len(stations)} stations -> {target}")
+    print(f"{len(stations)} stations, {sum(len(s['entrances']) for s in stations)} entrances -> {target}")
+
+    machines = equipment(equipment_path, {station["complex"] for station in stations})
+    target = f"{target_dir}/equipment.json"
+    with open(target, "w", encoding="utf-8") as file:
+        file.write("{\n" + ",\n".join(f"{json.dumps(k)}: {json.dumps(v, ensure_ascii=False)}" for k, v in machines.items()) + "\n}\n")
+    print(f"{len(machines)} elevators and escalators -> {target}")
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:3])
+    main(*sys.argv[1:5])

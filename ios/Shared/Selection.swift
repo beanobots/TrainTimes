@@ -6,6 +6,24 @@ struct Selection: Codable, Hashable, Sendable {
     /// A real-time route id; see `Station.routes`.
     var route: String
     var direction: Direction
+    /// Whether the widget mentions an elevator out at the station (the app always lists them).
+    var elevatorAlerts: Bool
+
+    init(stationID: String, route: String, direction: Direction, elevatorAlerts: Bool = false) {
+        self.stationID = stationID
+        self.route = route
+        self.direction = direction
+        self.elevatorAlerts = elevatorAlerts
+    }
+
+    /// Choices saved before `elevatorAlerts` existed still load.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        stationID = try container.decode(String.self, forKey: .stationID)
+        route = try container.decode(String.self, forKey: .route)
+        direction = try container.decode(Direction.self, forKey: .direction)
+        elevatorAlerts = try container.decodeIfPresent(Bool.self, forKey: .elevatorAlerts) ?? false
+    }
 
     /// Prospect Av, R, toward Manhattan: what the widget shows until you choose.
     static let fallback = Selection(stationID: "R34", route: "R", direction: .north)

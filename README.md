@@ -6,6 +6,22 @@ predictions are green; timetable times the MTA hasn't assigned a train to yet ar
 white. It reads the MTA's free real-time feeds (no API key) and covers every
 subway line and the Staten Island Railway.
 
+The app also shows, for the station and line you choose:
+
+- **Service alerts**: delays, suspensions, skipped stops and other changes in
+  effect now for that line at that station and direction. The widget mentions
+  the most important one.
+- **Accessibility**: whether the station is step-free, which elevators and
+  escalators are out or have planned work, and the MTA's advice for getting
+  around a broken elevator. Turn on "Show elevator outages on the widget" to
+  see them there too.
+- **A map** of the station and its entrances, with elevator entrances marked,
+  and walking directions in Maps.
+
+The app follows your phone's light or dark setting. The widget always uses its
+dark station-board look, and on tinted Home Screens its line bullet turns into an
+outline so the letter stays readable.
+
 There are two versions:
 
 - `ios/`: a native app and widget. You pick any station and line in the app, and
@@ -44,12 +60,26 @@ A free Apple ID signs apps for 7 days. AltStore renews the signature on its own
 when AltServer is running on your computer and your iPhone is on the same Wi-Fi.
 If it lapses, the app stops opening until you refresh it in AltStore.
 
-## Changing the data
+## Where the data comes from
 
-The station list (`ios/Shared/stations.json`) comes from the MTA's
-[station list](http://web.mta.info/developers/data/nyct/subway/Stations.csv). To
-refresh it, download the CSV and run
-`python3 tools/make_stations.py Stations.csv ios/Shared/stations.json`, then push.
+Live, each time the widget or app refreshes (no API key needed):
+
+- Train times: the MTA's GTFS-realtime subway feeds (one per group of lines).
+- Service alerts: the MTA's subway alerts feed.
+- Elevator and escalator outages: the MTA's elevator and escalator status feed.
+
+Built into the app (refresh them now and then):
+
+- `ios/Shared/stations.json`: the MTA's
+  [station list](http://web.mta.info/developers/data/nyct/subway/Stations.csv)
+  plus the [subway entrances](https://data.ny.gov/Transportation/MTA-Subway-Entrances-and-Exits-2024/i9wp-a4ja)
+  from data.ny.gov.
+- `ios/Shared/equipment.json`: the MTA's list of elevators and escalators, which
+  ties each one to its station.
+
+To refresh both, follow the download steps at the top of `tools/make_stations.py`,
+then run `python3 tools/make_stations.py Stations.csv entrances.json equipment.json ios/Shared`
+and push.
 
 ## How it stays fresh
 

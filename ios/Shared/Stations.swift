@@ -18,6 +18,34 @@ struct Station: Codable, Hashable, Identifiable, Sendable {
     /// The MTA's names for the two directions; empty at the end of a line.
     let north: String
     let south: String
+    let lat: Double
+    let lon: Double
+    /// The station complex: stations joined by passageways share one, and so do their elevators.
+    let complex: String
+    /// 0: not accessible, 1: accessible, 2: partly accessible (see `adaNotes`).
+    let ada: Int
+    /// Which part is accessible at a partly accessible station, e.g. "Manhattan-bound only".
+    let adaNotes: String
+    let entrances: [Entrance]
+
+    struct Entrance: Codable, Hashable, Sendable {
+        let lat: Double
+        let lon: Double
+        /// "Stair", "Elevator", "Escalator", "Station House", "Easement - Street", ...
+        let type: String
+        var exitOnly: Bool? = nil
+
+        var isElevator: Bool { type.contains("Elevator") }
+    }
+
+    /// "Accessible", or nil for a station without step-free access.
+    var accessibility: String? {
+        switch ada {
+        case 1: "Accessible station"
+        case 2: adaNotes.isEmpty ? "Partly accessible" : "Accessible: \(adaNotes)"
+        default: nil
+        }
+    }
 
     /// "to Manhattan", or "Northbound" where the MTA gives no name.
     func directionLabel(_ direction: Direction) -> String {

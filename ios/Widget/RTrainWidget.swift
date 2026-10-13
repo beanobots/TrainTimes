@@ -24,6 +24,8 @@ struct TrainEntry: TimelineEntry {
     let selection: Selection
     /// Trains still to come at `date`, soonest first.
     let trains: [Arrival]
+    /// The most important alert (or elevator outage) to mention, if any.
+    var notice: Notice? = nil
     var problem: String? = nil
 
     var stationName: String { selection.station?.name ?? "Choose a station" }
@@ -60,10 +62,12 @@ struct Provider: TimelineProvider {
         let now = Date.now
         let selection = SharedStore.load()
         do {
-            let trains = try await TrainService.upcoming(for: selection, now: now)
-            var entries = [TrainEntry(date: now, selection: selection, trains: trains)]
+            let board = try await TrainService.board(for: selection, includingOutages: selection.elevatorAlerts, now: now)
+            let trains = board.trains
+            let notice = board.notice(includingElevators: selection.elevatorAlerts)
+            var entries = [TrainEntry(date: now, selection: selection, trains: trains, notice: notice)]
             for train in trains.prefix(10) {
-                entries.append(TrainEntry(date: train.time, selection: selection, trains: trains.filter { $0.time > train.time }))
+                entries.append(TrainEntry(date: train.time, selection: selection, trains: trains.filter { $0.time > train.time }, notice: notice))
             }
             return entries
         } catch {
@@ -96,7 +100,9 @@ struct TrainWidgetView: View {
     var body: some View {
         switch family {
         case .accessoryInline:
-            if let next {
+            if let next, let notice = entry.notice {
+                Text("\(entry.lineLabel) \(next.time.clock) · \(notice.label)")
+            } else if let next {
                 Text("\(entry.lineLabel) " + ([next] + later.prefix(2)).map(\.time.clock).joined(separator: " · "))
             } else {
                 Text(noTrains)
@@ -121,7 +127,9 @@ struct TrainWidgetView: View {
                     countdown(to: next)
                         .font(.system(size: 22, weight: .bold, design: .rounded))
                         .multilineTextAlignment(.leading)
-                    if !later.isEmpty {
+                    if let notice = entry.notice {
+                        Label(notice.label, systemImage: notice.symbol).font(.caption)
+                    } else if !later.isEmpty {
                         Text("then " + later.prefix(2).map(\.time.clock).joined(separator: ", ")).font(.caption)
                     }
                 } else {
@@ -133,20 +141,28 @@ struct TrainWidgetView: View {
             VStack(alignment: .leading, spacing: 0) {
                 header
                 Spacer(minLength: 4)
-                nextTrain(listsLater: true)
+                nextTrain(listsLater: entry.notice == nil)
+                if let notice = entry.notice {
+                    NoticeLine(notice: notice, showsText: false).padding(.top, 2)
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
             .overlay(alignment: .bottomTrailing) { refreshButton }
         default:
-            HStack(alignment: .top, spacing: 16) {
-                VStack(alignment: .leading, spacing: 0) {
-                    header
-                    Spacer(minLength: 4)
-                    nextTrain(listsLater: false)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .top, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        header
+                        Spacer(minLength: 4)
+                        nextTrain(listsLater: false)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                    laterTrains(count: entry.notice == nil ? 4 : 3)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-                laterTrains
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                if let notice = entry.notice {
+                    NoticeLine(notice: notice, showsText: true)
+                }
             }
         }
     }
@@ -155,11 +171,17 @@ struct TrainWidgetView: View {
         HStack(spacing: 7) {
             LineBullet(route: route, size: 26)
             VStack(alignment: .leading, spacing: 0) {
-                Text(entry.stationName).font(.subheadline.bold()).foregroundStyle(.white)
-                Text(entry.heading).font(.caption2).foregroundStyle(Color.boardGray)
+                Text(entry.stationName)
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.85)
+                Text(entry.heading)
+                    .font(.caption2)
+                    .foregroundStyle(Color.boardGray)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             }
-            .lineLimit(1)
-            .minimumScaleFactor(0.7)
         }
     }
 
@@ -168,7 +190,7 @@ struct TrainWidgetView: View {
     @ViewBuilder private func nextTrain(listsLater: Bool) -> some View {
         if let next {
             countdown(to: next)
-                .font(.system(size: 36, weight: .bold, design: .rounded))
+                .font(.system(size: 32, weight: .bold, design: .rounded))
                 .foregroundStyle(next.statusColor)
                 .multilineTextAlignment(.leading)
             HStack(spacing: 4) {
@@ -204,14 +226,14 @@ struct TrainWidgetView: View {
         .lineLimit(1)
     }
 
-    private var laterTrains: some View {
+    private func laterTrains(count: Int) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text("NEXT").font(.caption2.weight(.semibold)).foregroundStyle(Color.boardGray)
                 Spacer(minLength: 0)
                 refreshButton
             }
-            ForEach(Array(later.prefix(4).enumerated()), id: \.offset) { _, train in
+            ForEach(Array(later.prefix(count).enumerated()), id: \.offset) { _, train in
                 HStack(spacing: 8) {
                     Text(train.time.clock)
                         .font(.subheadline.weight(.semibold))
@@ -244,6 +266,28 @@ struct TrainWidgetView: View {
             .monospacedDigit()
             .lineLimit(1)
             .minimumScaleFactor(0.6)
+    }
+}
+
+/// The widget's one line about what might get in the way: "Delays", "Elevator out".
+struct NoticeLine: View {
+    let notice: Notice
+    /// The medium widget has room for the alert's headline; the small one only for its label.
+    let showsText: Bool
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: notice.symbol).foregroundStyle(notice.tint)
+            Text(notice.label).fontWeight(.semibold).foregroundStyle(.white).layoutPriority(1)
+            if showsText {
+                Text(notice.text).foregroundStyle(Color.boardGray)
+            }
+            if notice.others > 0 {
+                Text("+\(notice.others)").foregroundStyle(Color.boardGray).layoutPriority(1)
+            }
+        }
+        .font(.caption)
+        .lineLimit(1)
     }
 }
 
@@ -286,5 +330,7 @@ extension TrainEntry {
     RTrainWidget()
 } timeline: {
     TrainEntry.preview
+    TrainEntry(date: .now, selection: .fallback, trains: TrainEntry.preview.trains,
+               notice: Notice(kind: .alert(.delays), label: "Delays", text: "R trains are delayed while we address a signal problem", others: 1))
     TrainEntry(date: .now, selection: .fallback, trains: [], problem: "Couldn't reach the MTA")
 }
