@@ -1,0 +1,7 @@
+# Generated on the build machine from ios/project.yml
+*.xcodeproj
+ios/App/Info.plist
+ios/Widget/Info.plist
+ios/build/
+ios/Payload/
+*.ipa

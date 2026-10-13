@@ -1,0 +1,61 @@
+name: Build iOS app
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write # to publish the latest build as a release
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate the Xcode project
+        working-directory: ios
+        run: xcodegen generate
+
+      - name: Build, unsigned (AltStore signs it on your computer)
+        working-directory: ios
+        run: |
+          xcodebuild \
+            -project NextRTrain.xcodeproj \
+            -scheme NextRTrain \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package the .ipa
+        working-directory: ios
+        run: |
+          rm -rf Payload NextRTrain.ipa
+          mkdir Payload
+          cp -R build/Build/Products/Release-iphoneos/NextRTrain.app Payload/
+          # the widget must be inside the app, or the ipa installs without it
+          test -d Payload/NextRTrain.app/PlugIns/RTrainWidget.appex
+          zip -qr NextRTrain.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NextRTrain-ipa
+          path: ios/NextRTrain.ipa
+
+      - name: Publish as the latest release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --cleanup-tag --yes || true
+          gh release create latest ios/NextRTrain.ipa \
+            --target "$GITHUB_SHA" \
+            --title "Latest build" \
+            --notes "Built from ${GITHUB_SHA::7}. Install it with AltStore."
