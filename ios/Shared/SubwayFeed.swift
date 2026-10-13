@@ -11,6 +11,8 @@ struct Arrival: Hashable, Sendable {
     /// prediction. False when the MTA hasn't assigned a train to it yet, so
     /// the time is still the timetable's.
     let isLive: Bool
+    /// The trip's id in the feed, so a countdown can follow one train as its time changes.
+    var trip: String = ""
 
     var terminal: String? { StationDirectory.terminalName(forStop: lastStop) }
 }
@@ -36,11 +38,13 @@ enum SubwayFeed {
                 var time: UInt64 = 0
                 var lastStop = ""
                 var isLive = false
+                var trip = ""
                 try reader.message { field in
                     switch field {
                     case 1: // TripUpdate.trip
                         try reader.message { field in
                             switch field {
+                            case 1: trip = try reader.string() // TripDescriptor.trip_id
                             case 5: route = try reader.string() // TripDescriptor.route_id
                             case 1001: // the MTA's extension to TripDescriptor
                                 try reader.message { field in
@@ -77,7 +81,8 @@ enum SubwayFeed {
                         route: Lines.normalized(route),
                         time: Date(timeIntervalSince1970: TimeInterval(time)),
                         lastStop: lastStop,
-                        isLive: isLive
+                        isLive: isLive,
+                        trip: trip
                     ))
                 }
                 return true

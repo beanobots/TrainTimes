@@ -1,3 +1,4 @@
+import AppIntents
 import MapKit
 import SwiftUI
 import WidgetKit
@@ -6,11 +7,17 @@ struct ContentView: View {
     @State private var selection = SharedStore.load()
     @State private var board: Board?
     @State private var loadState = LoadState.loading
+    /// Moves along every few seconds so trains you can no longer catch drop off the list.
+    @State private var now = Date.now
+    /// The train the Lock Screen countdown is for, while one is running.
+    @State private var countdownTrain: Date? = TrainActivityController.currentTrain
+    @State private var countdownProblem: String?
 
     private enum LoadState { case loading, loaded, failed }
 
     private var station: Station? { selection.station }
-    private var trains: [Arrival] { board?.trains ?? [] }
+    /// The trains you can still catch, given the walking time.
+    private var trains: [Arrival] { selection.catchable(board?.trains ?? [], now: now) }
 
     var body: some View {
         NavigationStack {
@@ -30,13 +37,29 @@ struct ContentView: View {
                         .labelsHidden()
                     }
                 }
+                Section {
+                    Stepper(value: $selection.walkMinutes, in: 0...60) {
+                        Text(selection.walkMinutes == 0 ? "Walk to the station: not set" : "Walk to the station: \(selection.walkMinutes) min")
+                    }
+                } header: {
+                    Text("Getting there")
+                } footer: {
+                    Text("Trains you can't reach in time are left out, and the widget counts down to when to leave.")
+                }
                 trainsSection
+                countdownSection
                 if loadState == .loaded, let board {
                     alertsSection(board.alerts)
                 }
                 if let station {
                     accessibilitySection(station)
                     mapSection(station)
+                }
+                Section {
+                    SiriTipView(intent: NextTrainIntent())
+                    ShortcutsLink()
+                } header: {
+                    Text("Siri and Shortcuts")
                 }
                 if !SharedStore.isAvailable {
                     Section {
@@ -54,6 +77,7 @@ struct ContentView: View {
                 WidgetCenter.shared.reloadAllTimelines()
             }
             .task(id: selection) { await loadBoard() }
+            .onReceive(Timer.publish(every: 10, on: .main, in: .common).autoconnect()) { now = $0 }
         }
     }
 
@@ -72,7 +96,7 @@ struct ContentView: View {
         } header: {
             Text("Station")
         } footer: {
-            Text("The widget shows this station, line and direction.")
+            Text("Widgets show this station, line and direction, unless you pick a train in a widget's Edit menu.")
         }
     }
 
@@ -86,13 +110,49 @@ struct ContentView: View {
                 Text("No \(LineStyle.of(selection.route).label) trains predicted").foregroundStyle(.secondary)
             } else {
                 ForEach(trains.prefix(5), id: \.self) { train in
-                    TrainRow(train: train)
+                    TrainRow(train: train, leave: selection.walkMinutes > 0 ? selection.leaveTime(for: train) : nil)
                 }
             }
         } header: {
             Text("Next trains")
         } footer: {
             Text("Green times are live predictions. The rest are timetable times, which can change.")
+        }
+    }
+
+    private var countdownSection: some View {
+        Section {
+            if let countdownTrain {
+                Label("Counting down to the \(Spoken.clock(countdownTrain)) train", systemImage: "timer")
+                Button("Stop the countdown", role: .destructive) {
+                    Task {
+                        await TrainActivityController.endAll()
+                        self.countdownTrain = nil
+                    }
+                }
+            } else {
+                Button {
+                    Task { await startCountdown() }
+                } label: {
+                    Label("I'm on my way", systemImage: "figure.walk.departure")
+                }
+            }
+            if let countdownProblem {
+                Text(countdownProblem).foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("On your way")
+        } footer: {
+            Text("Counts down to your train on the Lock Screen and in the Dynamic Island. Tap its refresh button, or open the app, for new times.")
+        }
+    }
+
+    private func startCountdown() async {
+        do {
+            countdownTrain = try await TrainActivityController.start(for: selection)
+            countdownProblem = nil
+        } catch {
+            countdownProblem = error.localizedDescription
         }
     }
 
@@ -157,6 +217,8 @@ struct ContentView: View {
 
     private func loadBoard() async {
         loadState = .loading
+        now = .now
+        countdownTrain = TrainActivityController.currentTrain
         do {
             board = try await TrainService.board(for: selection)
             loadState = .loaded
@@ -169,6 +231,8 @@ struct ContentView: View {
 
 private struct TrainRow: View {
     let train: Arrival
+    /// When to set off, if a walking time is set.
+    let leave: Date?
 
     var body: some View {
         HStack(spacing: 8) {
@@ -180,10 +244,17 @@ private struct TrainRow: View {
                 Text(terminal).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer()
-            Text(train.time, style: .timer)
-                .font(.subheadline)
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
+            if let leave {
+                Text("leave in").font(.footnote).foregroundStyle(.secondary)
+                Text(leave, style: .timer)
+                    .font(.subheadline.weight(.semibold))
+                    .monospacedDigit()
+            } else {
+                Text(train.time, style: .timer)
+                    .font(.subheadline)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 }

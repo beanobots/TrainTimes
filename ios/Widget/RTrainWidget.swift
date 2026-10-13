@@ -6,12 +6,12 @@ struct RTrainWidget: Widget {
     let kind = "RTrainWidget"
 
     var body: some WidgetConfiguration {
-        StaticConfiguration(kind: kind, provider: Provider()) { entry in
+        AppIntentConfiguration(kind: kind, intent: TrainWidgetIntent.self, provider: Provider()) { entry in
             TrainWidgetView(entry: entry)
                 .containerBackground(Color.boardBlack, for: .widget)
         }
         .configurationDisplayName("Next train")
-        .description("Live times for the station, line and direction you choose in the app.")
+        .description("Live times for the train chosen in the app, or pick one for this widget in its Edit menu.")
         .supportedFamilies([.systemSmall, .systemMedium, .accessoryRectangular, .accessoryCircular, .accessoryInline])
     }
 }
@@ -33,41 +33,58 @@ struct TrainEntry: TimelineEntry {
     var lineLabel: String { LineStyle.of(selection.route).label }
 }
 
-struct Provider: TimelineProvider {
+/// What a widget's Edit menu offers: its own train, and its own walking time.
+struct TrainWidgetIntent: WidgetConfigurationIntent {
+    static let title: LocalizedStringResource = "Choose a train"
+    static let description = IntentDescription("Pick a station, line and direction for this widget, or leave Train empty to show the one chosen in the app.")
+
+    @Parameter(title: "Train")
+    var stop: StopEntity?
+
+    @Parameter(title: "Walking time (minutes)", description: "0 uses the walking time set in the app.", default: 0, inclusiveRange: (0, 60))
+    var walkMinutes: Int
+
+    /// This widget's train, or the app's, with this widget's walking time if it has one.
+    var selection: Selection {
+        let app = SharedStore.load()
+        var selection = stop?.selection(basedOn: app) ?? app
+        if walkMinutes > 0 { selection.walkMinutes = walkMinutes }
+        return selection
+    }
+}
+
+struct Provider: AppIntentTimelineProvider {
     func placeholder(in context: Context) -> TrainEntry {
         .preview
     }
 
-    func getSnapshot(in context: Context, completion: @escaping (TrainEntry) -> Void) {
-        if context.isPreview {
-            completion(.preview)
-            return
-        }
-        Task { completion(await Self.entries()[0]) }
+    func snapshot(for configuration: TrainWidgetIntent, in context: Context) async -> TrainEntry {
+        if context.isPreview { return .preview }
+        return await Self.entries(for: configuration.selection)[0]
     }
 
-    func getTimeline(in context: Context, completion: @escaping (Timeline<TrainEntry>) -> Void) {
-        Task {
-            let entries = await Self.entries()
-            // iOS rations how often widgets reload, so this may come later;
-            // until it does, the entries step through the trains already known.
-            let reload = Date.now.addingTimeInterval(entries[0].problem == nil ? 10 * 60 : 2 * 60)
-            completion(Timeline(entries: entries, policy: .after(reload)))
-        }
+    func timeline(for configuration: TrainWidgetIntent, in context: Context) async -> Timeline<TrainEntry> {
+        let entries = await Self.entries(for: configuration.selection)
+        // iOS rations how often widgets reload, so this may come later;
+        // until it does, the entries step through the trains already known.
+        let reload = Date.now.addingTimeInterval(entries[0].problem == nil ? 10 * 60 : 2 * 60)
+        return Timeline(entries: entries, policy: .after(reload))
     }
 
-    /// One entry for now, then one as each train arrives, so the widget moves
-    /// on to the following train without going back to the network.
-    private static func entries() async -> [TrainEntry] {
+    /// One entry for now, then one as each train's time to leave passes (its
+    /// arrival, without a walking time), so the widget moves on to the next
+    /// train you can catch without going back to the network.
+    private static func entries(for selection: Selection) async -> [TrainEntry] {
         let now = Date.now
-        let selection = SharedStore.load()
         do {
             let board = try await TrainService.board(for: selection, includingOutages: selection.elevatorAlerts, now: now)
-            let trains = board.trains
+            let trains = selection.catchable(board.trains, now: now)
             let notice = board.notice(includingElevators: selection.elevatorAlerts)
             var entries = [TrainEntry(date: now, selection: selection, trains: trains, notice: notice)]
             for train in trains.prefix(10) {
-                entries.append(TrainEntry(date: train.time, selection: selection, trains: trains.filter { $0.time > train.time }, notice: notice))
+                let moment = selection.leaveTime(for: train)
+                let after = trains.filter { selection.leaveTime(for: $0) > moment }
+                entries.append(TrainEntry(date: moment, selection: selection, trains: after, notice: notice))
             }
             return entries
         } catch {
@@ -95,12 +112,16 @@ struct TrainWidgetView: View {
     private var next: Arrival? { entry.trains.first }
     private var later: ArraySlice<Arrival> { entry.trains.dropFirst() }
     private var route: String { entry.selection.route }
+    /// With a walking time, the countdown is to when to leave.
+    private var walking: Bool { entry.selection.walkMinutes > 0 }
     private var noTrains: String { entry.problem ?? "No \(entry.lineLabel) trains predicted" }
 
     var body: some View {
         switch family {
         case .accessoryInline:
-            if let next, let notice = entry.notice {
+            if let next, walking {
+                Text("\(entry.lineLabel): leave \(entry.selection.leaveTime(for: next).clock) for \(next.time.clock)")
+            } else if let next, let notice = entry.notice {
                 Text("\(entry.lineLabel) \(next.time.clock) · \(notice.label)")
             } else if let next {
                 Text("\(entry.lineLabel) " + ([next] + later.prefix(2)).map(\.time.clock).joined(separator: " · "))
@@ -124,9 +145,12 @@ struct TrainWidgetView: View {
             VStack(alignment: .leading, spacing: 0) {
                 Text("\(entry.lineLabel) · \(entry.stationName)").font(.headline).lineLimit(1)
                 if let next {
-                    countdown(to: next)
-                        .font(.system(size: 22, weight: .bold, design: .rounded))
-                        .multilineTextAlignment(.leading)
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        if walking { Text("Leave in").font(.caption) }
+                        countdown(to: next)
+                            .font(.system(size: 22, weight: .bold, design: .rounded))
+                            .multilineTextAlignment(.leading)
+                    }
                     if let notice = entry.notice {
                         Label(notice.label, systemImage: notice.symbol).font(.caption)
                     } else if !later.isEmpty {
@@ -189,12 +213,20 @@ struct TrainWidgetView: View {
     /// after it unless they're listed alongside.
     @ViewBuilder private func nextTrain(listsLater: Bool) -> some View {
         if let next {
-            countdown(to: next)
-                .font(.system(size: 32, weight: .bold, design: .rounded))
-                .foregroundStyle(next.statusColor)
-                .multilineTextAlignment(.leading)
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                if walking {
+                    Text("Leave in")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.boardGray)
+                        .fixedSize()
+                }
+                countdown(to: next)
+                    .font(.system(size: 32, weight: .bold, design: .rounded))
+                    .foregroundStyle(next.statusColor)
+                    .multilineTextAlignment(.leading)
+            }
             HStack(spacing: 4) {
-                Text(next.time.formatted(date: .omitted, time: .shortened))
+                Text(next.time.formatted(date: .omitted, time: .shortened) + (walking ? " train" : ""))
                     .foregroundStyle(next.statusColor)
                     .layoutPriority(1)
                 if let terminal = next.terminal {
@@ -260,9 +292,10 @@ struct TrainWidgetView: View {
         .buttonStyle(.plain)
     }
 
-    /// Counts down to the train and stops at 0:00, live, without the widget reloading.
+    /// Counts down to the train (or, with a walking time, to when to leave for
+    /// it) and stops at 0:00, live, without the widget reloading.
     private func countdown(to train: Arrival) -> some View {
-        Text(timerInterval: entry.date...train.time, countsDown: true)
+        Text(timerInterval: entry.date...entry.selection.leaveTime(for: train), countsDown: true)
             .monospacedDigit()
             .lineLimit(1)
             .minimumScaleFactor(0.6)

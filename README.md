@@ -18,6 +18,26 @@ The app also shows, for the station and line you choose:
 - **A map** of the station and its entrances, with elevator entrances marked,
   and walking directions in Maps.
 
+**More than one widget.** Every widget follows the app's choice until you give
+it its own: touch and hold the widget, tap **Edit Widget**, and pick a **Train**
+(search by station, then choose the line and direction), for example one widget
+for home and one for work. Each widget can also have its own walking time.
+
+**Walking time.** Set how long it takes you to walk to the station (in the app,
+or per widget). Trains you can't reach in time are left out, the widget counts
+down to when to leave, and the app shows a leave time for each train.
+
+**On your way.** Tap **I'm on my way** in the app (or say "Start my train
+countdown in Train Times") to count down to your train on the Lock Screen and in
+the Dynamic Island. It can only get new times while the app runs, which needs no
+push server: tap the countdown's refresh button, or open the app. In between it
+keeps ticking, and once your train has gone a refresh moves it to the next one.
+
+**Siri and Shortcuts.** Say "When's my next train in Train Times?" Siri answers
+with the next train you can catch (and when to leave, and any delays) and shows
+the next few. iOS needs the app's name in the phrase. Both actions are in the
+Shortcuts app too, where you can pick a different train.
+
 The app follows your phone's light or dark setting. The widget always uses its
 dark station-board look, and on tinted Home Screens its line bullet turns into an
 outline so the letter stays readable.

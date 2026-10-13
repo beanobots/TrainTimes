@@ -23,6 +23,8 @@ targets:
       path: App/Info.plist
       properties:
         CFBundleDisplayName: Train Times
+        # The Lock Screen and Dynamic Island countdown
+        NSSupportsLiveActivities: true
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
@@ -36,6 +38,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.rtrainwidget.app
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # Code shared with the widget checks this: only the app may start or update Live Activities
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) APP
   RTrainWidget:
     type: app-extension
     platform: iOS

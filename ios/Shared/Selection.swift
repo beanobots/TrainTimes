@@ -8,21 +8,36 @@ struct Selection: Codable, Hashable, Sendable {
     var direction: Direction
     /// Whether the widget mentions an elevator out at the station (the app always lists them).
     var elevatorAlerts: Bool
+    /// Minutes to walk to the station. Trains you can't reach in time are left out,
+    /// and the widget counts down to when to leave.
+    var walkMinutes: Int
 
-    init(stationID: String, route: String, direction: Direction, elevatorAlerts: Bool = false) {
+    init(stationID: String, route: String, direction: Direction, elevatorAlerts: Bool = false, walkMinutes: Int = 0) {
         self.stationID = stationID
         self.route = route
         self.direction = direction
         self.elevatorAlerts = elevatorAlerts
+        self.walkMinutes = walkMinutes
     }
 
-    /// Choices saved before `elevatorAlerts` existed still load.
+    /// Choices saved before `elevatorAlerts` and `walkMinutes` existed still load.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         stationID = try container.decode(String.self, forKey: .stationID)
         route = try container.decode(String.self, forKey: .route)
         direction = try container.decode(Direction.self, forKey: .direction)
         elevatorAlerts = try container.decodeIfPresent(Bool.self, forKey: .elevatorAlerts) ?? false
+        walkMinutes = try container.decodeIfPresent(Int.self, forKey: .walkMinutes) ?? 0
+    }
+
+    /// When to set off to reach the platform as `train` arrives.
+    func leaveTime(for train: Arrival) -> Date {
+        train.time.addingTimeInterval(-TimeInterval(walkMinutes * 60))
+    }
+
+    /// The trains you can still reach in time if you leave at or after `now`.
+    func catchable(_ trains: [Arrival], now: Date) -> [Arrival] {
+        trains.filter { leaveTime(for: $0) > now }
     }
 
     /// Prospect Av, R, toward Manhattan: what the widget shows until you choose.
