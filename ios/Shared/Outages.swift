@@ -55,7 +55,7 @@ enum OutagesFeed {
                 id: row.equipment + (row.outagedate ?? ""),
                 isElevator: machine.elevator,
                 isAccessibilityElevator: machine.elevator && machine.ada,
-                serving: row.serving ?? machine.serving,
+                serving: sentence(row.serving ?? machine.serving),
                 reason: row.reason ?? "",
                 start: date(row.outagedate),
                 estimatedReturn: date(row.estimatedreturntoservice),
@@ -76,6 +76,11 @@ enum OutagesFeed {
         let outagedate: String?
         let estimatedreturntoservice: String?
         let isupcomingoutage: String?
+    }
+
+    /// Some descriptions start in lower case ("mezzanine to 4/5 platform").
+    private static func sentence(_ text: String) -> String {
+        text.prefix(1).uppercased() + text.dropFirst()
     }
 
     /// The feed's dates look like "10/30/2026 10:00:00 PM", New York time.
