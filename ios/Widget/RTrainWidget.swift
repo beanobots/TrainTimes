@@ -233,7 +233,8 @@ struct TrainWidgetView: View {
                 Text(next.time.formatted(date: .omitted, time: .shortened) + (walking ? " train" : ""))
                     .foregroundStyle(next.statusColor)
                     .layoutPriority(1)
-                if let terminal = next.terminal {
+                // The small widget has no room for where it's going
+                if let terminal = next.terminal, family != .systemSmall {
                     Text("· \(terminal)").foregroundStyle(Color.boardGray)
                 }
             }
