@@ -51,19 +51,34 @@ There are two versions:
   Prospect Av (change the settings at the top to use another stop). No computer
   needed.
 
-## Install the native version (Windows/Mac/Linux computer, free Apple ID)
+## Install the native version (Windows/Mac computer, free Apple ID)
 
-1. **Get the build.** Every push to `main` builds the app on a GitHub Mac
-   (see the Actions tab, about 5 to 10 minutes). When it's green, download
-   `NextRTrain.ipa` from the [latest release](../../releases/tag/latest).
-2. **Install AltStore** on your iPhone by following the official guide at
+Every push to `main` builds the app on a GitHub Mac (see the Actions tab; about
+two minutes) and publishes it as the [latest release](../../releases/tag/latest):
+`TrainTimes.ipa`, plus `source.json`, an AltStore source that describes it. Each
+build gets its own version number (1.0.N, where N is the build number), so
+AltStore can tell when there's a new one.
+
+1. **Install AltStore** on your iPhone by following the official guide at
    [altstore.io](https://altstore.io). It needs AltServer running on your
    computer, and your iPhone on the same Wi-Fi. Turn on **Developer Mode** on the
    iPhone if it asks (Settings → Privacy & Security).
-3. **Put the `.ipa` on the iPhone** (AirDrop, iCloud Drive or Files), open AltStore,
-   go to **My Apps**, tap **+**, and pick `NextRTrain.ipa`. Sign in with your Apple
-   ID when it asks. The app and widget use two of the ten App IDs a free account
-   gets.
+2. **Add the Train Times source.** In AltStore, open **Sources**, tap **+**, and
+   paste:
+
+   ```
+   https://github.com/beanobots/TrainTimes/releases/download/latest/source.json
+   ```
+
+3. **Install it.** Open the source, tap **Train Times**, and tap **Free** (or
+   **Get**). Sign in with your Apple ID when it asks. The app and widget use two
+   of the ten App IDs a free account gets. New builds then show up as updates in
+   AltStore.
+
+   Or, without the source: download `TrainTimes.ipa` from the
+   [latest release](../../releases/tag/latest), put it on the iPhone (AirDrop,
+   iCloud Drive or Files), and in AltStore go to **My Apps**, tap **+**, and pick
+   it. You won't get update notices this way.
 4. **Choose your train.** Open **Train Times**. Tap **Station** to search for one
    (or filter by line first), then pick the line and direction. The widget
    updates right away.
