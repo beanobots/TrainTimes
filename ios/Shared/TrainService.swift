@@ -6,7 +6,7 @@ import FoundationNetworking
 /// Everything shown for a selection: its trains, and what might get in the way.
 struct Board: Sendable {
     var trains: [Arrival]
-    /// Alerts in effect for the line at this station and direction, most important first.
+    /// Alerts in effect for the chosen lines at this station and direction, most important first.
     var alerts: [ServiceAlert]
     /// Elevator and escalator outages at the station, current ones first.
     var outages: [Outage]
@@ -41,14 +41,24 @@ struct Notice: Hashable, Sendable {
 
 enum TrainService {
     /// Trains, alerts and (when asked for) elevator outages for `selection`, fetched
-    /// together. Only the trains are required: without alerts or outages the
-    /// board just has none.
+    /// together. Only the chosen lines' own train feeds are required: without the
+    /// other lines' feeds there are just no rerouted trains, and without alerts or
+    /// outages the board just has none.
     static func board(for selection: Selection, includingOutages: Bool = true, now: Date = Date()) async throws -> Board {
-        async let trainData = data(from: Lines.feedURL(for: selection.route))
+        let feeds = Lines.feedURLs(sharingTracksWith: selection.routes)
+        async let trainData = data(from: feeds.own)
+        async let otherTrainData = optionalData(from: feeds.others)
         async let alertData = optionalData(from: AlertsFeed.url)
         async let outageData = optionalData(from: includingOutages ? OutagesFeed.url : nil)
 
-        let trains = try SubwayFeed.upcoming(stopID: selection.stopID, route: selection.route, from: await trainData, now: now)
+        var arrivals: [Arrival] = []
+        for data in try await trainData {
+            arrivals += try SubwayFeed.arrivals(at: selection.stopID, in: data)
+        }
+        for data in await otherTrainData {
+            arrivals += (try? SubwayFeed.arrivals(at: selection.stopID, in: data)) ?? []
+        }
+        let trains = arrivals.filter { $0.time > now && selection.shows($0) }.sorted { $0.time < $1.time }
         let alerts = await alertData.flatMap { try? AlertsFeed.alerts(for: selection, in: $0, now: now) } ?? []
         var outages: [Outage] = []
         if let complex = selection.station?.complex, let data = await outageData {
@@ -66,8 +76,36 @@ enum TrainService {
         return data
     }
 
+    /// Fetched together; fails if any of them does.
+    private static func data(from urls: [URL]) async throws -> [Data] {
+        try await withThrowingTaskGroup(of: Data.self) { group in
+            for url in urls {
+                group.addTask { try await data(from: url) }
+            }
+            var all: [Data] = []
+            for try await data in group {
+                all.append(data)
+            }
+            return all
+        }
+    }
+
     private static func optionalData(from url: URL?) async -> Data? {
         guard let url else { return nil }
         return try? await data(from: url)
+    }
+
+    /// Fetched together; any that fail are left out.
+    private static func optionalData(from urls: [URL]) async -> [Data] {
+        await withTaskGroup(of: Data?.self) { group in
+            for url in urls {
+                group.addTask { await optionalData(from: url) }
+            }
+            var all: [Data] = []
+            for await data in group {
+                if let data { all.append(data) }
+            }
+            return all
+        }
     }
 }

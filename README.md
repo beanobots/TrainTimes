@@ -1,10 +1,18 @@
 # Train Times: a next-train widget for the NYC subway
 
 An iPhone widget with a live countdown to the next train, its arrival time, and
-the trains after it. You choose the station, line and direction in the app. Live
+the trains after it. You choose the station, lines and direction in the app. Live
 predictions are green; timetable times the MTA hasn't assigned a train to yet are
 white. It reads the MTA's free real-time feeds (no API key) and covers every
 subway line and the Staten Island Railway.
+
+**More than one line.** At a station with several lines, tap as many as you
+like, say the N and the R at Atlantic Av, and their trains show up together, each
+with its bullet.
+
+Trains of another line running on yours show up too, with their own bullet: an N
+or D running local on the R, say, or an E running local in Queens. Lines that
+always stop at your station stay out unless you choose them.
 
 The app also shows, for the station and line you choose:
 
@@ -20,23 +28,30 @@ The app also shows, for the station and line you choose:
 
 **More than one widget.** Every widget follows the app's choice until you give
 it its own: touch and hold the widget, tap **Edit Widget**, and pick a **Train**
-(search by station, then choose the line and direction), for example one widget
-for home and one for work. Each widget can also have its own walking time.
+(search by station, then choose a line, or all of the station's lines, and a
+direction), for example one widget for home and one for work. The app's current
+choice is at the top of the list, so a widget can have any mix of lines. Each widget can also have its own walking time.
 
 **Walking time.** Set how long it takes you to walk to the station (in the app,
 or per widget). Trains you can't reach in time are left out, the widget counts
 down to when to leave, and the app shows a leave time for each train.
 
-**On your way.** Tap **I'm on my way** in the app (or say "Start my train
-countdown in Train Times") to count down to your train on the Lock Screen and in
-the Dynamic Island. It can only get new times while the app runs, which needs no
-push server: tap the countdown's refresh button, or open the app. In between it
-keeps ticking, and once your train has gone a refresh moves it to the next one.
+**On your way.** Tap a widget's walk button, or **I'm on my way** in the app (or
+say "Start my train countdown in Train Times"), to count down to your train on the
+Lock Screen and in the Dynamic Island. It stays up until you tap the walk button
+again, on the widget or the countdown, or for 8 hours, when iOS ends it. It can
+only get new times while the app runs, which needs no push server: tap ↻ on the
+countdown or a widget, or open the app. In between it keeps ticking, and once your
+train has gone a refresh moves it to the next one.
 
 **Siri and Shortcuts.** Say "When's my next train in Train Times?" Siri answers
 with the next train you can catch (and when to leave, and any delays) and shows
 the next few. iOS needs the app's name in the phrase. Both actions are in the
 Shortcuts app too, where you can pick a different train.
+
+To ask without the app's name, make your own shortcut: in the Shortcuts app, tap
+**+**, add Train Times' **When's my next train?** action, and name the shortcut
+"When's the next train". Siri runs a shortcut when you say its name.
 
 The app follows your phone's light or dark setting. The widget always uses its
 dark station-board look, and on tinted Home Screens its line bullet turns into an
@@ -45,8 +60,8 @@ outline so the letter stays readable.
 There are two versions:
 
 - `ios/`: a native app and widget. You pick any station and line in the app, and
-  the widget moves on to the next train by itself and has a refresh button. It's
-  built on GitHub's Mac servers, so you don't need a Mac.
+  the widget moves on to the next train by itself and has refresh and walk
+  buttons. It's built on GitHub's Mac servers, so you don't need a Mac.
 - `scriptable/`: a script for the free Scriptable app, fixed to the R train at
   Prospect Av (change the settings at the top to use another stop). No computer
   needed.
@@ -80,8 +95,8 @@ AltStore can tell when there's a new one.
    iCloud Drive or Files), and in AltStore go to **My Apps**, tap **+**, and pick
    it. You won't get update notices this way.
 4. **Choose your train.** Open **Train Times**. Tap **Station** to search for one
-   (or filter by line first), then pick the line and direction. The widget
-   updates right away.
+   (or filter by line first), then pick one or more lines and the direction. The
+   widget updates right away.
 5. **Add the widget.** Touch and hold the Home Screen, tap **Edit → Add Widget**,
    and choose **Train Times**. Until you choose, it shows the R at Prospect Av,
    toward Manhattan.
@@ -100,6 +115,8 @@ If it lapses, the app stops opening until you refresh it in AltStore.
 Live, each time the widget or app refreshes (no API key needed):
 
 - Train times: the MTA's GTFS-realtime subway feeds (one per group of lines).
+  For a lettered line other than the L, the app reads all the connected lettered
+  lines' feeds, since a train rerouted onto your line stays in its own line's feed.
 - Service alerts: the MTA's subway alerts feed.
 - Elevator and escalator outages: the MTA's elevator and escalator status feed.
 

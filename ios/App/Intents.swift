@@ -72,7 +72,7 @@ struct NextTrainSnippet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                LineBullet(route: selection.route, size: 28)
+                LineBullets(routes: selection.routes, size: 28)
                 VStack(alignment: .leading, spacing: 0) {
                     Text(selection.station?.name ?? "").font(.headline)
                     Text(selection.station?.directionLabel(selection.direction) ?? "")
@@ -89,6 +89,9 @@ struct NextTrainSnippet: View {
                         .font(.headline)
                         .monospacedDigit()
                         .foregroundStyle(train.isLive ? Color.liveText : Color.primary)
+                    if selection.marksLine(of: train) {
+                        LineBullet(route: train.route, size: 18)
+                    }
                     if let terminal = train.terminal {
                         Text(terminal).foregroundStyle(.secondary).lineLimit(1)
                     }

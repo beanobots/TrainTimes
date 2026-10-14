@@ -34,20 +34,33 @@ enum Lines {
         ["6X": "6", "7X": "7", "FX": "F"][route] ?? route
     }
 
-    /// The MTA publishes one real-time feed per group of lines; no API key needed.
-    static func feedURL(for route: String) -> URL {
-        let suffix: String
-        switch route {
-        case "A", "C", "E", "H": suffix = "-ace"
-        case "B", "D", "F", "M", "FS": suffix = "-bdfm"
-        case "G": suffix = "-g"
-        case "J", "Z": suffix = "-jz"
-        case "L": suffix = "-l"
-        case "N", "Q", "R", "W": suffix = "-nqrw"
-        case "SI": suffix = "-si"
-        default: suffix = "" // 1 2 3 4 5 6 7 and the 42 St shuttle
+    /// The real-time feeds whose trains can stop on `routes`' tracks: their own,
+    /// and the others. The MTA publishes one per group of lines (no API key
+    /// needed), and a train rerouted onto another line stays in its own group's:
+    /// a D running local on the R is in the B D F M feed. The lettered lines all
+    /// connect, apart from the L; the numbered lines and Staten Island have their own tracks.
+    static func feedURLs(sharingTracksWith routes: [String]) -> (own: [URL], others: [URL]) {
+        var own: [String] = []
+        for suffix in routes.map(feedSuffix) where !own.contains(suffix) {
+            own.append(suffix)
         }
-        return URL(string: "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs\(suffix)")!
+        let connected = ["-ace", "-bdfm", "-g", "-jz", "-nqrw"]
+        let others = own.contains(where: { connected.contains($0) }) ? connected.filter { !own.contains($0) } : []
+        let url = { (suffix: String) in URL(string: "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs\(suffix)")! }
+        return (own.map(url), others.map(url))
+    }
+
+    private static func feedSuffix(for route: String) -> String {
+        switch route {
+        case "A", "C", "E", "H": "-ace"
+        case "B", "D", "F", "M", "FS": "-bdfm"
+        case "G": "-g"
+        case "J", "Z": "-jz"
+        case "L": "-l"
+        case "N", "Q", "R", "W": "-nqrw"
+        case "SI": "-si"
+        default: "" // 1 2 3 4 5 6 7 and the 42 St shuttle
+        }
     }
 
     /// The bullets to filter stations by, in the order the MTA draws them ("GS" stands for all the shuttles).

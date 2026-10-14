@@ -24,8 +24,14 @@ struct ContentView: View {
             List {
                 stationSection
                 if let station {
-                    Section("Line") {
-                        LinePicker(routes: station.routes, selection: $selection.route)
+                    Section {
+                        LinePicker(routes: station.routes, selection: $selection)
+                    } header: {
+                        Text(station.routes.count > 1 ? "Lines" : "Line")
+                    } footer: {
+                        if station.routes.count > 1 {
+                            Text("Tap more than one to see all their trains together.")
+                        }
                     }
                     Section("Direction") {
                         Picker("Direction", selection: $selection.direction) {
@@ -96,7 +102,7 @@ struct ContentView: View {
         } header: {
             Text("Station")
         } footer: {
-            Text("Widgets show this station, line and direction, unless you pick a train in a widget's Edit menu.")
+            Text("Widgets show this station, lines and direction, unless you pick a train in a widget's Edit menu.")
         }
     }
 
@@ -107,16 +113,20 @@ struct ContentView: View {
             } else if loadState == .loading && trains.isEmpty {
                 ProgressView()
             } else if trains.isEmpty {
-                Text("No \(LineStyle.of(selection.route).label) trains predicted").foregroundStyle(.secondary)
+                Text("No \(selection.linesLabel) trains predicted").foregroundStyle(.secondary)
             } else {
                 ForEach(trains.prefix(5), id: \.self) { train in
-                    TrainRow(train: train, leave: selection.walkMinutes > 0 ? selection.leaveTime(for: train) : nil)
+                    TrainRow(
+                        train: train,
+                        leave: selection.walkMinutes > 0 ? selection.leaveTime(for: train) : nil,
+                        marksLine: selection.marksLine(of: train)
+                    )
                 }
             }
         } header: {
             Text("Next trains")
         } footer: {
-            Text("Green times are live predictions. The rest are timetable times, which can change.")
+            Text("Green times are live predictions. The rest are timetable times, which can change. With more than one line, or another line running on yours, each train shows its bullet.")
         }
     }
 
@@ -143,7 +153,7 @@ struct ContentView: View {
         } header: {
             Text("On your way")
         } footer: {
-            Text("Counts down to your train on the Lock Screen and in the Dynamic Island. Tap its refresh button, or open the app, for new times.")
+            Text("Counts down to your train on the Lock Screen and in the Dynamic Island until you stop it. A widget's walk button starts and stops it too. Tap ↻ on it, or open the app, for new times.")
         }
     }
 
@@ -198,7 +208,7 @@ struct ContentView: View {
 
     private func mapSection(_ station: Station) -> some View {
         Section {
-            StationMap(station: station, route: selection.route)
+            StationMap(station: station, route: selection.firstRoute)
                 .frame(height: 240)
                 .listRowInsets(EdgeInsets())
             Link(destination: URL(string: "https://maps.apple.com/?daddr=\(station.lat),\(station.lon)&dirflg=w")!) {
@@ -233,6 +243,8 @@ private struct TrainRow: View {
     let train: Arrival
     /// When to set off, if a walking time is set.
     let leave: Date?
+    /// Shown with its bullet: one of several lines chosen, or an N running local on the R, say.
+    let marksLine: Bool
 
     var body: some View {
         HStack(spacing: 8) {
@@ -240,6 +252,9 @@ private struct TrainRow: View {
                 .font(.headline)
                 .monospacedDigit()
                 .foregroundStyle(train.isLive ? Color.liveText : Color.primary)
+            if marksLine {
+                LineBullet(route: train.route, size: 20)
+            }
             if let terminal = train.terminal {
                 Text(terminal).foregroundStyle(.secondary).lineLimit(1)
             }
@@ -379,24 +394,26 @@ private struct EntranceMark: View {
     }
 }
 
-/// The bullets of the lines that stop at the station; tap one to choose it.
+/// The bullets of the lines that stop at the station; tap one to add it to the
+/// chosen lines or take it out (the last one stays).
 private struct LinePicker: View {
     let routes: [String]
-    @Binding var selection: String
+    @Binding var selection: Selection
 
     var body: some View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 48))], spacing: 12) {
             ForEach(routes, id: \.self) { route in
+                let chosen = selection.routes.contains(route)
                 Button {
-                    selection = route
+                    selection.toggle(route)
                 } label: {
                     LineBullet(route: route, size: 40)
                         .padding(4)
-                        .overlay(Circle().stroke(Color.accentColor, lineWidth: selection == route ? 3 : 0))
-                        .opacity(selection == route ? 1 : 0.5)
+                        .overlay(Circle().stroke(Color.accentColor, lineWidth: chosen ? 3 : 0))
+                        .opacity(chosen ? 1 : 0.5)
                 }
                 .buttonStyle(.plain)
-                .accessibilityAddTraits(selection == route ? .isSelected : [])
+                .accessibilityAddTraits(chosen ? .isSelected : [])
             }
         }
         .padding(.vertical, 6)

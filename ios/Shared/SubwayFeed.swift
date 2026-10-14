@@ -15,14 +15,10 @@ struct Arrival: Hashable, Sendable {
     var trip: String = ""
 
     var terminal: String? { StationDirectory.terminalName(forStop: lastStop) }
+    var lineLabel: String { LineStyle.of(route).label }
 }
 
 enum SubwayFeed {
-    /// The trains of `route` due at the platform `stopID` after `now`, soonest first.
-    static func upcoming(stopID: String, route: String, from data: Data, now: Date = Date()) throws -> [Arrival] {
-        try arrivals(at: stopID, in: data).filter { $0.route == route && $0.time > now }
-    }
-
     /// Decodes just enough of a GTFS-realtime feed (gtfs.org/realtime) to list,
     /// for every trip that stops at `stopID`, its route, arrival time, last
     /// stop and whether a train is assigned to it, so the widget needs no

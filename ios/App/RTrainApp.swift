@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// The app is where you choose the station, line and direction the widget shows.
+/// The app is where you choose the station, lines and direction the widget shows.
 @main
 struct RTrainApp: App {
     @Environment(\.scenePhase) private var scenePhase

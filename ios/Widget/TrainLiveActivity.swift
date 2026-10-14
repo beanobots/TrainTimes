@@ -3,7 +3,7 @@ import SwiftUI
 import WidgetKit
 
 /// The countdown to one train on the Lock Screen and in the Dynamic Island,
-/// started from the app ("I'm on my way") or a shortcut.
+/// started from the app ("I'm on my way"), a widget's walk button or a shortcut.
 struct TrainLiveActivity: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: TrainActivityAttributes.self) { context in
@@ -14,7 +14,7 @@ struct TrainLiveActivity: Widget {
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
                     HStack(spacing: 6) {
-                        LineBullet(route: context.attributes.selection.route, size: 24)
+                        LineBullet(route: trainRoute(context), size: 24)
                         VStack(alignment: .leading, spacing: 0) {
                             Text(context.attributes.stationName).font(.caption.bold()).lineLimit(1)
                             Text(context.attributes.heading).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
@@ -32,14 +32,11 @@ struct TrainLiveActivity: Widget {
                     HStack {
                         Text(summary(context)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                         Spacer()
-                        Button(intent: RefreshCountdownIntent()) {
-                            Image(systemName: "arrow.clockwise")
-                        }
-                        .accessibilityLabel("Refresh")
+                        buttons(context)
                     }
                 }
             } compactLeading: {
-                LineBullet(route: context.attributes.selection.route, size: 20)
+                LineBullet(route: trainRoute(context), size: 20)
             } compactTrailing: {
                 countdown(context)
                     .monospacedDigit()
@@ -47,9 +44,9 @@ struct TrainLiveActivity: Widget {
                     .frame(maxWidth: 52)
                     .foregroundStyle(context.state.isLive ? Color.liveGreen : .white)
             } minimal: {
-                LineBullet(route: context.attributes.selection.route, size: 20)
+                LineBullet(route: trainRoute(context), size: 20)
             }
-            .keylineTint(Color(hex: LineStyle.of(context.attributes.selection.route).color))
+            .keylineTint(Color(hex: LineStyle.of(trainRoute(context)).color))
         }
     }
 }
@@ -60,20 +57,14 @@ private struct CountdownBanner: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
-                LineBullet(route: context.attributes.selection.route, size: 28)
+                LineBullet(route: trainRoute(context), size: 28)
                 VStack(alignment: .leading, spacing: 0) {
                     Text(context.attributes.stationName).font(.headline).foregroundStyle(.white)
                     Text(context.attributes.heading).font(.caption).foregroundStyle(Color.boardGray)
                 }
                 .lineLimit(1)
                 Spacer()
-                Button(intent: RefreshCountdownIntent()) {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Color.boardGray)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Refresh")
+                buttons(context)
             }
             countdown(context)
                 .font(.system(size: 40, weight: .bold, design: .rounded))
@@ -100,17 +91,39 @@ private struct CountdownBanner: View {
     }
 }
 
+/// ↻ and a lit walk button, which stops the countdown.
+private func buttons(_ context: ActivityViewContext<TrainActivityAttributes>) -> some View {
+    HStack(spacing: 6) {
+        RefreshButton()
+        WalkButton(intent: StopCountdownIntent(), route: trainRoute(context), isOn: true)
+    }
+}
+
 /// Counts down to the train, live, and stops at 0:00.
 private func countdown(_ context: ActivityViewContext<TrainActivityAttributes>) -> Text {
     let state = context.state
     return Text(timerInterval: min(state.updated, state.train)...state.train, countsDown: true)
 }
 
-/// "8:22 AM · Forest Hills · then 8:31, 8:39"
+/// The line of the train it's counting down to, which can be another one running on yours.
+private func trainRoute(_ context: ActivityViewContext<TrainActivityAttributes>) -> String {
+    context.state.route ?? context.attributes.selection.firstRoute
+}
+
+/// "8:22 AM · Forest Hills · then 8:31, 8:39", naming the line of any later
+/// train that isn't on this one's: "then R 8:31, 8:39".
 private func summary(_ context: ActivityViewContext<TrainActivityAttributes>) -> String {
     let state = context.state
+    let route = trainRoute(context)
     var parts = [Spoken.clock(state.train)]
     if let terminal = state.terminal { parts.append(terminal) }
-    if !state.following.isEmpty { parts.append("then " + state.following.map(\.clock).joined(separator: ", ")) }
+    if !state.following.isEmpty {
+        let times = state.following.indices.map { index -> String in
+            let time = state.following[index].clock
+            guard let routes = state.followingRoutes, index < routes.count, routes[index] != route else { return time }
+            return "\(LineStyle.of(routes[index]).label) \(time)"
+        }
+        parts.append("then " + times.joined(separator: ", "))
+    }
     return parts.joined(separator: " · ")
 }

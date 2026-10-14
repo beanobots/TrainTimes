@@ -1,6 +1,7 @@
 import ActivityKit
 import AppIntents
 import Foundation
+import WidgetKit
 
 /// A countdown to one train on the Lock Screen and in the Dynamic Island.
 struct TrainActivityAttributes: ActivityAttributes {
@@ -16,6 +17,11 @@ struct TrainActivityAttributes: ActivityAttributes {
         /// "Delays", "Elevator out", when there's something to know.
         var notice: String?
         var updated: Date
+        /// Its line, which can be another one running on yours; nil from countdowns
+        /// started before trains of other lines were shown.
+        var route: String? = nil
+        /// The lines of `following`.
+        var followingRoutes: [String]? = nil
     }
 
     var selection: Selection
@@ -23,15 +29,62 @@ struct TrainActivityAttributes: ActivityAttributes {
     var heading: String
 }
 
-/// The countdown's refresh button. iOS runs it in the app, which fetches new times.
-struct RefreshCountdownIntent: LiveActivityIntent {
-    static let title: LocalizedStringResource = "Refresh train countdown"
+// Starting and updating Live Activities is only allowed in the app itself, so
+// iOS runs these in the app; in the widget they're only there for the buttons.
+
+/// The ↻ on the widgets and the countdown: new times for both.
+struct RefreshIntent: LiveActivityIntent {
+    static let title: LocalizedStringResource = "Refresh train times"
     static let isDiscoverable = false
 
     func perform() async throws -> some IntentResult {
-        // Starting and updating Live Activities is only allowed in the app itself
         #if APP
         await TrainActivityController.refresh()
+        WidgetCenter.shared.reloadAllTimelines()
+        #endif
+        return .result()
+    }
+}
+
+/// A widget's walk button: starts the countdown to that widget's train, or
+/// stops it if it's already counting down to that train.
+struct ToggleCountdownIntent: LiveActivityIntent {
+    static let title: LocalizedStringResource = "I'm on my way"
+    static let isDiscoverable = false
+
+    /// A `Selection.trainID`.
+    @Parameter(title: "Train")
+    var trainID: String
+
+    @Parameter(title: "Walking time (minutes)")
+    var walkMinutes: Int
+
+    init() {}
+
+    init(selection: Selection) {
+        trainID = selection.trainID
+        walkMinutes = selection.walkMinutes
+    }
+
+    func perform() async throws -> some IntentResult {
+        #if APP
+        if var selection = StopEntity(id: trainID)?.selection(basedOn: SharedStore.load()) {
+            selection.walkMinutes = walkMinutes
+            try await TrainActivityController.toggle(for: selection)
+        }
+        #endif
+        return .result()
+    }
+}
+
+/// The countdown's own walk button.
+struct StopCountdownIntent: LiveActivityIntent {
+    static let title: LocalizedStringResource = "Stop train countdown"
+    static let isDiscoverable = false
+
+    func perform() async throws -> some IntentResult {
+        #if APP
+        await TrainActivityController.endAll()
         #endif
         return .result()
     }

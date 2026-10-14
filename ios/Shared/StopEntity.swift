@@ -1,54 +1,66 @@
 import AppIntents
 import Foundation
 
-/// One line at one platform, e.g. "Prospect Av: R to Manhattan": what a widget's
-/// Edit menu or a shortcut is set to.
+/// One or more lines at one platform, e.g. "Prospect Av: R to Manhattan": what a
+/// widget's Edit menu or a shortcut is set to.
 struct StopEntity: AppEntity {
     static let typeDisplayRepresentation: TypeDisplayRepresentation = "Train"
     static let defaultQuery = StopQuery()
 
-    /// "R34:N:R": station, direction, line.
+    /// "R34:N:R": station, direction, line; "R31:N:N,R" for more than one line.
     let id: String
     let stationID: String
     let direction: Direction
-    let route: String
+    let routes: [String]
 
-    init(stationID: String, direction: Direction, route: String) {
+    init(stationID: String, direction: Direction, routes: [String]) {
         self.stationID = stationID
         self.direction = direction
-        self.route = route
-        id = "\(stationID):\(direction.rawValue):\(route)"
+        self.routes = routes
+        id = "\(stationID):\(direction.rawValue):\(routes.joined(separator: ","))"
     }
 
     init?(id: String) {
         let parts = id.split(separator: ":").map(String.init)
         guard parts.count == 3,
               let direction = Direction(rawValue: parts[1]),
-              let station = StationDirectory.station(id: parts[0]),
-              station.routes.contains(parts[2]) else { return nil }
-        self.init(stationID: parts[0], direction: direction, route: parts[2])
+              let station = StationDirectory.station(id: parts[0]) else { return nil }
+        let routes = parts[2].split(separator: ",").map(String.init)
+        guard !routes.isEmpty, routes.allSatisfy(station.routes.contains) else { return nil }
+        self.init(stationID: parts[0], direction: direction, routes: routes)
     }
 
     var station: Station? { StationDirectory.station(id: stationID) }
 
     var displayRepresentation: DisplayRepresentation {
         let name = station?.name ?? stationID
-        let line = LineStyle.of(route).label
+        let lines = routes.map { LineStyle.of($0).label }.joined(separator: "/")
         let heading = station?.directionLabel(direction) ?? ""
-        return DisplayRepresentation(title: "\(name): \(line) \(heading)", subtitle: "\(station?.borough ?? "")")
+        return DisplayRepresentation(title: "\(name): \(lines) \(heading)", subtitle: "\(station?.borough ?? "")")
     }
 
     /// The selection this stands for, keeping the app's other settings (walking time, elevator alerts).
     func selection(basedOn app: Selection) -> Selection {
-        Selection(stationID: stationID, route: route, direction: direction, elevatorAlerts: app.elevatorAlerts, walkMinutes: app.walkMinutes)
+        Selection(stationID: stationID, routes: routes, direction: direction, elevatorAlerts: app.elevatorAlerts, walkMinutes: app.walkMinutes)
     }
 
-    /// Every line at every platform, both directions: about 1,500.
-    static let all: [StopEntity] = StationDirectory.all.flatMap { station in
-        station.routes.flatMap { route in
-            Direction.allCases.map { StopEntity(stationID: station.id, direction: $0, route: route) }
+    /// At `station`, both directions of each line on its own, and of all its
+    /// lines together where it has more than one.
+    static func choices(at station: Station) -> [StopEntity] {
+        let lines = station.routes.map { [$0] } + (station.routes.count > 1 ? [station.routes] : [])
+        return lines.flatMap { routes in
+            Direction.allCases.map { StopEntity(stationID: station.id, direction: $0, routes: routes) }
         }
     }
+
+    /// Every choice at every station: about 2,000.
+    static let all: [StopEntity] = StationDirectory.all.flatMap(choices(at:))
+}
+
+extension Selection {
+    /// Its station, direction and lines, as a `StopEntity` id: which train this is,
+    /// whatever the walking time.
+    var trainID: String { StopEntity(stationID: stationID, direction: direction, routes: routes).id }
 }
 
 struct StopQuery: EntityStringQuery {
@@ -71,10 +83,7 @@ struct StopQuery: EntityStringQuery {
     func suggestedEntities() async throws -> [StopEntity] {
         let app = SharedStore.load()
         guard let station = app.station else { return [] }
-        let chosen = StopEntity(stationID: station.id, direction: app.direction, route: app.route)
-        let others = station.routes.flatMap { route in
-            Direction.allCases.map { StopEntity(stationID: station.id, direction: $0, route: route) }
-        }
-        return [chosen] + others.filter { $0.id != chosen.id }
+        let chosen = StopEntity(stationID: station.id, direction: app.direction, routes: app.routes)
+        return [chosen] + StopEntity.choices(at: station).filter { $0.id != chosen.id }
     }
 }
