@@ -46,7 +46,7 @@ enum AlertsFeed {
                 (period.start ?? 0) <= time && (period.end.map { $0 == 0 || $0 > time } ?? true)
             }
             let applies = (alert.informed_entity ?? []).contains { informed in
-                guard let route = informed.route_id, Lines.normalized(route) == selection.route else { return false }
+                guard let route = informed.route_id, selection.routes.contains(Lines.normalized(route)) else { return false }
                 if let stop = informed.stop_id, stop != selection.stationID, stop != selection.stopID { return false }
                 if let informedDirection = informed.direction_id, informedDirection != direction { return false }
                 return true

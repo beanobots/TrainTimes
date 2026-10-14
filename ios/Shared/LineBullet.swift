@@ -52,6 +52,31 @@ struct LineBullet: View {
     }
 }
 
+/// The bullets of the chosen lines in about the room of one: side by side for
+/// two, two rows of two for three or four.
+struct LineBullets: View {
+    let routes: [String]
+    let size: CGFloat
+
+    var body: some View {
+        if routes.count < 2 {
+            LineBullet(route: routes.first ?? "", size: size)
+        } else if routes.count == 2 {
+            HStack(spacing: 2) {
+                ForEach(routes, id: \.self) { LineBullet(route: $0, size: size * 0.8) }
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(Array(stride(from: 0, to: routes.count, by: 2)), id: \.self) { start in
+                    HStack(spacing: 2) {
+                        ForEach(routes[start..<min(start + 2, routes.count)], id: \.self) { LineBullet(route: $0, size: size * 0.6) }
+                    }
+                }
+            }
+        }
+    }
+}
+
 extension ServiceAlert.Kind {
     var symbol: String {
         switch self {

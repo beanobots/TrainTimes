@@ -6,7 +6,7 @@ enum Spoken {
     /// `trains` are the ones you can still catch, soonest first; any of another
     /// line running on yours are named by their own: "… is at 8:22 AM, on the N."
     static func nextTrain(selection: Selection, trains: [Arrival], notice: String?, now: Date) -> String {
-        let line = LineStyle.of(selection.route).label
+        let lines = either(selection.routes.map { LineStyle.of($0).label })
         let station = selection.station?.name ?? "your station"
         var sentence: String
         if let next = trains.first {
@@ -27,12 +27,18 @@ enum Spoken {
                 if !after.isEmpty { sentence += " The one after is at \(after)." }
             }
         } else {
-            sentence = "There are no \(trainsPlural(line: line, selection: selection)) predicted at \(station) right now."
+            sentence = "There are no \(trainsPlural(line: lines, selection: selection)) predicted at \(station) right now."
         }
         if let notice {
             sentence += " Heads up: \(notice.lowercased())."
         }
         return sentence
+    }
+
+    /// "R", "N or R", "D, N or R".
+    static func either(_ labels: [String]) -> String {
+        guard let last = labels.last, labels.count > 1 else { return labels.first ?? "" }
+        return labels.dropLast().joined(separator: ", ") + " or " + last
     }
 
     /// "R to Manhattan", or "northbound R" where the MTA gives the direction no name.

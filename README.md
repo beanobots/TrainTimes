@@ -1,14 +1,18 @@
 # Train Times: a next-train widget for the NYC subway
 
 An iPhone widget with a live countdown to the next train, its arrival time, and
-the trains after it. You choose the station, line and direction in the app. Live
+the trains after it. You choose the station, lines and direction in the app. Live
 predictions are green; timetable times the MTA hasn't assigned a train to yet are
 white. It reads the MTA's free real-time feeds (no API key) and covers every
 subway line and the Staten Island Railway.
 
+**More than one line.** At a station with several lines, tap as many as you
+like, say the N and the R at Atlantic Av, and their trains show up together, each
+with its bullet.
+
 Trains of another line running on yours show up too, with their own bullet: an N
 or D running local on the R, say, or an E running local in Queens. Lines that
-always stop at your station stay out, since you can choose them instead.
+always stop at your station stay out unless you choose them.
 
 The app also shows, for the station and line you choose:
 
@@ -24,8 +28,9 @@ The app also shows, for the station and line you choose:
 
 **More than one widget.** Every widget follows the app's choice until you give
 it its own: touch and hold the widget, tap **Edit Widget**, and pick a **Train**
-(search by station, then choose the line and direction), for example one widget
-for home and one for work. Each widget can also have its own walking time.
+(search by station, then choose a line, or all of the station's lines, and a
+direction), for example one widget for home and one for work. The app's current
+choice is at the top of the list, so a widget can have any mix of lines. Each widget can also have its own walking time.
 
 **Walking time.** Set how long it takes you to walk to the station (in the app,
 or per widget). Trains you can't reach in time are left out, the widget counts
@@ -90,8 +95,8 @@ AltStore can tell when there's a new one.
    iCloud Drive or Files), and in AltStore go to **My Apps**, tap **+**, and pick
    it. You won't get update notices this way.
 4. **Choose your train.** Open **Train Times**. Tap **Station** to search for one
-   (or filter by line first), then pick the line and direction. The widget
-   updates right away.
+   (or filter by line first), then pick one or more lines and the direction. The
+   widget updates right away.
 5. **Add the widget.** Touch and hold the Home Screen, tap **Edit → Add Widget**,
    and choose **Train Times**. Until you choose, it shows the R at Prospect Av,
    toward Manhattan.

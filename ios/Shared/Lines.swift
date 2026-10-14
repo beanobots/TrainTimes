@@ -34,16 +34,20 @@ enum Lines {
         ["6X": "6", "7X": "7", "FX": "F"][route] ?? route
     }
 
-    /// The real-time feeds whose trains can stop on `route`'s tracks, its own
-    /// first. The MTA publishes one per group of lines (no API key needed), and
-    /// a train rerouted onto another line stays in its own group's: a D running
-    /// local on the R is in the B D F M feed. The lettered lines all connect,
-    /// apart from the L; the numbered lines and Staten Island have their own tracks.
-    static func feedURLs(sharingTracksWith route: String) -> [URL] {
-        let own = feedSuffix(for: route)
+    /// The real-time feeds whose trains can stop on `routes`' tracks: their own,
+    /// and the others. The MTA publishes one per group of lines (no API key
+    /// needed), and a train rerouted onto another line stays in its own group's:
+    /// a D running local on the R is in the B D F M feed. The lettered lines all
+    /// connect, apart from the L; the numbered lines and Staten Island have their own tracks.
+    static func feedURLs(sharingTracksWith routes: [String]) -> (own: [URL], others: [URL]) {
+        var own: [String] = []
+        for suffix in routes.map(feedSuffix) where !own.contains(suffix) {
+            own.append(suffix)
+        }
         let connected = ["-ace", "-bdfm", "-g", "-jz", "-nqrw"]
-        let suffixes = connected.contains(own) ? [own] + connected.filter { $0 != own } : [own]
-        return suffixes.map { URL(string: "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs\($0)")! }
+        let others = own.contains(where: { connected.contains($0) }) ? connected.filter { !own.contains($0) } : []
+        let url = { (suffix: String) in URL(string: "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs\(suffix)")! }
+        return (own.map(url), others.map(url))
     }
 
     private static func feedSuffix(for route: String) -> String {

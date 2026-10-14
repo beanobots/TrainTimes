@@ -95,7 +95,7 @@ private struct CountdownBanner: View {
 private func buttons(_ context: ActivityViewContext<TrainActivityAttributes>) -> some View {
     HStack(spacing: 6) {
         RefreshButton()
-        WalkButton(intent: StopCountdownIntent(), route: context.attributes.selection.route, isOn: true)
+        WalkButton(intent: StopCountdownIntent(), route: trainRoute(context), isOn: true)
     }
 }
 
@@ -107,7 +107,7 @@ private func countdown(_ context: ActivityViewContext<TrainActivityAttributes>) 
 
 /// The line of the train it's counting down to, which can be another one running on yours.
 private func trainRoute(_ context: ActivityViewContext<TrainActivityAttributes>) -> String {
-    context.state.route ?? context.attributes.selection.route
+    context.state.route ?? context.attributes.selection.firstRoute
 }
 
 /// "8:22 AM · Forest Hills · then 8:31, 8:39", naming the line of any later

@@ -32,13 +32,14 @@ struct TrainEntry: TimelineEntry {
 
     var stationName: String { selection.station?.name ?? "Choose a station" }
     var heading: String { selection.station?.directionLabel(selection.direction) ?? "" }
-    var lineLabel: String { LineStyle.of(selection.route).label }
+    /// "R", or "N/R" with more than one line chosen.
+    var lineLabel: String { selection.linesLabel }
 }
 
 /// What a widget's Edit menu offers: its own train, and its own walking time.
 struct TrainWidgetIntent: WidgetConfigurationIntent {
     static let title: LocalizedStringResource = "Choose a train"
-    static let description = IntentDescription("Pick a station, line and direction for this widget, or leave Train empty to show the one chosen in the app.")
+    static let description = IntentDescription("Pick a station, lines and direction for this widget, or leave Train empty to show the one chosen in the app.")
 
     @Parameter(title: "Train")
     var stop: StopEntity?
@@ -104,7 +105,6 @@ struct TrainWidgetView: View {
 
     private var next: Arrival? { entry.trains.first }
     private var later: ArraySlice<Arrival> { entry.trains.dropFirst() }
-    private var route: String { entry.selection.route }
     /// With a walking time, the countdown is to when to leave.
     private var walking: Bool { entry.selection.walkMinutes > 0 }
     private var noTrains: String { entry.problem ?? "No \(entry.lineLabel) trains predicted" }
@@ -139,7 +139,7 @@ struct TrainWidgetView: View {
                 Text("\(entry.lineLabel) · \(entry.stationName)").font(.headline).lineLimit(1)
                 if let next {
                     HStack(alignment: .firstTextBaseline, spacing: 4) {
-                        if next.route != route { LineBullet(route: next.route, size: 16) }
+                        if entry.selection.marksLine(of: next) { LineBullet(route: next.route, size: 16) }
                         if walking { Text("Leave in").font(.caption) }
                         countdown(to: next)
                             .font(.system(size: 22, weight: .bold, design: .rounded))
@@ -199,7 +199,7 @@ struct TrainWidgetView: View {
 
     private var header: some View {
         HStack(spacing: 7) {
-            LineBullet(route: route, size: 26)
+            LineBullets(routes: entry.selection.routes, size: 26)
             VStack(alignment: .leading, spacing: 0) {
                 Text(entry.stationName)
                     .font(.subheadline.bold())
@@ -234,7 +234,7 @@ struct TrainWidgetView: View {
                 Text(next.time.formatted(date: .omitted, time: .shortened) + (walking ? " train" : ""))
                     .foregroundStyle(next.statusColor)
                     .layoutPriority(1)
-                if next.route != route {
+                if entry.selection.marksLine(of: next) {
                     LineBullet(route: next.route, size: 15)
                 }
                 // The small widget has no room for where it's going
@@ -260,7 +260,7 @@ struct TrainWidgetView: View {
                         .font(.subheadline.weight(.semibold))
                         .monospacedDigit()
                         .foregroundStyle(train.statusColor)
-                    if train.route != route {
+                    if entry.selection.marksLine(of: train) {
                         LineBullet(route: train.route, size: 15)
                     }
                     // The headline train already names where it's going; only say so for trains that differ
@@ -275,15 +275,15 @@ struct TrainWidgetView: View {
         }
     }
 
-    /// "8:12", or "N 8:12" for a train of another line running on this one.
+    /// "8:12", or "N 8:12" where it could be more than one line.
     private func time(_ train: Arrival) -> String {
-        train.route == route ? train.time.clock : "\(train.lineLabel) \(train.time.clock)"
+        entry.selection.marksLine(of: train) ? "\(train.lineLabel) \(train.time.clock)" : train.time.clock
     }
 
-    /// "R 8:12 · 8:20 · 8:31", or, with another line among them, each train's
-    /// own: "N 8:12 · R 8:20 · D 8:31".
+    /// "R 8:12 · 8:20 · 8:31", or, where they could be more than one line, each
+    /// train's own: "N 8:12 · R 8:20 · D 8:31".
     private func inlineTimes(_ trains: [Arrival]) -> String {
-        if trains.allSatisfy({ $0.route == route }) {
+        if !trains.contains(where: entry.selection.marksLine) {
             return "\(entry.lineLabel) " + trains.map(\.time.clock).joined(separator: " · ")
         }
         return trains.map { "\($0.lineLabel) \($0.time.clock)" }.joined(separator: " · ")
@@ -293,7 +293,7 @@ struct TrainWidgetView: View {
     private var buttons: some View {
         HStack(spacing: 6) {
             RefreshButton()
-            WalkButton(intent: ToggleCountdownIntent(selection: entry.selection), route: route, isOn: entry.countingDown)
+            WalkButton(intent: ToggleCountdownIntent(selection: entry.selection), route: entry.selection.firstRoute, isOn: entry.countingDown)
         }
     }
 
