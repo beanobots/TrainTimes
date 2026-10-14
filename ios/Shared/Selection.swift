@@ -35,6 +35,13 @@ struct Selection: Codable, Hashable, Sendable {
         train.time.addingTimeInterval(-TimeInterval(walkMinutes * 60))
     }
 
+    /// Trains of this line, and of any line that doesn't usually stop here, which
+    /// must be running on this one: an N running local on the R. Lines that do
+    /// usually stop here are left out; they're the station's other choices.
+    func shows(_ train: Arrival) -> Bool {
+        train.route == route || !(station?.routes.contains(train.route) ?? true)
+    }
+
     /// The trains you can still reach in time if you leave at or after `now`.
     func catchable(_ trains: [Arrival], now: Date) -> [Arrival] {
         trains.filter { leaveTime(for: $0) > now }

@@ -41,14 +41,21 @@ struct Notice: Hashable, Sendable {
 
 enum TrainService {
     /// Trains, alerts and (when asked for) elevator outages for `selection`, fetched
-    /// together. Only the trains are required: without alerts or outages the
-    /// board just has none.
+    /// together. Only the line's own train feed is required: without the other
+    /// lines' feeds there are just no rerouted trains, and without alerts or
+    /// outages the board just has none.
     static func board(for selection: Selection, includingOutages: Bool = true, now: Date = Date()) async throws -> Board {
-        async let trainData = data(from: Lines.feedURL(for: selection.route))
+        let feeds = Lines.feedURLs(sharingTracksWith: selection.route)
+        async let trainData = data(from: feeds[0])
+        async let otherTrainData = optionalData(from: Array(feeds.dropFirst()))
         async let alertData = optionalData(from: AlertsFeed.url)
         async let outageData = optionalData(from: includingOutages ? OutagesFeed.url : nil)
 
-        let trains = try SubwayFeed.upcoming(stopID: selection.stopID, route: selection.route, from: await trainData, now: now)
+        var arrivals = try SubwayFeed.arrivals(at: selection.stopID, in: await trainData)
+        for data in await otherTrainData {
+            arrivals += (try? SubwayFeed.arrivals(at: selection.stopID, in: data)) ?? []
+        }
+        let trains = arrivals.filter { $0.time > now && selection.shows($0) }.sorted { $0.time < $1.time }
         let alerts = await alertData.flatMap { try? AlertsFeed.alerts(for: selection, in: $0, now: now) } ?? []
         var outages: [Outage] = []
         if let complex = selection.station?.complex, let data = await outageData {
@@ -69,5 +76,19 @@ enum TrainService {
     private static func optionalData(from url: URL?) async -> Data? {
         guard let url else { return nil }
         return try? await data(from: url)
+    }
+
+    /// Fetched together; any that fail are left out.
+    private static func optionalData(from urls: [URL]) async -> [Data] {
+        await withTaskGroup(of: Data?.self) { group in
+            for url in urls {
+                group.addTask { await optionalData(from: url) }
+            }
+            var all: [Data] = []
+            for await data in group {
+                if let data { all.append(data) }
+            }
+            return all
+        }
     }
 }

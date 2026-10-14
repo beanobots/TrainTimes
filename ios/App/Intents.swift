@@ -89,6 +89,9 @@ struct NextTrainSnippet: View {
                         .font(.headline)
                         .monospacedDigit()
                         .foregroundStyle(train.isLive ? Color.liveText : Color.primary)
+                    if train.route != selection.route {
+                        LineBullet(route: train.route, size: 18)
+                    }
                     if let terminal = train.terminal {
                         Text(terminal).foregroundStyle(.secondary).lineLimit(1)
                     }

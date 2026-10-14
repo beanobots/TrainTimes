@@ -6,6 +6,10 @@ predictions are green; timetable times the MTA hasn't assigned a train to yet ar
 white. It reads the MTA's free real-time feeds (no API key) and covers every
 subway line and the Staten Island Railway.
 
+Trains of another line running on yours show up too, with their own bullet: an N
+or D running local on the R, say, or an E running local in Queens. Lines that
+always stop at your station stay out, since you can choose them instead.
+
 The app also shows, for the station and line you choose:
 
 - **Service alerts**: delays, suspensions, skipped stops and other changes in
@@ -106,6 +110,8 @@ If it lapses, the app stops opening until you refresh it in AltStore.
 Live, each time the widget or app refreshes (no API key needed):
 
 - Train times: the MTA's GTFS-realtime subway feeds (one per group of lines).
+  For a lettered line other than the L, the app reads all the connected lettered
+  lines' feeds, since a train rerouted onto your line stays in its own line's feed.
 - Service alerts: the MTA's subway alerts feed.
 - Elevator and escalator outages: the MTA's elevator and escalator status feed.
 

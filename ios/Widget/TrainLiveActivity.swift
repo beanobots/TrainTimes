@@ -14,7 +14,7 @@ struct TrainLiveActivity: Widget {
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
                     HStack(spacing: 6) {
-                        LineBullet(route: context.attributes.selection.route, size: 24)
+                        LineBullet(route: trainRoute(context), size: 24)
                         VStack(alignment: .leading, spacing: 0) {
                             Text(context.attributes.stationName).font(.caption.bold()).lineLimit(1)
                             Text(context.attributes.heading).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
@@ -36,7 +36,7 @@ struct TrainLiveActivity: Widget {
                     }
                 }
             } compactLeading: {
-                LineBullet(route: context.attributes.selection.route, size: 20)
+                LineBullet(route: trainRoute(context), size: 20)
             } compactTrailing: {
                 countdown(context)
                     .monospacedDigit()
@@ -44,9 +44,9 @@ struct TrainLiveActivity: Widget {
                     .frame(maxWidth: 52)
                     .foregroundStyle(context.state.isLive ? Color.liveGreen : .white)
             } minimal: {
-                LineBullet(route: context.attributes.selection.route, size: 20)
+                LineBullet(route: trainRoute(context), size: 20)
             }
-            .keylineTint(Color(hex: LineStyle.of(context.attributes.selection.route).color))
+            .keylineTint(Color(hex: LineStyle.of(trainRoute(context)).color))
         }
     }
 }
@@ -57,7 +57,7 @@ private struct CountdownBanner: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
-                LineBullet(route: context.attributes.selection.route, size: 28)
+                LineBullet(route: trainRoute(context), size: 28)
                 VStack(alignment: .leading, spacing: 0) {
                     Text(context.attributes.stationName).font(.headline).foregroundStyle(.white)
                     Text(context.attributes.heading).font(.caption).foregroundStyle(Color.boardGray)
@@ -105,11 +105,25 @@ private func countdown(_ context: ActivityViewContext<TrainActivityAttributes>) 
     return Text(timerInterval: min(state.updated, state.train)...state.train, countsDown: true)
 }
 
-/// "8:22 AM · Forest Hills · then 8:31, 8:39"
+/// The line of the train it's counting down to, which can be another one running on yours.
+private func trainRoute(_ context: ActivityViewContext<TrainActivityAttributes>) -> String {
+    context.state.route ?? context.attributes.selection.route
+}
+
+/// "8:22 AM · Forest Hills · then 8:31, 8:39", naming the line of any later
+/// train that isn't on this one's: "then R 8:31, 8:39".
 private func summary(_ context: ActivityViewContext<TrainActivityAttributes>) -> String {
     let state = context.state
+    let route = trainRoute(context)
     var parts = [Spoken.clock(state.train)]
     if let terminal = state.terminal { parts.append(terminal) }
-    if !state.following.isEmpty { parts.append("then " + state.following.map(\.clock).joined(separator: ", ")) }
+    if !state.following.isEmpty {
+        let times = state.following.indices.map { index -> String in
+            let time = state.following[index].clock
+            guard let routes = state.followingRoutes, index < routes.count, routes[index] != route else { return time }
+            return "\(LineStyle.of(routes[index]).label) \(time)"
+        }
+        parts.append("then " + times.joined(separator: ", "))
+    }
     return parts.joined(separator: " · ")
 }

@@ -17,6 +17,11 @@ struct TrainActivityAttributes: ActivityAttributes {
         /// "Delays", "Elevator out", when there's something to know.
         var notice: String?
         var updated: Date
+        /// Its line, which can be another one running on yours; nil from countdowns
+        /// started before trains of other lines were shown.
+        var route: String? = nil
+        /// The lines of `following`.
+        var followingRoutes: [String]? = nil
     }
 
     var selection: Selection

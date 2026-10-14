@@ -117,14 +117,17 @@ enum TrainActivityController {
             target = selection.catchable(upcoming, now: now).first
         }
         guard let target else { return nil }
+        let following = upcoming.filter { $0.time > target.time }.prefix(2)
         return TrainActivityAttributes.ContentState(
             train: target.time,
             trip: target.trip,
             isLive: target.isLive,
             terminal: target.terminal,
-            following: upcoming.filter { $0.time > target.time }.prefix(2).map(\.time),
+            following: following.map(\.time),
             notice: board.notice(includingElevators: selection.elevatorAlerts)?.label,
-            updated: now
+            updated: now,
+            route: target.route,
+            followingRoutes: following.map(\.route)
         )
     }
 }

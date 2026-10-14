@@ -110,13 +110,17 @@ struct ContentView: View {
                 Text("No \(LineStyle.of(selection.route).label) trains predicted").foregroundStyle(.secondary)
             } else {
                 ForEach(trains.prefix(5), id: \.self) { train in
-                    TrainRow(train: train, leave: selection.walkMinutes > 0 ? selection.leaveTime(for: train) : nil)
+                    TrainRow(
+                        train: train,
+                        leave: selection.walkMinutes > 0 ? selection.leaveTime(for: train) : nil,
+                        isOtherLine: train.route != selection.route
+                    )
                 }
             }
         } header: {
             Text("Next trains")
         } footer: {
-            Text("Green times are live predictions. The rest are timetable times, which can change.")
+            Text("Green times are live predictions. The rest are timetable times, which can change. Trains of another line running on this one show its bullet.")
         }
     }
 
@@ -233,6 +237,8 @@ private struct TrainRow: View {
     let train: Arrival
     /// When to set off, if a walking time is set.
     let leave: Date?
+    /// An N running local on the R, say: shown with its bullet.
+    let isOtherLine: Bool
 
     var body: some View {
         HStack(spacing: 8) {
@@ -240,6 +246,9 @@ private struct TrainRow: View {
                 .font(.headline)
                 .monospacedDigit()
                 .foregroundStyle(train.isLive ? Color.liveText : Color.primary)
+            if isOtherLine {
+                LineBullet(route: train.route, size: 20)
+            }
             if let terminal = train.terminal {
                 Text(terminal).foregroundStyle(.secondary).lineLimit(1)
             }

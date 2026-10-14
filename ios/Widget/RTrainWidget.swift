@@ -113,11 +113,11 @@ struct TrainWidgetView: View {
         switch family {
         case .accessoryInline:
             if let next, walking {
-                Text("\(entry.lineLabel): leave \(entry.selection.leaveTime(for: next).clock) for \(next.time.clock)")
+                Text("\(next.lineLabel): leave \(entry.selection.leaveTime(for: next).clock) for \(next.time.clock)")
             } else if let next, let notice = entry.notice {
-                Text("\(entry.lineLabel) \(next.time.clock) · \(notice.label)")
+                Text("\(next.lineLabel) \(next.time.clock) · \(notice.label)")
             } else if let next {
-                Text("\(entry.lineLabel) " + ([next] + later.prefix(2)).map(\.time.clock).joined(separator: " · "))
+                Text(inlineTimes([next] + later.prefix(2)))
             } else {
                 Text(noTrains)
             }
@@ -125,7 +125,7 @@ struct TrainWidgetView: View {
             ZStack {
                 AccessoryWidgetBackground()
                 VStack(spacing: 0) {
-                    Text(entry.lineLabel).font(.headline)
+                    Text(next?.lineLabel ?? entry.lineLabel).font(.headline)
                     if let next {
                         countdown(to: next).font(.system(size: 15, weight: .semibold, design: .rounded))
                     } else {
@@ -139,6 +139,7 @@ struct TrainWidgetView: View {
                 Text("\(entry.lineLabel) · \(entry.stationName)").font(.headline).lineLimit(1)
                 if let next {
                     HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        if next.route != route { LineBullet(route: next.route, size: 16) }
                         if walking { Text("Leave in").font(.caption) }
                         countdown(to: next)
                             .font(.system(size: 22, weight: .bold, design: .rounded))
@@ -147,7 +148,7 @@ struct TrainWidgetView: View {
                     if let notice = entry.notice {
                         Label(notice.label, systemImage: notice.symbol).font(.caption)
                     } else if !later.isEmpty {
-                        Text("then " + later.prefix(2).map(\.time.clock).joined(separator: ", ")).font(.caption)
+                        Text("then " + later.prefix(2).map(time).joined(separator: ", ")).font(.caption)
                     }
                 } else {
                     Text(noTrains).font(.caption)
@@ -233,6 +234,9 @@ struct TrainWidgetView: View {
                 Text(next.time.formatted(date: .omitted, time: .shortened) + (walking ? " train" : ""))
                     .foregroundStyle(next.statusColor)
                     .layoutPriority(1)
+                if next.route != route {
+                    LineBullet(route: next.route, size: 15)
+                }
                 // The small widget has no room for where it's going
                 if let terminal = next.terminal, family != .systemSmall {
                     Text("· \(terminal)").foregroundStyle(Color.boardGray)
@@ -256,6 +260,9 @@ struct TrainWidgetView: View {
                         .font(.subheadline.weight(.semibold))
                         .monospacedDigit()
                         .foregroundStyle(train.statusColor)
+                    if train.route != route {
+                        LineBullet(route: train.route, size: 15)
+                    }
                     // The headline train already names where it's going; only say so for trains that differ
                     if let terminal = train.terminal, terminal != next?.terminal {
                         Text(terminal)
@@ -266,6 +273,20 @@ struct TrainWidgetView: View {
                 }
             }
         }
+    }
+
+    /// "8:12", or "N 8:12" for a train of another line running on this one.
+    private func time(_ train: Arrival) -> String {
+        train.route == route ? train.time.clock : "\(train.lineLabel) \(train.time.clock)"
+    }
+
+    /// "R 8:12 · 8:20 · 8:31", or, with another line among them, each train's
+    /// own: "N 8:12 · R 8:20 · D 8:31".
+    private func inlineTimes(_ trains: [Arrival]) -> String {
+        if trains.allSatisfy({ $0.route == route }) {
+            return "\(entry.lineLabel) " + trains.map(\.time.clock).joined(separator: " · ")
+        }
+        return trains.map { "\($0.lineLabel) \($0.time.clock)" }.joined(separator: " · ")
     }
 
     /// ↻ and the walk button, which starts or stops the countdown to this widget's train.
@@ -327,8 +348,9 @@ extension Date {
 extension TrainEntry {
     static var preview: TrainEntry {
         let now = Date.now
+        // An N running local on the R comes first
         let trains = [4.0, 12, 20, 31, 41].map {
-            Arrival(route: "R", time: now.addingTimeInterval($0 * 60), lastStop: "G08N", isLive: $0 < 15)
+            Arrival(route: $0 == 4 ? "N" : "R", time: now.addingTimeInterval($0 * 60), lastStop: $0 == 4 ? "R01N" : "G08N", isLive: $0 < 15)
         }
         return TrainEntry(date: now, selection: .fallback, trains: trains)
     }
