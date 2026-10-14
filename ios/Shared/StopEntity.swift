@@ -51,6 +51,12 @@ struct StopEntity: AppEntity {
     }
 }
 
+extension Selection {
+    /// Its station, direction and line, as a `StopEntity` id: which train this is,
+    /// whatever the walking time.
+    var trainID: String { StopEntity(stationID: stationID, direction: direction, route: route).id }
+}
+
 struct StopQuery: EntityStringQuery {
     func entities(for identifiers: [StopEntity.ID]) async throws -> [StopEntity] {
         identifiers.compactMap { StopEntity(id: $0) }

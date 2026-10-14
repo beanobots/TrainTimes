@@ -3,7 +3,7 @@ import SwiftUI
 import WidgetKit
 
 /// The countdown to one train on the Lock Screen and in the Dynamic Island,
-/// started from the app ("I'm on my way") or a shortcut.
+/// started from the app ("I'm on my way"), a widget's walk button or a shortcut.
 struct TrainLiveActivity: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: TrainActivityAttributes.self) { context in
@@ -32,10 +32,7 @@ struct TrainLiveActivity: Widget {
                     HStack {
                         Text(summary(context)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                         Spacer()
-                        Button(intent: RefreshCountdownIntent()) {
-                            Image(systemName: "arrow.clockwise")
-                        }
-                        .accessibilityLabel("Refresh")
+                        buttons(context)
                     }
                 }
             } compactLeading: {
@@ -67,13 +64,7 @@ private struct CountdownBanner: View {
                 }
                 .lineLimit(1)
                 Spacer()
-                Button(intent: RefreshCountdownIntent()) {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Color.boardGray)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Refresh")
+                buttons(context)
             }
             countdown(context)
                 .font(.system(size: 40, weight: .bold, design: .rounded))
@@ -97,6 +88,14 @@ private struct CountdownBanner: View {
             }
         }
         .padding(16)
+    }
+}
+
+/// ↻ and a lit walk button, which stops the countdown.
+private func buttons(_ context: ActivityViewContext<TrainActivityAttributes>) -> some View {
+    HStack(spacing: 6) {
+        RefreshButton()
+        WalkButton(intent: StopCountdownIntent(), route: context.attributes.selection.route, isOn: true)
     }
 }
 

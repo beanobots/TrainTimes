@@ -143,7 +143,7 @@ struct ContentView: View {
         } header: {
             Text("On your way")
         } footer: {
-            Text("Counts down to your train on the Lock Screen and in the Dynamic Island. Tap its refresh button, or open the app, for new times.")
+            Text("Counts down to your train on the Lock Screen and in the Dynamic Island until you stop it. A widget's walk button starts and stops it too. Tap ↻ on it, or open the app, for new times.")
         }
     }
 

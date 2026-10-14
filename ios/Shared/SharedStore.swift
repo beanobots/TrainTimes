@@ -21,11 +21,12 @@ enum SharedStore {
     }
 
     /// Nil when this install isn't in an App Group, e.g. it was signed without the entitlement.
-    private static let file: URL? = candidateGroups
+    private static let container: URL? = candidateGroups
         .lazy
         .compactMap { FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: $0) }
-        .first?
-        .appendingPathComponent("selection.json")
+        .first
+    private static let file = container?.appendingPathComponent("selection.json")
+    private static let countdownFile = container?.appendingPathComponent("countdown.json")
 
     /// Whether a choice made in the app can reach the widget on this install.
     static var isAvailable: Bool { file != nil }
@@ -41,5 +42,29 @@ enum SharedStore {
     static func save(_ selection: Selection) -> Bool {
         guard let file, let data = try? JSONEncoder().encode(selection) else { return false }
         return (try? data.write(to: file, options: .atomic)) != nil
+    }
+
+    /// The train the Lock Screen countdown is for. Widgets can't see Live
+    /// Activities, so the app leaves this for their walk buttons.
+    struct Countdown: Codable, Equatable {
+        /// A `Selection.trainID`.
+        var trainID: String
+        /// When iOS will have ended it.
+        var ends: Date
+    }
+
+    static func loadCountdown() -> Countdown? {
+        guard let countdownFile, let data = try? Data(contentsOf: countdownFile) else { return nil }
+        return try? JSONDecoder().decode(Countdown.self, from: data)
+    }
+
+    /// Nil once no countdown is running.
+    static func saveCountdown(_ countdown: Countdown?) {
+        guard let countdownFile else { return }
+        if let countdown, let data = try? JSONEncoder().encode(countdown) {
+            try? data.write(to: countdownFile, options: .atomic)
+        } else {
+            try? FileManager.default.removeItem(at: countdownFile)
+        }
     }
 }

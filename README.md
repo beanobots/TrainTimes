@@ -27,16 +27,22 @@ for home and one for work. Each widget can also have its own walking time.
 or per widget). Trains you can't reach in time are left out, the widget counts
 down to when to leave, and the app shows a leave time for each train.
 
-**On your way.** Tap **I'm on my way** in the app (or say "Start my train
-countdown in Train Times") to count down to your train on the Lock Screen and in
-the Dynamic Island. It can only get new times while the app runs, which needs no
-push server: tap the countdown's refresh button, or open the app. In between it
-keeps ticking, and once your train has gone a refresh moves it to the next one.
+**On your way.** Tap a widget's walk button, or **I'm on my way** in the app (or
+say "Start my train countdown in Train Times"), to count down to your train on the
+Lock Screen and in the Dynamic Island. It stays up until you tap the walk button
+again, on the widget or the countdown, or for 8 hours, when iOS ends it. It can
+only get new times while the app runs, which needs no push server: tap ↻ on the
+countdown or a widget, or open the app. In between it keeps ticking, and once your
+train has gone a refresh moves it to the next one.
 
 **Siri and Shortcuts.** Say "When's my next train in Train Times?" Siri answers
 with the next train you can catch (and when to leave, and any delays) and shows
 the next few. iOS needs the app's name in the phrase. Both actions are in the
 Shortcuts app too, where you can pick a different train.
+
+To ask without the app's name, make your own shortcut: in the Shortcuts app, tap
+**+**, add Train Times' **When's my next train?** action, and name the shortcut
+"When's the next train". Siri runs a shortcut when you say its name.
 
 The app follows your phone's light or dark setting. The widget always uses its
 dark station-board look, and on tinted Home Screens its line bullet turns into an
@@ -45,8 +51,8 @@ outline so the letter stays readable.
 There are two versions:
 
 - `ios/`: a native app and widget. You pick any station and line in the app, and
-  the widget moves on to the next train by itself and has a refresh button. It's
-  built on GitHub's Mac servers, so you don't need a Mac.
+  the widget moves on to the next train by itself and has refresh and walk
+  buttons. It's built on GitHub's Mac servers, so you don't need a Mac.
 - `scriptable/`: a script for the free Scriptable app, fixed to the R train at
   Prospect Av (change the settings at the top to use another stop). No computer
   needed.
