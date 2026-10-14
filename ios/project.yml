@@ -23,6 +23,8 @@ targets:
       path: App/Info.plist
       properties:
         CFBundleDisplayName: Train Times
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         # The Lock Screen and Dynamic Island countdown
         NSSupportsLiveActivities: true
         UILaunchScreen: {}
@@ -50,6 +52,8 @@ targets:
       path: Widget/Info.plist
       properties:
         CFBundleDisplayName: Train Times
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
     entitlements:
