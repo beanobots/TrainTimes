@@ -286,6 +286,9 @@ struct TrainWidgetView: View {
                                 LineBullet(route: next.route, size: style.countdownBullet)
                             }
                             countdownLabel(to: next, size: style.countdownSize)
+                                // Its full line height is taller than the row; offered
+                                // only the row, it would shrink to fit
+                                .fixedSize(horizontal: false, vertical: true)
                                 .frame(height: style.countdownHeight)
                         }
                         .invalidatableContent()
