@@ -8,7 +8,9 @@ subway line and the Staten Island Railway.
 
 The small widget shows the countdown with the next two trains' times beside it.
 The medium one shows the countdown on its own, with any delay written above it,
-and lists the trains after it with their minutes to go.
+and lists the trains after it with their minutes to go. Beside a short station
+name the list starts at the top and has room for one more. On an iPhone 12 or
+later, apart from the minis, the medium widget's text is larger.
 
 **Where the train is.** The medium widget's map button swaps that list for the
 stops between the next train and your station: the one it's at or heading for,

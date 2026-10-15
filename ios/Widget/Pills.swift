@@ -11,13 +11,15 @@ struct Pill: View {
     /// Takes an equal share of the row, as on the home screen widgets; the
     /// countdown's are a fixed width.
     var fills = false
+    /// On the medium widget's larger layout.
+    var large = false
     @Environment(\.widgetRenderingMode) private var renderingMode
 
     var body: some View {
         Image(systemName: symbol)
-            .font(.footnote.weight(.bold))
+            .font(large ? .subheadline.weight(.bold) : .footnote.weight(.bold))
             .foregroundStyle(iconColor)
-            .frame(width: fills ? nil : 44, height: 24)
+            .frame(width: fills ? nil : 44, height: large ? BoardStyle.large.buttonHeight : BoardStyle.compact.buttonHeight)
             .frame(maxWidth: fills ? .infinity : nil)
             .background {
                 if let lit, renderingMode == .fullColor {
@@ -47,6 +49,7 @@ struct RefreshButton: View {
     /// With no countdown running, a widget refreshes itself, which is quicker
     /// than going through the app.
     var widgetsOnly = false
+    var large = false
 
     var body: some View {
         Group {
@@ -63,7 +66,7 @@ struct RefreshButton: View {
     /// Lights up at once as new times come in, then fades back over a second
     /// (widgets animate between timeline entries).
     private var face: some View {
-        Pill(symbol: "arrow.clockwise", lit: lit, fills: fills)
+        Pill(symbol: "arrow.clockwise", lit: lit, fills: fills, large: large)
             .animation(lit == nil ? .easeOut(duration: 1) : nil, value: lit)
     }
 }
@@ -74,10 +77,11 @@ struct WalkButton<Intent: AppIntent>: View {
     let route: String
     let isOn: Bool
     var fills = false
+    var large = false
 
     var body: some View {
         Button(intent: intent) {
-            Pill(symbol: "figure.walk", lit: isOn ? LineStyle.of(route) : nil, fills: fills)
+            Pill(symbol: "figure.walk", lit: isOn ? LineStyle.of(route) : nil, fills: fills, large: large)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(isOn ? "Stop the countdown" : "I'm on my way")
@@ -89,10 +93,11 @@ struct WalkButton<Intent: AppIntent>: View {
 struct MapButton: View {
     let selection: Selection
     let isOn: Bool
+    var large = false
 
     var body: some View {
         Button(intent: ToggleMapIntent(selection: selection)) {
-            Pill(symbol: "map", lit: isOn ? LineStyle.of(selection.firstRoute) : nil, fills: true)
+            Pill(symbol: "map", lit: isOn ? LineStyle.of(selection.firstRoute) : nil, fills: true, large: large)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(isOn ? "Show times" : "Show where the train is")
