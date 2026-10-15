@@ -51,12 +51,13 @@ enum TrainService {
         async let alertData = optionalData(from: AlertsFeed.url)
         async let outageData = optionalData(from: includingOutages ? OutagesFeed.url : nil)
 
+        let stops = Set(selection.stopIDs)
         var arrivals: [Arrival] = []
         for data in try await trainData {
-            arrivals += try SubwayFeed.arrivals(at: selection.stopID, in: data)
+            arrivals += try SubwayFeed.arrivals(at: stops, in: data)
         }
         for data in await otherTrainData {
-            arrivals += (try? SubwayFeed.arrivals(at: selection.stopID, in: data)) ?? []
+            arrivals += (try? SubwayFeed.arrivals(at: stops, in: data)) ?? []
         }
         let trains = arrivals.filter { $0.time > now && selection.shows($0) }.sorted { $0.time < $1.time }
         let alerts = await alertData.flatMap { try? AlertsFeed.alerts(for: selection, in: $0, now: now) } ?? []

@@ -31,7 +31,7 @@ struct TrainEntry: TimelineEntry {
     var countingDown = false
 
     var stationName: String { selection.station?.name ?? "Choose a station" }
-    var heading: String { selection.station?.directionLabel(selection.direction) ?? "" }
+    var heading: String { selection.heading }
     /// "R", or "N/R" with more than one line chosen.
     var lineLabel: String { selection.linesLabel }
 }
@@ -350,7 +350,7 @@ extension TrainEntry {
         let now = Date.now
         // An N running local on the R comes first
         let trains = [4.0, 12, 20, 31, 41].map {
-            Arrival(route: $0 == 4 ? "N" : "R", time: now.addingTimeInterval($0 * 60), lastStop: $0 == 4 ? "R01N" : "G08N", isLive: $0 < 15)
+            Arrival(route: $0 == 4 ? "N" : "R", time: now.addingTimeInterval($0 * 60), stop: "R34N", lastStop: $0 == 4 ? "R01N" : "G08N", isLive: $0 < 15)
         }
         return TrainEntry(date: now, selection: .fallback, trains: trains)
     }

@@ -2,6 +2,8 @@ import Foundation
 
 /// The station, lines and direction the widget shows.
 struct Selection: Codable, Hashable, Sendable {
+    /// A `Station.id`, or in a choice saved before a station's platforms were
+    /// joined up, the id of one of them.
     var stationID: String
     /// One or more real-time route ids, in the order of `Station.routes`.
     var routes: [String]
@@ -57,11 +59,13 @@ struct Selection: Codable, Hashable, Sendable {
         train.time.addingTimeInterval(-TimeInterval(walkMinutes * 60))
     }
 
-    /// Trains of the chosen lines, and of any line that doesn't usually stop here,
-    /// which must be running on one of them: an N running local on the R. Lines
-    /// that do usually stop here are left out unless chosen.
+    /// Trains of the chosen lines, and of any line that doesn't usually stop at
+    /// their platform, which must be running on one of them: an N running local
+    /// on the R. Lines that do usually stop there are left out unless chosen.
     func shows(_ train: Arrival) -> Bool {
-        routes.contains(train.route) || !(station?.routes.contains(train.route) ?? true)
+        if routes.contains(train.route) { return true }
+        let usual = platform(of: train)?.routes ?? station?.routes
+        return !(usual?.contains(train.route) ?? true)
     }
 
     /// Whether a train needs its bullet beside it: always, unless just one line
@@ -78,8 +82,28 @@ struct Selection: Codable, Hashable, Sendable {
     /// Prospect Av, R, toward Manhattan: what the widget shows until you choose.
     static let fallback = Selection(stationID: "R34", routes: ["R"], direction: .north)
 
-    var stopID: String { stationID + direction.rawValue }
     var station: Station? { StationDirectory.station(id: stationID) }
+
+    /// The platforms of the chosen lines: one, unless they stop on different
+    /// ones, like the N and the 2 at Atlantic Av-Barclays Ctr.
+    var platforms: [Platform] { station?.platforms(serving: routes) ?? [] }
+
+    /// Where the chosen lines' trains stop, as the feeds name it: "R31N".
+    var stopIDs: [String] { platforms.map { $0.id + direction.rawValue } }
+
+    /// Where the chosen lines go: "to Manhattan".
+    var heading: String { station?.directionLabel(direction, routes: routes) ?? "" }
+
+    /// Where `train` goes from its platform, which is just one of `heading`'s names
+    /// where the chosen lines' platforms name the direction differently.
+    func heading(of train: Arrival) -> String {
+        guard let platform = platform(of: train) else { return heading }
+        return Station.directionLabel(direction, on: [platform])
+    }
+
+    private func platform(of train: Arrival) -> Platform? {
+        station?.platforms.first { $0.id + direction.rawValue == train.stop }
+    }
 
     /// Moves to `station`, on `label`'s line if it has one, else the current lines
     /// it has, else its first.
@@ -104,10 +128,12 @@ struct Selection: Codable, Hashable, Sendable {
     }
 
     /// A saved choice that no longer matches the station list falls back to the
-    /// default; a line the station has lost is just dropped.
+    /// default; a line the station has lost is just dropped. One saved when its
+    /// platform was a station of its own moves to the station it's part of.
     func validated() -> Selection {
         guard let station else { return .fallback }
         var selection = self
+        selection.stationID = station.id
         selection.routes = station.routes.filter(routes.contains)
         return selection.routes.isEmpty ? .fallback : selection
     }

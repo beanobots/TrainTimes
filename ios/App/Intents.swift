@@ -75,7 +75,7 @@ struct NextTrainSnippet: View {
                 LineBullets(routes: selection.routes, size: 28)
                 VStack(alignment: .leading, spacing: 0) {
                     Text(selection.station?.name ?? "").font(.headline)
-                    Text(selection.station?.directionLabel(selection.direction) ?? "")
+                    Text(selection.heading)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }

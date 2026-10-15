@@ -35,19 +35,26 @@ struct StopEntity: AppEntity {
     var displayRepresentation: DisplayRepresentation {
         let name = station?.name ?? stationID
         let lines = routes.map { LineStyle.of($0).label }.joined(separator: "/")
-        let heading = station?.directionLabel(direction) ?? ""
+        let heading = station?.directionLabel(direction, routes: routes) ?? ""
         return DisplayRepresentation(title: "\(name): \(lines) \(heading)", subtitle: "\(station?.borough ?? "")")
     }
 
-    /// The selection this stands for, keeping the app's other settings (walking time, elevator alerts).
+    /// The selection this stands for, keeping the app's other settings (walking
+    /// time, elevator alerts). One set up when its platform was a station of its
+    /// own is for the station it's part of.
     func selection(basedOn app: Selection) -> Selection {
         Selection(stationID: stationID, routes: routes, direction: direction, elevatorAlerts: app.elevatorAlerts, walkMinutes: app.walkMinutes)
+            .validated()
     }
 
-    /// At `station`, both directions of each line on its own, and of all its
-    /// lines together where it has more than one.
+    /// At `station`, both directions of each line on its own, of each platform's
+    /// lines together, and of all its lines together, where those are more than one.
     static func choices(at station: Station) -> [StopEntity] {
-        let lines = station.routes.map { [$0] } + (station.routes.count > 1 ? [station.routes] : [])
+        var lines = station.routes.map { [$0] }
+        let together = station.platforms.map { platform in station.routes.filter(platform.routes.contains) } + [station.routes]
+        for routes in together where routes.count > 1 && !lines.contains(routes) {
+            lines.append(routes)
+        }
         return lines.flatMap { routes in
             Direction.allCases.map { StopEntity(stationID: station.id, direction: $0, routes: routes) }
         }

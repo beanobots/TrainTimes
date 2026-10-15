@@ -33,12 +33,14 @@ enum AlertsFeed {
     /// All subway alerts, current and planned. About 1 MB, but sent gzipped (about 80 KB).
     static let url = URL(string: "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/camsys%2Fsubway-alerts.json")!
 
-    /// The alerts in effect at `now` that affect `selection`'s line at its station
-    /// and direction, most important first.
+    /// The alerts in effect at `now` that affect `selection`'s lines at their
+    /// platforms and direction, most important first.
     static func alerts(for selection: Selection, in data: Data, now: Date = Date()) throws -> [ServiceAlert] {
         let feed = try JSONDecoder().decode(Feed.self, from: data)
         let time = now.timeIntervalSince1970
         let direction = selection.direction == .north ? 0 : 1
+        // An alert names a platform by its id, or by its id plus N or S
+        let stops = Set(selection.platforms.map(\.id) + selection.stopIDs)
         let alerts: [ServiceAlert] = feed.entity.compactMap { entity in
             guard let alert = entity.alert else { return nil }
             let periods = alert.active_period ?? []
@@ -47,7 +49,7 @@ enum AlertsFeed {
             }
             let applies = (alert.informed_entity ?? []).contains { informed in
                 guard let route = informed.route_id, selection.routes.contains(Lines.normalized(route)) else { return false }
-                if let stop = informed.stop_id, stop != selection.stationID, stop != selection.stopID { return false }
+                if let stop = informed.stop_id, !stops.contains(stop) { return false }
                 if let informedDirection = informed.direction_id, informedDirection != direction { return false }
                 return true
             }

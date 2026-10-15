@@ -36,7 +36,7 @@ struct ContentView: View {
                     Section("Direction") {
                         Picker("Direction", selection: $selection.direction) {
                             ForEach(Direction.allCases, id: \.self) { direction in
-                                Text(station.directionLabel(direction)).tag(direction)
+                                Text(station.directionLabel(direction, routes: selection.routes)).tag(direction)
                             }
                         }
                         .pickerStyle(.inline)
@@ -185,7 +185,25 @@ struct ContentView: View {
 
     private func accessibilitySection(_ station: Station) -> some View {
         Section {
-            Label(station.accessibility ?? "No step-free access", systemImage: station.ada == 0 ? "figure.stairs" : "figure.roll")
+            // The chosen lines' platforms, each with its lines where they differ:
+            // the N's is step-free at 14 St-Union Sq, the 4's isn't
+            let platforms = selection.platforms
+            if Set(platforms.map(\.accessibility)).count > 1 {
+                ForEach(platforms) { platform in
+                    Label {
+                        HStack(spacing: 4) {
+                            ForEach(platform.routes.filter(selection.routes.contains), id: \.self) { route in
+                                LineBullet(route: route, size: 18)
+                            }
+                            Text(platform.accessibility ?? "No step-free access")
+                        }
+                    } icon: {
+                        Image(systemName: platform.ada == 0 ? "figure.stairs" : "figure.roll")
+                    }
+                }
+            } else if let platform = platforms.first {
+                Label(platform.accessibility ?? "No step-free access", systemImage: platform.ada == 0 ? "figure.stairs" : "figure.roll")
+            }
             if EquipmentDirectory.hasEquipment(atComplex: station.complex) {
                 let outages = board?.outages ?? []
                 if loadState == .loaded && outages.isEmpty {
