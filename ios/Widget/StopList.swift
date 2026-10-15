@@ -9,45 +9,44 @@ struct StopList: View {
     let train: Arrival
     let now: Date
     var maxRows = 4
-
-    /// Also the later trains' rows.
-    static let rowHeight: CGFloat = 14.5
+    var style = BoardStyle.compact
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 1) {
+        VStack(alignment: .leading, spacing: style.isLarge ? 0 : 1) {
             if let layout = StopLayout(train: train, now: now, maxRows: maxRows) {
                 Text(layout.label)
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(Color.boardGray)
                     .lineLimit(1)
                 ZStack(alignment: .topLeading) {
-                    StopRail(layout: layout, color: Color(hex: LineStyle.of(train.route).color))
-                        .frame(width: 16, height: CGFloat(layout.rows.count) * Self.rowHeight)
+                    StopRail(layout: layout, color: Color(hex: LineStyle.of(train.route).color), style: style)
+                        .frame(width: style.railColumn, height: CGFloat(layout.rows.count) * style.rowHeight)
                     VStack(alignment: .leading, spacing: 0) {
                         ForEach(layout.rows) { row in
                             stopRow(row, passed: CGFloat(row.id) < layout.trainRow)
                         }
                     }
-                    TrainMarker(route: train.route, isLive: train.isLive)
-                        .offset(x: 0.5, y: layout.trainRow * Self.rowHeight + (Self.rowHeight - TrainMarker.size) / 2)
+                    TrainMarker(route: train.route, isLive: train.isLive, size: style.markerSize)
+                        .offset(x: (style.railColumn - style.markerSize) / 2,
+                                y: layout.trainRow * style.rowHeight + (style.rowHeight - style.markerSize) / 2)
                 }
             } else {
                 Text("WHERE IT IS")
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(Color.boardGray)
                 Text("The MTA hasn't said yet")
-                    .font(.caption)
+                    .font(style.stopFont)
                     .foregroundStyle(Color.boardGray)
             }
         }
     }
 
     private func stopRow(_ row: StopLayout.Row, passed: Bool) -> some View {
-        HStack(spacing: 6) {
+        HStack(spacing: style.isLarge ? 7 : 6) {
             // The rail's column
-            Color.clear.frame(width: 16)
+            Color.clear.frame(width: style.railColumn)
             Text(row.name)
-                .font(.caption.weight(row.kind == .yours ? .bold : row.isTrainStop ? .semibold : .medium))
+                .font(style.stopFont.weight(row.kind == .yours ? .bold : row.isTrainStop ? .semibold : .medium))
                 .italic(row.kind == .folded)
                 .foregroundStyle(row.kind == .yours || row.isTrainStop ? .white : passed ? Color.boardDim : Color.boardGray)
                 .lineLimit(1)
@@ -55,12 +54,12 @@ struct StopList: View {
             if let departs = row.departs {
                 Spacer(minLength: 4)
                 Text(departs.clock)
-                    .font(.caption.weight(.semibold))
+                    .font(style.departsFont)
                     .monospacedDigit()
                     .foregroundStyle(.white)
             }
         }
-        .frame(height: Self.rowHeight)
+        .frame(height: style.rowHeight)
     }
 }
 
@@ -148,13 +147,17 @@ struct StopLayout {
 private struct StopRail: View {
     let layout: StopLayout
     let color: Color
+    let style: BoardStyle
 
     var body: some View {
         Canvas { context, size in
-            let h = StopList.rowHeight
+            let h = style.rowHeight
             let x = size.width / 2
             let middle = { (row: CGFloat) in row * h + h / 2 }
             let bar = { (top: CGFloat, bottom: CGFloat) in Path(CGRect(x: x - 2, y: top, width: 4, height: max(0, bottom - top))) }
+            let circle = { (diameter: CGFloat, y: CGFloat) in
+                Path(ellipseIn: CGRect(x: x - diameter / 2, y: y - diameter / 2, width: diameter, height: diameter))
+            }
 
             // The line continues above the list
             context.fill(bar(0, middle(0)), with: .linearGradient(
@@ -180,14 +183,13 @@ private struct StopRail: View {
             for row in layout.rows where row.kind != .folded {
                 let y = middle(CGFloat(row.id))
                 if row.kind == .yours {
-                    let ring = CGRect(x: x - 6.5, y: y - 6.5, width: 13, height: 13)
-                    context.fill(Path(ellipseIn: ring), with: .color(Color.boardBlack))
-                    context.stroke(Path(ellipseIn: ring.insetBy(dx: 1.5, dy: 1.5)), with: .color(.white), lineWidth: 3)
+                    context.fill(circle(style.ringSize, y), with: .color(Color.boardBlack))
+                    context.stroke(circle(style.ringSize - 3, y), with: .color(.white), lineWidth: 3)
                 } else {
                     var dot = context
                     dot.opacity = y < trainY - 1 ? 0.45 : 1
-                    dot.fill(Path(ellipseIn: CGRect(x: x - 4, y: y - 4, width: 8, height: 8)), with: .color(Color.boardBlack))
-                    dot.fill(Path(ellipseIn: CGRect(x: x - 2, y: y - 2, width: 4, height: 4)), with: .color(.white))
+                    dot.fill(circle(style.dotSize, y), with: .color(Color.boardBlack))
+                    dot.fill(circle(style.dotSize / 2, y), with: .color(.white))
                 }
             }
         }
@@ -197,20 +199,19 @@ private struct StopRail: View {
 /// The train on the rail: its line's bullet, or an outline of it while it's
 /// still a timetable time.
 private struct TrainMarker: View {
-    static let size: CGFloat = 15
-
     let route: String
     let isLive: Bool
+    let size: CGFloat
 
     var body: some View {
         let style = LineStyle.of(route)
         let color = Color(hex: style.color)
-        let fontSize = Self.size * (style.label.count > 1 ? 0.45 : 0.62)
+        let fontSize = size * (style.label.count > 1 ? 0.45 : 0.62)
         Text(style.label)
             .font(.system(size: fontSize, weight: .bold))
             .offset(y: -LineBullet.capitalsOffset(fontSize: fontSize))
             .foregroundStyle(isLive ? (style.usesDarkText ? Color.black : Color.white) : color)
-            .frame(width: Self.size, height: Self.size)
+            .frame(width: size, height: size)
             .background(Circle().fill(isLive ? color : Color.boardBlack))
             .overlay {
                 if !isLive { Circle().strokeBorder(color, lineWidth: 1.5) }

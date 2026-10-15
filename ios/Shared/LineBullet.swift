@@ -79,6 +79,15 @@ struct LineBullets: View {
     let routes: [String]
     let size: CGFloat
 
+    /// How wide the bullets of this many lines are.
+    static func width(count: Int, size: CGFloat) -> CGFloat {
+        switch count {
+        case ..<2: size
+        case 2: size * 1.6 + 2
+        default: size * 1.2 + 2
+        }
+    }
+
     var body: some View {
         if routes.count < 2 {
             LineBullet(route: routes.first ?? "", size: size)
