@@ -48,7 +48,7 @@ struct StopList: View {
             Text(row.name)
                 .font(style.stopFont.weight(row.kind == .yours ? .bold : row.isTrainStop ? .semibold : .medium))
                 .italic(row.kind == .folded)
-                .foregroundStyle(row.kind == .yours || row.isTrainStop ? .white : passed ? Color.boardDim : Color.boardGray)
+                .foregroundStyle(row.kind == .yours || row.isTrainStop ? Color.boardText : passed ? Color.boardDim : Color.boardGray)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
             if let departs = row.departs {
@@ -56,7 +56,7 @@ struct StopList: View {
                 Text(departs.clock)
                     .font(style.departsFont)
                     .monospacedDigit()
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Color.boardText)
             }
         }
         .frame(height: style.rowHeight)
@@ -143,7 +143,8 @@ struct StopLayout {
 }
 
 /// The line down the list's left edge, in the train's colour: dimmed behind the
-/// train, dashed where stops are folded, with a dot at each stop and a ring at yours.
+/// train, dashed where stops are folded, with a dot at each stop and a ring at
+/// yours, dark on light in light mode.
 private struct StopRail: View {
     let layout: StopLayout
     let color: Color
@@ -178,18 +179,18 @@ private struct StopRail: View {
                 }
             }
             let trainY = middle(layout.trainRow)
-            context.fill(bar(0, trainY), with: .color(Color.boardBlack.opacity(0.62)))
+            context.fill(bar(0, trainY), with: .color(Color.boardBackground.opacity(0.62)))
 
             for row in layout.rows where row.kind != .folded {
                 let y = middle(CGFloat(row.id))
                 if row.kind == .yours {
-                    context.fill(circle(style.ringSize, y), with: .color(Color.boardBlack))
-                    context.stroke(circle(style.ringSize - 3, y), with: .color(.white), lineWidth: 3)
+                    context.fill(circle(style.ringSize, y), with: .color(Color.boardBackground))
+                    context.stroke(circle(style.ringSize - 3, y), with: .color(Color.boardText), lineWidth: 3)
                 } else {
                     var dot = context
                     dot.opacity = y < trainY - 1 ? 0.45 : 1
-                    dot.fill(circle(style.dotSize, y), with: .color(Color.boardBlack))
-                    dot.fill(circle(style.dotSize / 2, y), with: .color(.white))
+                    dot.fill(circle(style.dotSize, y), with: .color(Color.boardBackground))
+                    dot.fill(circle(style.dotSize / 2, y), with: .color(Color.boardText))
                 }
             }
         }
@@ -212,12 +213,12 @@ private struct TrainMarker: View {
             .offset(y: -LineBullet.capitalsOffset(fontSize: fontSize))
             .foregroundStyle(isLive ? (style.usesDarkText ? Color.black : Color.white) : color)
             .frame(width: size, height: size)
-            .background(Circle().fill(isLive ? color : Color.boardBlack))
+            .background(Circle().fill(isLive ? color : Color.boardBackground))
             .overlay {
                 if !isLive { Circle().strokeBorder(color, lineWidth: 1.5) }
             }
-            // A ring of the widget's black parts it from the rail
-            .background(Circle().fill(Color.boardBlack).padding(-2))
+            // A ring of the widget's background parts it from the rail
+            .background(Circle().fill(Color.boardBackground).padding(-2))
             .accessibilityLabel("\(style.label) train")
     }
 }

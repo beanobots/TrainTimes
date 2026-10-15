@@ -18,10 +18,13 @@ the next, how many more, and yours. It starts from the MTA's live train position
 at the widget's last refresh, then moves the train along by when it's due at each
 stop. Tap the button again for the times.
 
-**More than one line.** At a station with several lines, tap as many as you
-like, say the N and the R at Atlantic Av, and their trains show up together, each
-with its bullet. A station's lines are all in one place even where they stop on
-different platforms, so the 2 and the Q at Atlantic Av work too.
+**Choosing a train.** In the app, tap the train at the top and choose in three
+steps, each leading to the next: the station (search, or show only one line's),
+its lines, and the direction. The lines are laid out platform by platform: tap
+as many as you like, say the N and the R at Atlantic Av, from one platform or
+several (the 2 and the Q work too), or all of a platform's at once, and their
+trains show up together, each with its bullet. A station with one line skips
+straight to the direction.
 
 Trains of another line running on yours show up too, with their own bullet: an N
 or D running local on the R, say, or an E running local in Queens. Lines that
@@ -41,14 +44,17 @@ The app also shows, for the station and line you choose:
   and walking directions in Maps.
 
 **More than one widget.** Every widget follows the app's choice until you give
-it its own: touch and hold the widget, tap **Edit Widget**, and pick a **Train**
-(search by station, then choose a line, the lines of one of its platforms, or
-all of its lines, and a direction), for example one widget for home and one for work. The app's current
-choice is at the top of the list, so a widget can have any mix of lines. Each widget can also have its own walking time.
+it its own, for example one widget for home and one for work: touch and hold the
+widget, tap **Edit Widget**, and choose a **Station**, a **Line** and a
+**Direction**, in any order. Choose the line first and the stations are only the
+ones it stops at; choose the station first and its lines are listed platform by
+platform: each line, a platform's lines together, or every line. Until all three
+are chosen, the widget shows the app's train. Widgets set up with a train before
+there were three choices keep it.
 
-**Walking time.** Set how long it takes you to walk to the station (in the app,
-or per widget). Trains you can't reach in time are left out, the widget counts
-down to when to leave, and the app shows a leave time for each train.
+**Walking time.** Set how long it takes you to walk to the station in the app.
+Trains you can't reach in time are left out, the widgets count down to when to
+leave, and the app shows a leave time for each train.
 
 **On your way.** Tap a widget's walk button, or **I'm on my way** in the app (or
 say "Start my train countdown in Train Times"), to count down to your train on the
@@ -67,9 +73,10 @@ To ask without the app's name, make your own shortcut: in the Shortcuts app, tap
 **+**, add Train Times' **When's my next train?** action, and name the shortcut
 "When's the next train". Siri runs a shortcut when you say its name.
 
-The app follows your phone's light or dark setting. The widget always uses its
-dark station-board look, and on tinted Home Screens its line bullet turns into an
-outline so the letter stays readable.
+The app and the widgets follow your phone's light or dark setting: the widgets'
+station-board look is black in dark mode and white in light. On tinted Home
+Screens a widget's line bullet turns into an outline so the letter stays
+readable. The Lock Screen countdown is always dark.
 
 There are two versions:
 
@@ -110,9 +117,9 @@ AltStore can tell when there's a new one.
    [latest release](../../releases/tag/latest), put it on the iPhone (AirDrop,
    iCloud Drive or Files), and in AltStore go to **My Apps**, tap **+**, and pick
    it. You won't get update notices this way.
-4. **Choose your train.** Open **Train Times**. Tap **Station** to search for one
-   (or filter by line first), then pick one or more lines and the direction. The
-   widget updates right away.
+4. **Choose your train.** Open **Train Times** and tap the train at the top.
+   Search for your station (or show only one line's), tap one or more of its
+   lines, then the direction. The widget updates right away.
 5. **Add the widget.** Touch and hold the Home Screen, tap **Edit → Add Widget**,
    and choose **Train Times**. Until you choose, it shows the R at Prospect Av,
    toward Manhattan.

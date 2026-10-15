@@ -9,7 +9,7 @@ struct RTrainWidget: Widget {
     var body: some WidgetConfiguration {
         AppIntentConfiguration(kind: kind, intent: TrainWidgetIntent.self, provider: Provider()) { entry in
             TrainWidgetView(entry: entry)
-                .containerBackground(Color.boardBlack, for: .widget)
+                .containerBackground(Color.boardBackground, for: .widget)
         }
         .configurationDisplayName("Next train")
         .description("Live times for the train chosen in the app, or pick one for this widget in its Edit menu.")
@@ -45,23 +45,46 @@ struct TrainEntry: TimelineEntry {
     var lineLabel: String { selection.linesLabel }
 }
 
-/// What a widget's Edit menu offers: its own train, and its own walking time.
+/// What a widget's Edit menu offers: a station, a line and a direction, in any
+/// order (see WidgetChoices.swift). The walking time is the app's.
 struct TrainWidgetIntent: WidgetConfigurationIntent {
     static let title: LocalizedStringResource = "Choose a train"
-    static let description = IntentDescription("Pick a station, lines and direction for this widget, or leave Train empty to show the one chosen in the app.")
+    static let description = IntentDescription("Pick a station, line and direction for this widget, or leave them empty to show the train chosen in the app.")
 
+    @Parameter(title: "Station")
+    var station: StationEntity?
+
+    @Parameter(title: "Line")
+    var line: LineEntity?
+
+    @Parameter(title: "Direction")
+    var direction: DirectionEntity?
+
+    /// The whole train in one choice, as widgets set up before were. It's no
+    /// longer in the Edit menu, but such a widget keeps its train until the
+    /// three above are chosen.
     @Parameter(title: "Train")
     var stop: StopEntity?
 
-    @Parameter(title: "Walking time (minutes)", description: "0 uses the walking time set in the app.", default: 0, inclusiveRange: (0, 60))
-    var walkMinutes: Int
+    static var parameterSummary: some ParameterSummary {
+        Summary {
+            \.$station
+            \.$line
+            \.$direction
+        }
+    }
 
-    /// This widget's train, or the app's, with this widget's walking time if it has one.
+    /// This widget's train, with the app's walking time: the app's train until
+    /// all three are chosen, or where the line doesn't stop at the station.
     var selection: Selection {
         let app = SharedStore.load()
-        var selection = stop?.selection(basedOn: app) ?? app
-        if walkMinutes > 0 { selection.walkMinutes = walkMinutes }
-        return selection
+        guard station != nil || line != nil || direction != nil else {
+            return stop?.selection(basedOn: app) ?? app
+        }
+        guard let station = station?.station, let routes = line?.routes, let direction = direction?.direction,
+              routes.allSatisfy(station.routes.contains) else { return app }
+        return Selection(stationID: station.id, routes: routes, direction: direction,
+                         elevatorAlerts: app.elevatorAlerts, walkMinutes: app.walkMinutes).validated()
     }
 }
 
@@ -241,7 +264,7 @@ struct TrainWidgetView: View {
             } else {
                 Text(noTrains)
                     .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Color.boardText)
             }
             buttons(.compact).padding(.top, 10)
         }
@@ -295,7 +318,7 @@ struct TrainWidgetView: View {
                     } else {
                         Text(noTrains)
                             .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.white)
+                            .foregroundStyle(Color.boardText)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
@@ -345,7 +368,7 @@ struct TrainWidgetView: View {
             VStack(alignment: .leading, spacing: 0) {
                 Text(entry.stationName)
                     .font(style.nameFont)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Color.boardText)
                     .lineLimit(nameLines)
                     .minimumScaleFactor(style.nameScale)
                 HStack(spacing: 4) {
@@ -498,15 +521,30 @@ extension Notice {
 }
 
 extension Color {
+    /// The Lock Screen countdown's background, dark in light mode too.
     static let boardBlack = Color(white: 0.07)
-    static let boardGray = Color(white: 0.62)
+
+    // The home screen widgets follow the phone's light or dark setting: the
+    // station board's black in dark mode, white in light
+
+    static let boardBackground = Color(light: UIColor.white, dark: UIColor(white: 0.07, alpha: 1))
+    /// Station names and timetable times.
+    static let boardText = Color(light: UIColor.black, dark: UIColor.white)
+    /// Directions, labels and minutes to go.
+    static let boardGray = Color(light: UIColor(red: 0.42, green: 0.42, blue: 0.44, alpha: 1), dark: UIColor(white: 0.62, alpha: 1))
     /// Stops the train has passed.
-    static let boardDim = Color(white: 0.5)
+    static let boardDim = Color(light: UIColor(red: 0.63, green: 0.63, blue: 0.65, alpha: 1), dark: UIColor(white: 0.5, alpha: 1))
+    /// A button's face when it isn't lit.
+    static let boardButton = Color(light: UIColor(white: 0, alpha: 0.06), dark: UIColor(white: 1, alpha: 0.15))
+
+    init(light: UIColor, dark: UIColor) {
+        self.init(UIColor { $0.userInterfaceStyle == .dark ? dark : light })
+    }
 }
 
 extension Arrival {
-    /// Green for a live prediction, white for a timetable time.
-    var statusColor: Color { isLive ? .liveGreen : .white }
+    /// Green for a live prediction, white (black in light mode) for a timetable time.
+    var statusColor: Color { isLive ? .liveText : .boardText }
 }
 
 extension Date {

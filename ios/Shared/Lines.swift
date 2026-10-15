@@ -73,4 +73,38 @@ enum Lines {
     static func rank(_ route: String) -> Int {
         filterRoutes.firstIndex(of: LineStyle.of(route).label == "S" ? "GS" : route) ?? filterRoutes.count
     }
+
+    /// The trunk lines and the lines that run on them, in the MTA's order:
+    /// "Broadway" for the N Q R W.
+    static let trunks: [(name: String, routes: [String])] = [
+        ("Broadway-7 Av", ["1", "2", "3"]),
+        ("Lexington Av", ["4", "5", "6"]),
+        ("Flushing", ["7"]),
+        ("8 Av", ["A", "C", "E"]),
+        ("6 Av", ["B", "D", "F", "M"]),
+        ("Crosstown", ["G"]),
+        ("Nassau St", ["J", "Z"]),
+        ("Canarsie", ["L"]),
+        ("Broadway", ["N", "Q", "R", "W"]),
+        ("Shuttles", ["GS", "FS", "H"]),
+        ("Staten Island Railway", ["SI"]),
+    ]
+
+    /// What a line is called on its own: its bullet's letter, or a shuttle's
+    /// name, since the three share the S.
+    static func name(of route: String) -> String {
+        switch route {
+        case "GS": "42 St Shuttle"
+        case "FS": "Franklin Av Shuttle"
+        case "H": "Rockaway Park Shuttle"
+        default: LineStyle.of(route).label
+        }
+    }
+
+    /// "R", "42 St Shuttle", "N and R", "D, N and R"
+    static func list(_ routes: [String]) -> String {
+        let names = routes.count == 1 ? routes.map(name(of:)) : routes.map { LineStyle.of($0).label }
+        guard let last = names.last, names.count > 1 else { return names.first ?? "" }
+        return names.dropLast().joined(separator: ", ") + " and " + last
+    }
 }

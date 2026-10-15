@@ -8,6 +8,8 @@ struct TrainLiveActivity: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: TrainActivityAttributes.self) { context in
             CountdownBanner(context: context)
+                // Always on dark, which the widgets' colours follow
+                .environment(\.colorScheme, .dark)
                 .activityBackgroundTint(Color.boardBlack)
                 .activitySystemActionForegroundColor(.white)
         } dynamicIsland: { context in
@@ -97,6 +99,7 @@ private func buttons(_ context: ActivityViewContext<TrainActivityAttributes>) ->
         RefreshButton()
         WalkButton(intent: StopCountdownIntent(), route: trainRoute(context), isOn: true)
     }
+    .environment(\.colorScheme, .dark)
 }
 
 /// Counts down to the train, live, and stops at 0:00.
