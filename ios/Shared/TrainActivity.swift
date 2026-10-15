@@ -39,9 +39,32 @@ struct RefreshIntent: LiveActivityIntent {
 
     func perform() async throws -> some IntentResult {
         #if APP
+        SharedStore.saveRefreshed(.now)
         await TrainActivityController.refresh()
         WidgetCenter.shared.reloadAllTimelines()
         #endif
+        return .result()
+    }
+}
+
+/// The medium widget's map button: shows where the next train is, or the later
+/// trains again. It runs in the widget, which reloads once it's done.
+struct ToggleMapIntent: AppIntent {
+    static let title: LocalizedStringResource = "Show where the train is"
+    static let isDiscoverable = false
+
+    /// A `Selection.trainID`.
+    @Parameter(title: "Train")
+    var trainID: String
+
+    init() {}
+
+    init(selection: Selection) {
+        trainID = selection.trainID
+    }
+
+    func perform() async throws -> some IntentResult {
+        SharedStore.toggleMap(for: trainID)
         return .result()
     }
 }

@@ -27,6 +27,8 @@ enum SharedStore {
         .first
     private static let file = container?.appendingPathComponent("selection.json")
     private static let countdownFile = container?.appendingPathComponent("countdown.json")
+    private static let mapFile = container?.appendingPathComponent("map.json")
+    private static let refreshFile = container?.appendingPathComponent("refreshed.json")
 
     /// Whether a choice made in the app can reach the widget on this install.
     static var isAvailable: Bool { file != nil }
@@ -66,5 +68,38 @@ enum SharedStore {
         } else {
             try? FileManager.default.removeItem(at: countdownFile)
         }
+    }
+
+    /// Whether the medium widgets for this train (a `Selection.trainID`) show
+    /// where it is instead of the later trains. A widget can't keep state of its
+    /// own, so its map button leaves it here.
+    static func showsMap(for trainID: String) -> Bool {
+        mapTrains().contains(trainID)
+    }
+
+    static func toggleMap(for trainID: String) {
+        guard let mapFile else { return }
+        var trains = mapTrains()
+        if trains.remove(trainID) == nil { trains.insert(trainID) }
+        if let data = try? JSONEncoder().encode(trains.sorted()) {
+            try? data.write(to: mapFile, options: .atomic)
+        }
+    }
+
+    private static func mapTrains() -> Set<String> {
+        guard let mapFile, let data = try? Data(contentsOf: mapFile),
+              let trains = try? JSONDecoder().decode([String].self, from: data) else { return [] }
+        return Set(trains)
+    }
+
+    /// When ↻ was last tapped, so the widgets can light it up as their new times come in.
+    static func loadRefreshed() -> Date? {
+        guard let refreshFile, let data = try? Data(contentsOf: refreshFile) else { return nil }
+        return try? JSONDecoder().decode(Date.self, from: data)
+    }
+
+    static func saveRefreshed(_ date: Date) {
+        guard let refreshFile, let data = try? JSONEncoder().encode(date) else { return }
+        try? data.write(to: refreshFile, options: .atomic)
     }
 }

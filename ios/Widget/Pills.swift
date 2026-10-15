@@ -5,15 +5,20 @@ import WidgetKit
 /// A round-ended button face on the widget and the countdown.
 struct Pill: View {
     let symbol: String
-    /// Lit in this line's color, for a walk button whose countdown is running.
+    /// Lit in this line's color: a walk button whose countdown is running, a map
+    /// button showing the stops, or ↻ just after it was tapped.
     var lit: LineStyle? = nil
+    /// Takes an equal share of the row, as on the home screen widgets; the
+    /// countdown's are a fixed width.
+    var fills = false
     @Environment(\.widgetRenderingMode) private var renderingMode
 
     var body: some View {
         Image(systemName: symbol)
             .font(.footnote.weight(.bold))
             .foregroundStyle(iconColor)
-            .frame(width: 44, height: 24)
+            .frame(width: fills ? nil : 44, height: 24)
+            .frame(maxWidth: fills ? .infinity : nil)
             .background {
                 if let lit, renderingMode == .fullColor {
                     Capsule().fill(Color(hex: lit.color))
@@ -25,6 +30,9 @@ struct Pill: View {
                 }
             }
             .widgetAccentable(lit != nil)
+            // ↻ lights up as new times come in, then fades back (widgets animate
+            // between timeline entries)
+            .animation(.easeOut(duration: 1), value: lit)
             .contentShape(Capsule())
     }
 
@@ -36,9 +44,13 @@ struct Pill: View {
 
 /// ↻: new times for the widgets and the countdown.
 struct RefreshButton: View {
+    /// Lit in this line's color just after it was tapped.
+    var lit: LineStyle? = nil
+    var fills = false
+
     var body: some View {
         Button(intent: RefreshIntent()) {
-            Pill(symbol: "arrow.clockwise")
+            Pill(symbol: "arrow.clockwise", lit: lit, fills: fills)
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Refresh")
@@ -50,12 +62,28 @@ struct WalkButton<Intent: AppIntent>: View {
     let intent: Intent
     let route: String
     let isOn: Bool
+    var fills = false
 
     var body: some View {
         Button(intent: intent) {
-            Pill(symbol: "figure.walk", lit: isOn ? LineStyle.of(route) : nil)
+            Pill(symbol: "figure.walk", lit: isOn ? LineStyle.of(route) : nil, fills: fills)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(isOn ? "Stop the countdown" : "I'm on my way")
+    }
+}
+
+/// The medium widget's switch between the later trains and the stops before
+/// yours; lit while the stops show.
+struct MapButton: View {
+    let selection: Selection
+    let isOn: Bool
+
+    var body: some View {
+        Button(intent: ToggleMapIntent(selection: selection)) {
+            Pill(symbol: "map", lit: isOn ? LineStyle.of(selection.firstRoute) : nil, fills: true)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(isOn ? "Show times" : "Show where the train is")
     }
 }
