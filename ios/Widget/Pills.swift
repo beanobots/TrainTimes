@@ -30,9 +30,6 @@ struct Pill: View {
                 }
             }
             .widgetAccentable(lit != nil)
-            // ↻ lights up as new times come in, then fades back (widgets animate
-            // between timeline entries)
-            .animation(.easeOut(duration: 1), value: lit)
             .contentShape(Capsule())
     }
 
@@ -47,13 +44,27 @@ struct RefreshButton: View {
     /// Lit in this line's color just after it was tapped.
     var lit: LineStyle? = nil
     var fills = false
+    /// With no countdown running, a widget refreshes itself, which is quicker
+    /// than going through the app.
+    var widgetsOnly = false
 
     var body: some View {
-        Button(intent: RefreshIntent()) {
-            Pill(symbol: "arrow.clockwise", lit: lit, fills: fills)
+        Group {
+            if widgetsOnly {
+                Button(intent: RefreshWidgetsIntent()) { face }
+            } else {
+                Button(intent: RefreshIntent()) { face }
+            }
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Refresh")
+    }
+
+    /// Lights up at once as new times come in, then fades back over a second
+    /// (widgets animate between timeline entries).
+    private var face: some View {
+        Pill(symbol: "arrow.clockwise", lit: lit, fills: fills)
+            .animation(lit == nil ? .easeOut(duration: 1) : nil, value: lit)
     }
 }
 

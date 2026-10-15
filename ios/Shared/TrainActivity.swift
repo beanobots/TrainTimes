@@ -47,6 +47,20 @@ struct RefreshIntent: LiveActivityIntent {
     }
 }
 
+/// The widgets' ↻ while no countdown is running: new times for the widgets
+/// alone. It runs in the widget, which answers sooner than the app, which iOS
+/// would first have to start.
+struct RefreshWidgetsIntent: AppIntent {
+    static let title: LocalizedStringResource = "Refresh the widgets"
+    static let isDiscoverable = false
+
+    func perform() async throws -> some IntentResult {
+        SharedStore.saveRefreshed(.now)
+        WidgetCenter.shared.reloadAllTimelines()
+        return .result()
+    }
+}
+
 /// The medium widget's map button: shows where the next train is, or the later
 /// trains again. It runs in the widget, which reloads once it's done.
 struct ToggleMapIntent: AppIntent {
@@ -65,6 +79,7 @@ struct ToggleMapIntent: AppIntent {
 
     func perform() async throws -> some IntentResult {
         SharedStore.toggleMap(for: trainID)
+        SharedStore.saveToggled(.now)
         return .result()
     }
 }
@@ -91,6 +106,7 @@ struct ToggleCountdownIntent: LiveActivityIntent {
 
     func perform() async throws -> some IntentResult {
         #if APP
+        SharedStore.saveToggled(.now)
         if var selection = StopEntity(id: trainID)?.selection(basedOn: SharedStore.load()) {
             selection.walkMinutes = walkMinutes
             try await TrainActivityController.toggle(for: selection)
