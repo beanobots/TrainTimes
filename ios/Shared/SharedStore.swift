@@ -29,6 +29,8 @@ enum SharedStore {
     private static let countdownFile = container?.appendingPathComponent("countdown.json")
     private static let mapFile = container?.appendingPathComponent("map.json")
     private static let refreshFile = container?.appendingPathComponent("refreshed.json")
+    private static let toggleFile = container?.appendingPathComponent("toggled.json")
+    private static let boardsFile = container?.appendingPathComponent("boards.json")
 
     /// Whether a choice made in the app can reach the widget on this install.
     static var isAvailable: Bool { file != nil }
@@ -101,5 +103,53 @@ enum SharedStore {
     static func saveRefreshed(_ date: Date) {
         guard let refreshFile, let data = try? JSONEncoder().encode(date) else { return }
         try? data.write(to: refreshFile, options: .atomic)
+    }
+
+    /// When a map or walk button was last tapped. Those change only how the
+    /// widgets look, so they redraw with the times they already have.
+    static func loadToggled() -> Date? {
+        guard let toggleFile, let data = try? Data(contentsOf: toggleFile) else { return nil }
+        return try? JSONDecoder().decode(Date.self, from: data)
+    }
+
+    static func saveToggled(_ date: Date) {
+        guard let toggleFile, let data = try? JSONEncoder().encode(date) else { return }
+        try? data.write(to: toggleFile, options: .atomic)
+    }
+
+    /// A train's times and alert as last fetched, by a widget or the countdown,
+    /// so a widget redrawn soon after needn't wait on the MTA.
+    struct SavedBoard: Codable {
+        var fetched: Date
+        var trains: [Arrival]
+        var notice: Notice?
+    }
+
+    static func loadBoard(for selection: Selection) -> SavedBoard? {
+        savedBoards()[boardKey(selection)]
+    }
+
+    /// Kept for 20 minutes, twice as long as a widget waits to reload.
+    @discardableResult
+    static func saveBoard(_ board: Board, for selection: Selection, fetched: Date) -> SavedBoard {
+        let saved = SavedBoard(fetched: fetched, trains: board.trains, notice: board.notice(includingElevators: selection.elevatorAlerts))
+        guard let boardsFile else { return saved }
+        var boards = savedBoards().filter { fetched.timeIntervalSince($0.value.fetched) < 20 * 60 }
+        boards[boardKey(selection)] = saved
+        if let data = try? JSONEncoder().encode(boards) {
+            try? data.write(to: boardsFile, options: .atomic)
+        }
+        return saved
+    }
+
+    private static func savedBoards() -> [String: SavedBoard] {
+        guard let boardsFile, let data = try? Data(contentsOf: boardsFile),
+              let boards = try? JSONDecoder().decode([String: SavedBoard].self, from: data) else { return [:] }
+        return boards
+    }
+
+    /// The board depends on the train and on whether it counts elevator outages.
+    private static func boardKey(_ selection: Selection) -> String {
+        "\(selection.trainID) \(selection.elevatorAlerts)"
     }
 }

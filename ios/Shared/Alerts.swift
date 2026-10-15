@@ -3,7 +3,7 @@ import Foundation
 /// A service alert from the MTA: delays, planned work, skipped stops, station notices.
 struct ServiceAlert: Identifiable, Hashable, Sendable {
     /// How much it matters to someone waiting for a train, most first.
-    enum Kind: Int, Comparable, Sendable {
+    enum Kind: Int, Codable, Comparable, Sendable {
         case delays, suspended, serviceChange, notice
 
         static func < (a: Kind, b: Kind) -> Bool { a.rawValue < b.rawValue }

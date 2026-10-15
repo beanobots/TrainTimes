@@ -30,6 +30,8 @@ struct TrainEntry: TimelineEntry {
     var problem: String? = nil
     /// Whether the Lock Screen countdown is for this widget's train.
     var countingDown = false
+    /// Whether there's a countdown for any train, which only the app can refresh.
+    var anyCountdown = false
     /// Whether the medium widget shows the stops before yours instead of the later trains.
     var showsMap = false
     /// Whether ↻ was just tapped, so it's lit as the new times come in.
@@ -84,18 +86,31 @@ struct Provider: AppIntentTimelineProvider {
     /// train you can catch without going back to the network. The medium
     /// widget also gets one a minute, for its later trains' minutes to go.
     private static func entries(for selection: Selection, family: WidgetFamily) async -> [TrainEntry] {
-        let now = Date.now
-        let countingDown = SharedStore.loadCountdown().map { $0.trainID == selection.trainID && $0.ends > now } ?? false
+        let countdown = SharedStore.loadCountdown().flatMap { $0.ends > .now ? $0 : nil }
+        let countingDown = countdown?.trainID == selection.trainID
         let showsMap = family == .systemMedium && SharedStore.showsMap(for: selection.trainID)
-        // Just after ↻ is tapped, the first entry lights it and the next fades it back
-        let refreshLit = SharedStore.loadRefreshed().map { now.timeIntervalSince($0) < 15 } ?? false
         do {
-            let board = try await TrainService.board(for: selection, includingOutages: selection.elevatorAlerts, now: now)
+            let board = try await Self.board(for: selection)
+            // After the fetch, so the entries start when they're shown
+            let now = Date.now
             let trains = selection.catchable(board.trains, now: now)
-            let notice = board.notice(includingElevators: selection.elevatorAlerts)
-            let entry = { (date: Date, lit: Bool) in
-                TrainEntry(date: date, selection: selection, trains: selection.catchable(trains, now: date), notice: notice,
-                           countingDown: countingDown, showsMap: showsMap, refreshLit: lit)
+            // ↻ lights up as these new times come in: the first entry lights it
+            // and the next fades it back
+            let refreshTapped = SharedStore.loadRefreshed().map { now.timeIntervalSince($0) < 30 } ?? false
+            let refreshLit = refreshTapped && now.timeIntervalSince(board.fetched) < 5
+            let entry = { (date: Date, lit: Bool) -> TrainEntry in
+                var shown = selection.catchable(trains, now: date)
+                // Where the feed said the train was soon goes out of date; after
+                // a minute, the stop list goes by when it's due at each stop
+                if date.timeIntervalSince(board.fetched) > 60 {
+                    shown = shown.map { train in
+                        var train = train
+                        train.position = nil
+                        return train
+                    }
+                }
+                return TrainEntry(date: date, selection: selection, trains: shown, notice: board.notice, countingDown: countingDown,
+                                  anyCountdown: countdown != nil, showsMap: showsMap, refreshLit: lit)
             }
             let leaveTimes = trains.prefix(10).map(selection.leaveTime(for:))
             var dates = Set(leaveTimes)
@@ -110,9 +125,24 @@ struct Provider: AppIntentTimelineProvider {
             if refreshLit { dates.insert(now.addingTimeInterval(0.5)) }
             return [entry(now, refreshLit)] + dates.filter { $0 > now }.sorted().map { entry($0, false) }
         } catch {
-            return [TrainEntry(date: now, selection: selection, trains: [], problem: "Couldn't reach the MTA",
-                               countingDown: countingDown, showsMap: showsMap, refreshLit: refreshLit)]
+            return [TrainEntry(date: .now, selection: selection, trains: [], problem: "Couldn't reach the MTA",
+                               countingDown: countingDown, anyCountdown: countdown != nil, showsMap: showsMap)]
         }
+    }
+
+    /// The trains and alert for `selection`, fetched; or, to redraw at once,
+    /// ones fetched in the last 30 seconds (by another widget, or the
+    /// countdown), or after a tap on the map or walk button, which changes only
+    /// how the widget looks, the ones it already shows. Never ones from before ↻.
+    private static func board(for selection: Selection) async throws -> SharedStore.SavedBoard {
+        let now = Date.now
+        if let saved = SharedStore.loadBoard(for: selection), saved.fetched > SharedStore.loadRefreshed() ?? .distantPast {
+            let age = now.timeIntervalSince(saved.fetched)
+            let toggled = SharedStore.loadToggled().map { now.timeIntervalSince($0) < 30 } ?? false
+            if age < 30 || (toggled && age < 15 * 60) { return saved }
+        }
+        let board = try await TrainService.board(for: selection, includingOutages: selection.elevatorAlerts, now: now)
+        return SharedStore.saveBoard(board, for: selection, fetched: .now)
     }
 }
 
@@ -198,6 +228,8 @@ struct TrainWidgetView: View {
                         if let following { clock(of: following) }
                     }
                 }
+                // Dims from a tap until the widget redraws
+                .invalidatableContent()
             } else {
                 Text(noTrains)
                     .font(.subheadline.weight(.semibold))
@@ -213,7 +245,7 @@ struct TrainWidgetView: View {
     /// stops before yours; and ↻, map and walk.
     private var medium: some View {
         let showsStops = entry.showsMap && next != nil
-        let columnWidth: CGFloat = showsStops ? 130 : 86
+        let columnWidth = showsStops ? 130 : laterWidth
         return ZStack(alignment: .topTrailing) {
             VStack(alignment: .leading, spacing: 0) {
                 header(nameLines: 1)
@@ -235,6 +267,7 @@ struct TrainWidgetView: View {
                             countdownLabel(to: next, size: 32)
                                 .frame(height: 34)
                         }
+                        .invalidatableContent()
                     } else {
                         Text(noTrains)
                             .font(.subheadline.weight(.semibold))
@@ -262,6 +295,7 @@ struct TrainWidgetView: View {
                 }
             }
             .frame(width: columnWidth, alignment: .topLeading)
+            .invalidatableContent()
             .padding(.top, 18)
             .padding(.bottom, 32)
             .frame(maxHeight: .infinity, alignment: .top)
@@ -342,7 +376,7 @@ struct TrainWidgetView: View {
                 .foregroundStyle(Color.boardGray)
                 .padding(.bottom, 1)
             ForEach(Array(later.prefix(count).enumerated()), id: \.offset) { _, train in
-                HStack(spacing: 4) {
+                HStack(spacing: 3) {
                     if entry.selection.marksLine(of: train) {
                         LineBullet(route: train.route, size: 13)
                     }
@@ -350,16 +384,28 @@ struct TrainWidgetView: View {
                         .font(.footnote.weight(.semibold))
                         .monospacedDigit()
                         .foregroundStyle(train.statusColor)
+                        .fixedSize()
                     Spacer(minLength: 4)
                     Text("\(minutes(until: train)) min")
                         .font(.caption.weight(.medium))
                         .monospacedDigit()
                         .foregroundStyle(Color.boardGray)
+                        .minimumScaleFactor(0.75)
                 }
                 .lineLimit(1)
                 .frame(height: StopList.rowHeight)
             }
         }
+    }
+
+    /// The later trains' column: wider for a bullet or a two-digit hour, so a
+    /// time is never cut short.
+    private var laterWidth: CGFloat {
+        let shown = later.prefix(4)
+        var width: CGFloat = 86
+        if shown.contains(where: entry.selection.marksLine) { width += 16 }
+        if shown.contains(where: { $0.time.clock.count > 4 }) { width += 8 }
+        return width
     }
 
     private func minutes(until train: Arrival) -> Int {
@@ -386,7 +432,8 @@ struct TrainWidgetView: View {
     /// stops show, walk while the countdown runs.
     private var buttons: some View {
         HStack(spacing: 6) {
-            RefreshButton(lit: entry.refreshLit ? LineStyle.of(entry.selection.firstRoute) : nil, fills: true)
+            RefreshButton(lit: entry.refreshLit ? LineStyle.of(entry.selection.firstRoute) : nil, fills: true,
+                          widgetsOnly: !entry.anyCountdown)
             if family == .systemMedium {
                 MapButton(selection: entry.selection, isOn: entry.showsMap)
             }
@@ -428,9 +475,21 @@ extension Arrival {
 
 extension Date {
     /// "8:12", without AM/PM, for lists of times.
-    var clock: String {
-        formatted(.dateTime.hour(.defaultDigits(amPM: .omitted)).minute(.twoDigits))
-    }
+    var clock: String { Self.clockFormatter.string(from: self) }
+
+    /// The phone's hours and minutes, 12 or 24 hour as it's set, with any AM/PM
+    /// taken out. (Date.FormatStyle's `amPM: .omitted` writes "08:12".)
+    private static let clockFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.setLocalizedDateFormatFromTemplate("jmm")
+        var quoted = false
+        let pattern = formatter.dateFormat.filter { character in
+            if character == "'" { quoted.toggle() }
+            return quoted || !"abB".contains(character)
+        }
+        formatter.dateFormat = pattern.trimmingCharacters(in: .whitespaces)
+        return formatter
+    }()
 }
 
 // MARK: - Previews

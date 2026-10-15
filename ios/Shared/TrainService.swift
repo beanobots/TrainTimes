@@ -25,8 +25,8 @@ struct Board: Sendable {
     }
 }
 
-struct Notice: Hashable, Sendable {
-    enum Kind: Hashable, Sendable {
+struct Notice: Codable, Hashable, Sendable {
+    enum Kind: Codable, Hashable, Sendable {
         case alert(ServiceAlert.Kind)
         case elevator
     }

@@ -1,7 +1,7 @@
 import Foundation
 
 /// One train's predicted arrival at a stop.
-struct Arrival: Hashable, Sendable {
+struct Arrival: Codable, Hashable, Sendable {
     /// A real-time route id, with express versions folded in ("6X" is "6").
     let route: String
     let time: Date
@@ -25,7 +25,7 @@ struct Arrival: Hashable, Sendable {
     var terminal: String? { StationDirectory.terminalName(forStop: lastStop) }
     var lineLabel: String { LineStyle.of(route).label }
 
-    struct Stop: Hashable, Sendable {
+    struct Stop: Codable, Hashable, Sendable {
         /// A platform's id plus N or S, e.g. "R34N".
         let id: String
         /// When the train is due there.
@@ -35,7 +35,7 @@ struct Arrival: Hashable, Sendable {
     }
 
     /// The feed's vehicle position for the trip.
-    struct Position: Hashable, Sendable {
+    struct Position: Codable, Hashable, Sendable {
         /// The stop it's at, or on its way to.
         let stop: String
         let isStopped: Bool

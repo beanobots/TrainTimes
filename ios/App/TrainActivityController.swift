@@ -39,6 +39,8 @@ enum TrainActivityController {
         guard ActivityAuthorizationInfo().areActivitiesEnabled else { throw Problem.notAllowed }
         let now = Date.now
         let board = try await TrainService.board(for: selection, includingOutages: selection.elevatorAlerts, now: now)
+        // The widgets redraw with these times rather than fetching them again
+        SharedStore.saveBoard(board, for: selection, fetched: .now)
         guard let state = state(for: selection, board: board, now: now, following: nil) else { throw Problem.noTrains }
         await endActivities()
         let attributes = TrainActivityAttributes(
@@ -71,6 +73,7 @@ enum TrainActivityController {
             let selection = activity.attributes.selection
             let now = Date.now
             guard let board = try? await TrainService.board(for: selection, includingOutages: selection.elevatorAlerts, now: now) else { continue }
+            SharedStore.saveBoard(board, for: selection, fetched: .now)
             if let state = state(for: selection, board: board, now: now, following: activity.content.state.trip) {
                 await activity.update(content(state))
             } else {

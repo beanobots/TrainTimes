@@ -12,8 +12,9 @@ and lists the trains after it with their minutes to go.
 
 **Where the train is.** The medium widget's map button swaps that list for the
 stops between the next train and your station: the one it's at or heading for,
-the next, how many more, and yours. It comes from the MTA's live train positions,
-so it's as fresh as the widget's last refresh. Tap the button again for the times.
+the next, how many more, and yours. It starts from the MTA's live train position
+at the widget's last refresh, then moves the train along by when it's due at each
+stop. Tap the button again for the times.
 
 **More than one line.** At a station with several lines, tap as many as you
 like, say the N and the R at Atlantic Av, and their trains show up together, each
