@@ -1,10 +1,19 @@
 # Train Times: a next-train widget for the NYC subway
 
-An iPhone widget with a live countdown to the next train, its arrival time, and
-the trains after it. You choose the station, lines and direction in the app. Live
+An iPhone widget with a live countdown to the next train and the times of the
+trains after it. You choose the station, lines and direction in the app. Live
 predictions are green; timetable times the MTA hasn't assigned a train to yet are
 white. It reads the MTA's free real-time feeds (no API key) and covers every
 subway line and the Staten Island Railway.
+
+The small widget shows the countdown with the next two trains' times beside it.
+The medium one shows the countdown on its own, with any delay written above it,
+and lists the trains after it with their minutes to go.
+
+**Where the train is.** The medium widget's map button swaps that list for the
+stops between the next train and your station: the one it's at or heading for,
+the next, how many more, and yours. It comes from the MTA's live train positions,
+so it's as fresh as the widget's last refresh. Tap the button again for the times.
 
 **More than one line.** At a station with several lines, tap as many as you
 like, say the N and the R at Atlantic Av, and their trains show up together, each
@@ -18,8 +27,9 @@ always stop at your platform stay out unless you choose them.
 The app also shows, for the station and line you choose:
 
 - **Service alerts**: delays, suspensions, skipped stops and other changes in
-  effect now for that line at that station and direction. The widget mentions
-  the most important one.
+  effect now for that line at that station and direction. The widget marks the
+  most important one with an icon after the direction, and the medium widget
+  gives its headline.
 - **Accessibility**: whether the station is step-free, which elevators and
   escalators are out or have planned work, and the MTA's advice for getting
   around a broken elevator. Turn on "Show elevator outages on the widget" to
@@ -62,7 +72,9 @@ There are two versions:
 
 - `ios/`: a native app and widget. You pick any station and line in the app, and
   the widget moves on to the next train by itself and has refresh and walk
-  buttons. It's built on GitHub's Mac servers, so you don't need a Mac.
+  buttons (and, on the medium widget, the map button). Each lights up in the
+  line's colour: ↻ as new times come in, the others while they're on. It's built
+  on GitHub's Mac servers, so you don't need a Mac.
 - `scriptable/`: a script for the free Scriptable app, fixed to the R train at
   Prospect Av (change the settings at the top to use another stop). No computer
   needed.

@@ -32,8 +32,10 @@ struct LineBullet: View {
 
     var body: some View {
         let style = LineStyle.of(route)
+        let fontSize = size * (style.label.count > 1 ? 0.45 : 0.62)
         let label = Text(style.label)
-            .font(.system(size: size * (style.label.count > 1 ? 0.45 : 0.62), weight: .bold))
+            .font(.system(size: fontSize, weight: .bold))
+            .offset(y: -Self.capitalsOffset(fontSize: fontSize))
         if renderingMode == .fullColor {
             label
                 .foregroundStyle(style.usesDarkText ? Color.black : Color.white)
@@ -50,6 +52,25 @@ struct LineBullet: View {
                 .accessibilityLabel("\(style.label) train")
         }
     }
+
+    /// How far below the middle of its line a bold label's capitals sit. SwiftUI
+    /// centres a line of text, which runs from its ascender to its descender, so
+    /// this puts the letter or number itself in the middle of the circle.
+    static func capitalsOffset(fontSize: CGFloat) -> CGFloat {
+        let font = UIFont.systemFont(ofSize: fontSize, weight: .bold)
+        return (font.ascender + font.descender - font.capHeight) / 2
+    }
+}
+
+extension VerticalAlignment {
+    /// The middle of a block of text as you see it: halfway between the top of
+    /// its first line's capitals and its last baseline, so a bullet beside a
+    /// station name and direction looks centred on them.
+    private enum TextMiddle: AlignmentID {
+        static func defaultValue(in d: ViewDimensions) -> CGFloat { d[VerticalAlignment.center] }
+    }
+
+    static let textMiddle = VerticalAlignment(TextMiddle.self)
 }
 
 /// The bullets of the chosen lines in about the room of one: side by side for

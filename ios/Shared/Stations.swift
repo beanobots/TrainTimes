@@ -171,6 +171,11 @@ enum StationDirectory {
 
     /// The short name of the station a platform id belongs to ("G08N" is Forest Hills).
     static func terminalName(forStop stop: String) -> String? {
+        shortName(forStop: stop)
+    }
+
+    /// The short name of a stop on a train's way: "R45N" is Bay Ridge.
+    static func shortName(forStop stop: String) -> String? {
         (platformsByID[stop] ?? platformsByID[String(stop.dropLast())])?.short
     }
 }

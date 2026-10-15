@@ -15,84 +15,170 @@ struct Arrival: Hashable, Sendable {
     let isLive: Bool
     /// The trip's id in the feed, so a countdown can follow one train as its time changes.
     var trip: String = ""
+    /// The stops the trip still lists, up to and including this one: first the
+    /// one it's at or heading for (sometimes the one it just left), or, before
+    /// it sets off, where it starts.
+    var approach: [Stop] = []
+    /// Where the feed says the train is; nil when it doesn't say.
+    var position: Position? = nil
 
     var terminal: String? { StationDirectory.terminalName(forStop: lastStop) }
     var lineLabel: String { LineStyle.of(route).label }
+
+    struct Stop: Hashable, Sendable {
+        /// A platform's id plus N or S, e.g. "R34N".
+        let id: String
+        /// When the train is due there.
+        let time: Date
+
+        var name: String { StationDirectory.shortName(forStop: id) ?? id }
+    }
+
+    /// The feed's vehicle position for the trip.
+    struct Position: Hashable, Sendable {
+        /// The stop it's at, or on its way to.
+        let stop: String
+        let isStopped: Bool
+    }
+
+    /// Where the train is along `approach`.
+    enum Place: Hashable, Sendable {
+        /// It hasn't set off from the first stop.
+        case starting
+        /// Stopped at this stop.
+        case at(Int)
+        /// On its way to this stop, from the one before it.
+        case approaching(Int)
+    }
+
+    /// Nil when the feed doesn't list its stops.
+    func place(now: Date) -> Place? {
+        guard !approach.isEmpty else { return nil }
+        if !isLive { return .starting }
+        if let position, let index = approach.firstIndex(where: { $0.id == position.stop }) {
+            return position.isStopped ? .at(index) : .approaching(index)
+        }
+        // Without a position, the first stop it isn't due at yet
+        return .approaching(approach.firstIndex { $0.time > now } ?? approach.count - 1)
+    }
 }
 
 enum SubwayFeed {
     /// Decodes just enough of a GTFS-realtime feed (gtfs.org/realtime) to list,
     /// for every trip that stops at one of `stopIDs`, its route, arrival time,
-    /// which of them it stops at, its last stop and whether a train is assigned
-    /// to it, so the widget needs no protobuf library.
+    /// which of them it stops at, the stops before it, its last stop, whether a
+    /// train is assigned to it and where that train is, so the widget needs no
+    /// protobuf library.
     static func arrivals(at stopIDs: Set<String>, in data: Data) throws -> [Arrival] {
         let reader = ProtobufReader(data)
         var arrivals: [Arrival] = []
+        var positions: [String: Arrival.Position] = [:]
         try reader.fields(until: reader.count) { field in
             guard field == 2 else { return false } // FeedMessage.entity
             try reader.message { field in
-                guard field == 3 else { return false } // FeedEntity.trip_update
-                var route = ""
-                var time: UInt64 = 0
-                var at = ""
-                var lastStop = ""
-                var isLive = false
-                var trip = ""
-                try reader.message { field in
-                    switch field {
-                    case 1: // TripUpdate.trip
-                        try reader.message { field in
-                            switch field {
-                            case 1: trip = try reader.string() // TripDescriptor.trip_id
-                            case 5: route = try reader.string() // TripDescriptor.route_id
-                            case 1001: // the MTA's extension to TripDescriptor
-                                try reader.message { field in
-                                    guard field == 2 else { return false } // is_assigned
-                                    isLive = try reader.varint() == 1
-                                    return true
-                                }
-                            default: return false
-                            }
-                            return true
-                        }
-                    case 2: // TripUpdate.stop_time_update
-                        var stop = ""
-                        var arrival: UInt64 = 0
-                        var departure: UInt64 = 0
-                        try reader.message { field in
-                            switch field {
-                            case 4: stop = try reader.string()
-                            case 2: arrival = try eventTime(reader)
-                            case 3: departure = try eventTime(reader)
-                            default: return false
-                            }
-                            return true
-                        }
-                        if stopIDs.contains(stop) {
-                            time = arrival != 0 ? arrival : departure
-                            at = stop
-                        }
-                        lastStop = stop
-                    default:
-                        return false
-                    }
-                    return true
-                }
-                if time != 0 {
-                    arrivals.append(Arrival(
-                        route: Lines.normalized(route),
-                        time: Date(timeIntervalSince1970: TimeInterval(time)),
-                        stop: at,
-                        lastStop: lastStop,
-                        isLive: isLive,
-                        trip: trip
-                    ))
+                switch field {
+                case 3: // FeedEntity.trip_update
+                    if let arrival = try tripUpdate(reader, at: stopIDs) { arrivals.append(arrival) }
+                case 4: // FeedEntity.vehicle
+                    if let vehicle = try vehiclePosition(reader) { positions[vehicle.trip] = vehicle.position }
+                default:
+                    return false
                 }
                 return true
             }
             return true
         }
+        // A trip's position comes in an entity of its own
+        for index in arrivals.indices {
+            arrivals[index].position = positions[arrivals[index].trip]
+        }
         return arrivals.sorted { $0.time < $1.time }
+    }
+
+    /// The trip's arrival at one of `stopIDs`, or nil if it doesn't stop at them.
+    private static func tripUpdate(_ reader: ProtobufReader, at stopIDs: Set<String>) throws -> Arrival? {
+        var route = ""
+        var isLive = false
+        var trip = ""
+        var stops: [Arrival.Stop] = []
+        var at: Int?
+        var time: UInt64 = 0
+        try reader.message { field in
+            switch field {
+            case 1: // TripUpdate.trip
+                try reader.message { field in
+                    switch field {
+                    case 1: trip = try reader.string() // TripDescriptor.trip_id
+                    case 5: route = try reader.string() // TripDescriptor.route_id
+                    case 1001: // the MTA's extension to TripDescriptor
+                        try reader.message { field in
+                            guard field == 2 else { return false } // is_assigned
+                            isLive = try reader.varint() == 1
+                            return true
+                        }
+                    default: return false
+                    }
+                    return true
+                }
+            case 2: // TripUpdate.stop_time_update
+                var stop = ""
+                var arrival: UInt64 = 0
+                var departure: UInt64 = 0
+                try reader.message { field in
+                    switch field {
+                    case 4: stop = try reader.string()
+                    case 2: arrival = try eventTime(reader)
+                    case 3: departure = try eventTime(reader)
+                    default: return false
+                    }
+                    return true
+                }
+                let due = arrival != 0 ? arrival : departure
+                if stopIDs.contains(stop) {
+                    time = due
+                    at = stops.count
+                }
+                stops.append(Arrival.Stop(id: stop, time: Date(timeIntervalSince1970: TimeInterval(due))))
+            default:
+                return false
+            }
+            return true
+        }
+        guard let at, time != 0, let last = stops.last else { return nil }
+        return Arrival(
+            route: Lines.normalized(route),
+            time: Date(timeIntervalSince1970: TimeInterval(time)),
+            stop: stops[at].id,
+            lastStop: last.id,
+            isLive: isLive,
+            trip: trip,
+            approach: Array(stops[...at])
+        )
+    }
+
+    /// The trip a VehiclePosition is for, and the stop it's at or on its way to.
+    private static func vehiclePosition(_ reader: ProtobufReader) throws -> (trip: String, position: Arrival.Position)? {
+        var trip = ""
+        var stop = ""
+        // IN_TRANSIT_TO, which the feed leaves out as protobuf's default
+        var status: UInt64 = 2
+        try reader.message { field in
+            switch field {
+            case 1: // VehiclePosition.trip
+                try reader.message { field in
+                    guard field == 1 else { return false } // TripDescriptor.trip_id
+                    trip = try reader.string()
+                    return true
+                }
+            case 4: status = try reader.varint() // VehiclePosition.current_status
+            case 7: stop = try reader.string() // VehiclePosition.stop_id
+            default: return false
+            }
+            return true
+        }
+        guard !trip.isEmpty, !stop.isEmpty else { return nil }
+        // 1 is STOPPED_AT; 0 INCOMING_AT and 2 IN_TRANSIT_TO are both on the way
+        return (trip, Arrival.Position(stop: stop, isStopped: status == 1))
     }
 
     /// StopTimeEvent.time
