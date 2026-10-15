@@ -10,7 +10,7 @@ enum Spoken {
         let station = selection.station?.name ?? "your station"
         var sentence: String
         if let next = trains.first {
-            let train = describe(line: next.lineLabel, selection: selection)
+            let train = describe(line: next.lineLabel, heading: selection.heading(of: next))
             var after = ""
             if trains.count > 1 {
                 let second = trains[1]
@@ -27,7 +27,7 @@ enum Spoken {
                 if !after.isEmpty { sentence += " The one after is at \(after)." }
             }
         } else {
-            sentence = "There are no \(trainsPlural(line: lines, selection: selection)) predicted at \(station) right now."
+            sentence = "There are no \(trainsPlural(line: lines, heading: selection.heading)) predicted at \(station) right now."
         }
         if let notice {
             sentence += " Heads up: \(notice.lowercased())."
@@ -42,15 +42,13 @@ enum Spoken {
     }
 
     /// "R to Manhattan", or "northbound R" where the MTA gives the direction no name.
-    static func describe(line: String, selection: Selection) -> String {
-        let label = selection.station?.directionLabel(selection.direction) ?? ""
-        return label.hasPrefix("to ") ? "\(line) \(label)" : "\(label.lowercased()) \(line)".trimmingCharacters(in: .whitespaces)
+    static func describe(line: String, heading: String) -> String {
+        heading.hasPrefix("to ") ? "\(line) \(heading)" : "\(heading.lowercased()) \(line)".trimmingCharacters(in: .whitespaces)
     }
 
     /// "R trains to Manhattan", or "northbound R trains".
-    static func trainsPlural(line: String, selection: Selection) -> String {
-        let label = selection.station?.directionLabel(selection.direction) ?? ""
-        return label.hasPrefix("to ") ? "\(line) trains \(label)" : "\(label.lowercased()) \(line) trains".trimmingCharacters(in: .whitespaces)
+    static func trainsPlural(line: String, heading: String) -> String {
+        heading.hasPrefix("to ") ? "\(line) trains \(heading)" : "\(heading.lowercased()) \(line) trains".trimmingCharacters(in: .whitespaces)
     }
 
     static func minutes(until date: Date, from now: Date) -> Int {

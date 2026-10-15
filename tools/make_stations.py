@@ -9,7 +9,9 @@
 Each station keeps its GTFS stop id (the real-time feeds name platforms by adding
 N or S to it), the lines that serve it as real-time route ids, the labels the MTA
 gives its two directions, where it is and where its entrances are, and how
-accessible it is. The equipment list ties each elevator and escalator to its
+accessible it is. The MTA lists a station's sets of platforms apart, such as
+Atlantic Av-Barclays Ctr's D N R, B Q and 2 3 4 5; the app joins those with the
+same name in the same complex into one station. The equipment list ties each elevator and escalator to its
 station complex, so the outage feed, which names only the equipment, can be
 matched to a station.
 """

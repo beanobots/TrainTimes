@@ -44,7 +44,7 @@ enum TrainActivityController {
         let attributes = TrainActivityAttributes(
             selection: selection,
             stationName: selection.station?.name ?? "",
-            heading: selection.station?.directionLabel(selection.direction) ?? ""
+            heading: selection.heading
         )
         _ = try Activity.request(attributes: attributes, content: content(state))
         tellWidgets(SharedStore.Countdown(trainID: selection.trainID, ends: now.addingTimeInterval(lifetime)))

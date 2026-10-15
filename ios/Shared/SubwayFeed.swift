@@ -5,6 +5,8 @@ struct Arrival: Hashable, Sendable {
     /// A real-time route id, with express versions folded in ("6X" is "6").
     let route: String
     let time: Date
+    /// Where it stops at the station: its platform's id plus N or S, e.g. "R31N".
+    let stop: String
     /// The last stop of the trip, whose station is where the train ends up.
     let lastStop: String
     /// True when a real train is running this trip, so the time is a live
@@ -20,10 +22,10 @@ struct Arrival: Hashable, Sendable {
 
 enum SubwayFeed {
     /// Decodes just enough of a GTFS-realtime feed (gtfs.org/realtime) to list,
-    /// for every trip that stops at `stopID`, its route, arrival time, last
-    /// stop and whether a train is assigned to it, so the widget needs no
-    /// protobuf library.
-    static func arrivals(at stopID: String, in data: Data) throws -> [Arrival] {
+    /// for every trip that stops at one of `stopIDs`, its route, arrival time,
+    /// which of them it stops at, its last stop and whether a train is assigned
+    /// to it, so the widget needs no protobuf library.
+    static func arrivals(at stopIDs: Set<String>, in data: Data) throws -> [Arrival] {
         let reader = ProtobufReader(data)
         var arrivals: [Arrival] = []
         try reader.fields(until: reader.count) { field in
@@ -32,6 +34,7 @@ enum SubwayFeed {
                 guard field == 3 else { return false } // FeedEntity.trip_update
                 var route = ""
                 var time: UInt64 = 0
+                var at = ""
                 var lastStop = ""
                 var isLive = false
                 var trip = ""
@@ -65,7 +68,10 @@ enum SubwayFeed {
                             }
                             return true
                         }
-                        if stop == stopID { time = arrival != 0 ? arrival : departure }
+                        if stopIDs.contains(stop) {
+                            time = arrival != 0 ? arrival : departure
+                            at = stop
+                        }
                         lastStop = stop
                     default:
                         return false
@@ -76,6 +82,7 @@ enum SubwayFeed {
                     arrivals.append(Arrival(
                         route: Lines.normalized(route),
                         time: Date(timeIntervalSince1970: TimeInterval(time)),
+                        stop: at,
                         lastStop: lastStop,
                         isLive: isLive,
                         trip: trip

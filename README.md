@@ -8,11 +8,12 @@ subway line and the Staten Island Railway.
 
 **More than one line.** At a station with several lines, tap as many as you
 like, say the N and the R at Atlantic Av, and their trains show up together, each
-with its bullet.
+with its bullet. A station's lines are all in one place even where they stop on
+different platforms, so the 2 and the Q at Atlantic Av work too.
 
 Trains of another line running on yours show up too, with their own bullet: an N
 or D running local on the R, say, or an E running local in Queens. Lines that
-always stop at your station stay out unless you choose them.
+always stop at your platform stay out unless you choose them.
 
 The app also shows, for the station and line you choose:
 
@@ -28,8 +29,8 @@ The app also shows, for the station and line you choose:
 
 **More than one widget.** Every widget follows the app's choice until you give
 it its own: touch and hold the widget, tap **Edit Widget**, and pick a **Train**
-(search by station, then choose a line, or all of the station's lines, and a
-direction), for example one widget for home and one for work. The app's current
+(search by station, then choose a line, the lines of one of its platforms, or
+all of its lines, and a direction), for example one widget for home and one for work. The app's current
 choice is at the top of the list, so a widget can have any mix of lines. Each widget can also have its own walking time.
 
 **Walking time.** Set how long it takes you to walk to the station (in the app,

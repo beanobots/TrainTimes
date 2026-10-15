@@ -68,4 +68,9 @@ enum Lines {
         "1", "2", "3", "4", "5", "6", "7", "A", "C", "E", "B", "D", "F", "M",
         "G", "J", "Z", "L", "N", "Q", "R", "W", "GS", "SI",
     ]
+
+    /// Where `route` comes in that order, for listing a station's lines.
+    static func rank(_ route: String) -> Int {
+        filterRoutes.firstIndex(of: LineStyle.of(route).label == "S" ? "GS" : route) ?? filterRoutes.count
+    }
 }
