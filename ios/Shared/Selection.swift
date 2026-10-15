@@ -105,28 +105,6 @@ struct Selection: Codable, Hashable, Sendable {
         station?.platforms.first { $0.id + direction.rawValue == train.stop }
     }
 
-    /// Moves to `station`, on `label`'s line if it has one, else the current lines
-    /// it has, else its first.
-    mutating func choose(_ station: Station, preferring label: String? = nil) {
-        stationID = station.id
-        if let label, let match = station.routes.first(where: { LineStyle.of($0).label == label }) {
-            routes = [match]
-        } else {
-            let kept = station.routes.filter(routes.contains)
-            routes = kept.isEmpty ? Array(station.routes.prefix(1)) : kept
-        }
-    }
-
-    /// Adds `route` to the chosen lines, or takes it out unless it's the only one.
-    mutating func toggle(_ route: String) {
-        guard let station else { return }
-        if routes.contains(route) {
-            if routes.count > 1 { routes.removeAll { $0 == route } }
-        } else {
-            routes = station.routes.filter { routes.contains($0) || $0 == route }
-        }
-    }
-
     /// A saved choice that no longer matches the station list falls back to the
     /// default; a line the station has lost is just dropped. One saved when its
     /// platform was a station of its own moves to the station it's part of.

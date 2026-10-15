@@ -28,7 +28,7 @@ struct Pill: View {
                     // Tinted and clear Home Screens draw a widget in one color; an outline stays readable
                     Capsule().strokeBorder(lineWidth: 1.5)
                 } else {
-                    Capsule().fill(.white.opacity(0.15))
+                    Capsule().fill(Color.boardButton)
                 }
             }
             .widgetAccentable(lit != nil)
@@ -36,7 +36,8 @@ struct Pill: View {
     }
 
     private var iconColor: Color {
-        guard let lit, renderingMode == .fullColor else { return .white }
+        guard renderingMode == .fullColor else { return .white }
+        guard let lit else { return .boardText }
         return lit.usesDarkText ? .black : .white
     }
 }

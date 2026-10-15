@@ -12,6 +12,7 @@ struct ContentView: View {
     /// The train the Lock Screen countdown is for, while one is running.
     @State private var countdownTrain: Date? = TrainActivityController.currentTrain
     @State private var countdownProblem: String?
+    @State private var choosingTrain = false
 
     private enum LoadState { case loading, loaded, failed }
 
@@ -22,27 +23,7 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             List {
-                stationSection
-                if let station {
-                    Section {
-                        LinePicker(routes: station.routes, selection: $selection)
-                    } header: {
-                        Text(station.routes.count > 1 ? "Lines" : "Line")
-                    } footer: {
-                        if station.routes.count > 1 {
-                            Text("Tap more than one to see all their trains together.")
-                        }
-                    }
-                    Section("Direction") {
-                        Picker("Direction", selection: $selection.direction) {
-                            ForEach(Direction.allCases, id: \.self) { direction in
-                                Text(station.directionLabel(direction, routes: selection.routes)).tag(direction)
-                            }
-                        }
-                        .pickerStyle(.inline)
-                        .labelsHidden()
-                    }
-                }
+                trainSection
                 Section {
                     Stepper(value: $selection.walkMinutes, in: 0...60) {
                         Text(selection.walkMinutes == 0 ? "Walk to the station: not set" : "Walk to the station: \(selection.walkMinutes) min")
@@ -77,6 +58,9 @@ struct ContentView: View {
                 }
             }
             .navigationTitle("Train Times")
+            .sheet(isPresented: $choosingTrain) {
+                TrainPicker(selection: $selection)
+            }
             .refreshable { await loadBoard() }
             .onChange(of: selection) { _, new in
                 SharedStore.save(new)
@@ -87,22 +71,36 @@ struct ContentView: View {
         }
     }
 
-    private var stationSection: some View {
+    /// The chosen train; tapping it chooses another, in three steps.
+    private var trainSection: some View {
         Section {
-            NavigationLink {
-                StationPicker(selection: $selection)
+            Button {
+                choosingTrain = true
             } label: {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(station?.name ?? "Choose a station").font(.headline)
-                    if let station {
-                        Text(station.borough).font(.subheadline).foregroundStyle(.secondary)
+                HStack(spacing: 12) {
+                    LineBullets(routes: selection.routes, size: 36)
+                        .frame(width: 46)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(station?.name ?? "Choose a train").font(.headline).foregroundStyle(.primary)
+                        if let station {
+                            Text("\(Lines.list(selection.routes)) \(selection.heading) · \(station.borough)")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
                     }
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.tertiary)
                 }
+                .padding(.vertical, 4)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
         } header: {
-            Text("Station")
+            Text("Train")
         } footer: {
-            Text("Widgets show this station, lines and direction, unless you pick a train in a widget's Edit menu.")
+            Text("Widgets show this train unless you pick one in a widget's Edit menu.")
         }
     }
 
@@ -409,31 +407,5 @@ private struct EntranceMark: View {
                 .frame(width: 10, height: 10)
                 .overlay(Circle().stroke(Color.white, lineWidth: 2))
         }
-    }
-}
-
-/// The bullets of the lines that stop at the station; tap one to add it to the
-/// chosen lines or take it out (the last one stays).
-private struct LinePicker: View {
-    let routes: [String]
-    @Binding var selection: Selection
-
-    var body: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 48))], spacing: 12) {
-            ForEach(routes, id: \.self) { route in
-                let chosen = selection.routes.contains(route)
-                Button {
-                    selection.toggle(route)
-                } label: {
-                    LineBullet(route: route, size: 40)
-                        .padding(4)
-                        .overlay(Circle().stroke(Color.accentColor, lineWidth: chosen ? 3 : 0))
-                        .opacity(chosen ? 1 : 0.5)
-                }
-                .buttonStyle(.plain)
-                .accessibilityAddTraits(chosen ? .isSelected : [])
-            }
-        }
-        .padding(.vertical, 6)
     }
 }
