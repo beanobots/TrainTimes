@@ -32,7 +32,7 @@ struct StationQuery: EntityStringQuery {
 
     /// Every station, or with a line chosen, the ones it stops at.
     private var stations: [Station] {
-        guard let routes = widget?.line?.routes else { return StationDirectory.all }
+        guard let routes = widget?.line.routes else { return StationDirectory.all }
         return StationDirectory.all.filter { $0.routes.contains(where: routes.contains) }
     }
 
@@ -121,7 +121,7 @@ struct LineQuery: EntityStringQuery {
     /// At a station: each platform's lines, one at a time or all together, then
     /// every line there. Without one: every line, by the trunk it runs on.
     private var groups: [ChoiceGroup<LineEntity>] {
-        guard let station = widget?.station?.station else {
+        guard let station = widget?.station.station else {
             return Lines.trunks.map { trunk in
                 ChoiceGroup(title: trunk.name, items: trunk.routes.map { LineEntity(routes: [$0]) })
             }
@@ -222,8 +222,8 @@ struct DirectionQuery: EntityQuery {
 
     /// Named by the station's platforms once the station and line go together.
     func suggestedEntities() async throws -> [DirectionEntity] {
-        let routes = lineChoice?.line?.routes ?? []
-        guard let station = stationChoice?.station?.station, !routes.isEmpty, routes.allSatisfy(station.routes.contains) else {
+        let routes = lineChoice?.line.routes ?? []
+        guard let station = stationChoice?.station.station, !routes.isEmpty, routes.allSatisfy(station.routes.contains) else {
             return Direction.allCases.map { DirectionEntity($0) }
         }
         return Direction.allCases.map { DirectionEntity($0, station: station, routes: routes) }
