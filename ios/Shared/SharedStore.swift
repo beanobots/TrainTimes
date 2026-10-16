@@ -28,9 +28,12 @@ enum SharedStore {
     private static let file = container?.appendingPathComponent("selection.json")
     private static let countdownFile = container?.appendingPathComponent("countdown.json")
     private static let mapFile = container?.appendingPathComponent("map.json")
+    private static let alertFile = container?.appendingPathComponent("alert.json")
     private static let refreshFile = container?.appendingPathComponent("refreshed.json")
     private static let toggleFile = container?.appendingPathComponent("toggled.json")
     private static let boardsFile = container?.appendingPathComponent("boards.json")
+    private static let widgetsFile = container?.appendingPathComponent("widgets.json")
+    private static let settingsFile = container?.appendingPathComponent("settings.json")
 
     /// Whether a choice made in the app can reach the widget on this install.
     static var isAvailable: Bool { file != nil }
@@ -76,20 +79,60 @@ enum SharedStore {
     /// where it is instead of the later trains. A widget can't keep state of its
     /// own, so its map button leaves it here.
     static func showsMap(for trainID: String) -> Bool {
-        mapTrains().contains(trainID)
+        trains(in: mapFile).contains(trainID)
     }
 
     static func toggleMap(for trainID: String) {
-        guard let mapFile else { return }
-        var trains = mapTrains()
-        if trains.remove(trainID) == nil { trains.insert(trainID) }
-        if let data = try? JSONEncoder().encode(trains.sorted()) {
-            try? data.write(to: mapFile, options: .atomic)
+        toggle(trainID, in: mapFile)
+    }
+
+    /// Whether the home screen widgets for this train, with these alerts (a
+    /// `Selection.alertID`), show their alert in full instead of the times.
+    /// Their banner leaves it here, as the map button does.
+    static func showsAlert(for alertID: String) -> Bool {
+        trains(in: alertFile).contains(alertID)
+    }
+
+    static func toggleAlert(for alertID: String) {
+        toggle(alertID, in: alertFile)
+    }
+
+    /// Closes the train's alert. Unlike a toggle, two widgets doing this at
+    /// once can't open it again.
+    static func closeAlert(for alertID: String) {
+        guard let alertFile else { return }
+        changing(alertFile) {
+            var trains = trains(in: alertFile)
+            guard trains.remove(alertID) != nil else { return }
+            write(trains, to: alertFile)
         }
     }
 
-    private static func mapTrains() -> Set<String> {
-        guard let mapFile, let data = try? Data(contentsOf: mapFile),
+    private static func toggle(_ trainID: String, in file: URL?) {
+        guard let file else { return }
+        changing(file) {
+            var trains = trains(in: file)
+            if trains.remove(trainID) == nil { trains.insert(trainID) }
+            write(trains, to: file)
+        }
+    }
+
+    private static func write(_ trains: Set<String>, to file: URL) {
+        if let data = try? JSONEncoder().encode(trains.sorted()) {
+            try? data.write(to: file, options: .atomic)
+        }
+    }
+
+    /// Reads and rewrites `file` in `body` with no other change to it in
+    /// between, from this process or another: several widgets reload at once,
+    /// and the app can write the same files.
+    private static func changing(_ file: URL, _ body: () -> Void) {
+        var error: NSError?
+        NSFileCoordinator().coordinate(writingItemAt: file, options: .forMerging, error: &error) { _ in body() }
+    }
+
+    private static func trains(in file: URL?) -> Set<String> {
+        guard let file, let data = try? Data(contentsOf: file),
               let trains = try? JSONDecoder().decode([String].self, from: data) else { return [] }
         return Set(trains)
     }
@@ -105,8 +148,9 @@ enum SharedStore {
         try? data.write(to: refreshFile, options: .atomic)
     }
 
-    /// When a map or walk button was last tapped. Those change only how the
-    /// widgets look, so they redraw with the times they already have.
+    /// When a map or walk button or an alert banner was last tapped. Those
+    /// change only how the widgets look, so they redraw with the times they
+    /// already have.
     static func loadToggled() -> Date? {
         guard let toggleFile, let data = try? Data(contentsOf: toggleFile) else { return nil }
         return try? JSONDecoder().decode(Date.self, from: data)
@@ -132,12 +176,16 @@ enum SharedStore {
     /// Kept for 20 minutes, twice as long as a widget waits to reload.
     @discardableResult
     static func saveBoard(_ board: Board, for selection: Selection, fetched: Date) -> SavedBoard {
-        let saved = SavedBoard(fetched: fetched, trains: board.trains, notice: board.notice(includingElevators: selection.elevatorAlerts))
+        let saved = SavedBoard(fetched: fetched, trains: board.trains,
+                               notice: board.notice(for: selection, settings: loadSettings()))
         guard let boardsFile else { return saved }
-        var boards = savedBoards().filter { fetched.timeIntervalSince($0.value.fetched) < 20 * 60 }
-        boards[boardKey(selection)] = saved
-        if let data = try? JSONEncoder().encode(boards) {
-            try? data.write(to: boardsFile, options: .atomic)
+        let key = boardKey(selection)
+        changing(boardsFile) {
+            var boards = savedBoards().filter { fetched.timeIntervalSince($0.value.fetched) < 20 * 60 }
+            boards[key] = saved
+            if let data = try? JSONEncoder().encode(boards) {
+                try? data.write(to: boardsFile, options: .atomic)
+            }
         }
         return saved
     }
@@ -148,8 +196,72 @@ enum SharedStore {
         return boards
     }
 
-    /// The board depends on the train and on whether it counts elevator outages.
+    /// The board depends on the train and on which alerts it mentions, which
+    /// Settings has a say in too.
     private static func boardKey(_ selection: Selection) -> String {
-        "\(selection.trainID) \(selection.elevatorAlerts)"
+        let kinds = loadSettings().alertKinds.map(\.rawValue).sorted().map(String.init).joined(separator: ",")
+        return "\(selection.trainID) \(selection.elevatorAlerts) \(selection.serviceAlerts) \(kinds)"
+    }
+
+    /// The choices made in the app's Settings tab; the defaults until there are any.
+    static func loadSettings() -> AppSettings {
+        guard let settingsFile, let data = try? Data(contentsOf: settingsFile),
+              let saved = try? JSONDecoder().decode(AppSettings.self, from: data) else { return AppSettings() }
+        return saved
+    }
+
+    static func saveSettings(_ settings: AppSettings) {
+        guard let settingsFile, let data = try? JSONEncoder().encode(settings) else { return }
+        try? data.write(to: settingsFile, options: .atomic)
+    }
+
+    /// The widgets set up in the app. Before there were any, the one train
+    /// chosen in the app becomes the first, and the default. Its id is always
+    /// the same, so a widget set up before the app saves it still finds it.
+    static func loadWidgets() -> SavedWidgets {
+        guard let widgetsFile, let data = try? Data(contentsOf: widgetsFile),
+              let saved = try? JSONDecoder().decode(SavedWidgets.self, from: data) else {
+            return SavedWidgets(widgets: [SavedWidget(id: SavedWidget.firstID, selection: load())])
+        }
+        return saved.validated()
+    }
+
+    /// Also leaves the default's train as the app's choice, which Siri, the
+    /// countdown and widgets set up before saved widgets go by.
+    static func saveWidgets(_ saved: SavedWidgets) {
+        save(saved.defaultWidget.selection)
+        guard let widgetsFile, let data = try? JSONEncoder().encode(saved) else { return }
+        try? data.write(to: widgetsFile, options: .atomic)
+    }
+}
+
+/// The app's Settings: what goes for every widget, the countdown and Siri. A
+/// widget's own choices, in the Widgets tab, come first.
+struct AppSettings: Codable, Hashable, Sendable {
+    /// The kinds of MTA alert that widgets, the countdown and Siri mention. The
+    /// app always lists them all.
+    var alertKinds: Set<ServiceAlert.Kind> = Set(ServiceAlert.Kind.allCases)
+    /// Marks stations and platforms without step-free access when choosing a train.
+    var stepFree = false
+    /// A bigger countdown on the small widget, and the medium widget's larger
+    /// layout on every iPhone.
+    var largerWidgetText = false
+    /// Marks live predictions with a symbol, not only in green.
+    var marksLiveTimes = false
+
+    init() {}
+
+    private enum CodingKeys: String, CodingKey {
+        case alertKinds, stepFree, largerWidgetText, marksLiveTimes
+    }
+
+    /// Settings saved before any of these existed still load, with the rest at their defaults.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = AppSettings()
+        alertKinds = try container.decodeIfPresent(Set<ServiceAlert.Kind>.self, forKey: .alertKinds) ?? defaults.alertKinds
+        stepFree = try container.decodeIfPresent(Bool.self, forKey: .stepFree) ?? defaults.stepFree
+        largerWidgetText = try container.decodeIfPresent(Bool.self, forKey: .largerWidgetText) ?? defaults.largerWidgetText
+        marksLiveTimes = try container.decodeIfPresent(Bool.self, forKey: .marksLiveTimes) ?? defaults.marksLiveTimes
     }
 }

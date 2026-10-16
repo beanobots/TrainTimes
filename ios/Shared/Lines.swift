@@ -31,7 +31,7 @@ struct LineStyle: Hashable, Sendable {
 enum Lines {
     /// The express versions of a line are their own routes in the feeds.
     static func normalized(_ route: String) -> String {
-        ["6X": "6", "7X": "7", "FX": "F"][route] ?? route
+        ["5X": "5", "6X": "6", "7X": "7", "FX": "F"][route] ?? route
     }
 
     /// The real-time feeds whose trains can stop on `routes`' tracks: their own,

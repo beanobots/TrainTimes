@@ -25,8 +25,15 @@ targets:
         CFBundleDisplayName: Train Times
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        # traintimes:// links, such as the widget's alert opening it in the app
+        CFBundleURLTypes:
+          - CFBundleURLName: Train Times
+            CFBundleURLSchemes:
+              - traintimes
         # The Lock Screen and Dynamic Island countdown
         NSSupportsLiveActivities: true
+        # Stations near you, at the top of the station lists
+        NSLocationWhenInUseUsageDescription: Your location puts the stations near you at the top of the list.
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait

@@ -10,25 +10,28 @@ struct Selection: Codable, Hashable, Sendable {
     var direction: Direction
     /// Whether the widget mentions an elevator out at the station (the app always lists them).
     var elevatorAlerts: Bool
+    /// Whether the widget mentions the MTA's service alerts (the app always lists them).
+    var serviceAlerts: Bool
     /// Minutes to walk to the station. Trains you can't reach in time are left out,
     /// and the widget counts down to when to leave.
     var walkMinutes: Int
 
-    init(stationID: String, routes: [String], direction: Direction, elevatorAlerts: Bool = false, walkMinutes: Int = 0) {
+    init(stationID: String, routes: [String], direction: Direction, elevatorAlerts: Bool = false, serviceAlerts: Bool = true, walkMinutes: Int = 0) {
         self.stationID = stationID
         self.routes = routes
         self.direction = direction
         self.elevatorAlerts = elevatorAlerts
+        self.serviceAlerts = serviceAlerts
         self.walkMinutes = walkMinutes
     }
 
     private enum CodingKeys: String, CodingKey {
-        case stationID, routes, direction, elevatorAlerts, walkMinutes
+        case stationID, routes, direction, elevatorAlerts, serviceAlerts, walkMinutes
         /// The one line chosen before more than one could be
         case route
     }
 
-    /// Choices saved before `routes`, `elevatorAlerts` and `walkMinutes` existed still load.
+    /// Choices saved before `routes`, `elevatorAlerts`, `serviceAlerts` and `walkMinutes` existed still load.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         stationID = try container.decode(String.self, forKey: .stationID)
@@ -36,6 +39,7 @@ struct Selection: Codable, Hashable, Sendable {
             ?? [container.decode(String.self, forKey: .route)]
         direction = try container.decode(Direction.self, forKey: .direction)
         elevatorAlerts = try container.decodeIfPresent(Bool.self, forKey: .elevatorAlerts) ?? false
+        serviceAlerts = try container.decodeIfPresent(Bool.self, forKey: .serviceAlerts) ?? true
         walkMinutes = try container.decodeIfPresent(Int.self, forKey: .walkMinutes) ?? 0
     }
 
@@ -45,6 +49,7 @@ struct Selection: Codable, Hashable, Sendable {
         try container.encode(routes, forKey: .routes)
         try container.encode(direction, forKey: .direction)
         try container.encode(elevatorAlerts, forKey: .elevatorAlerts)
+        try container.encode(serviceAlerts, forKey: .serviceAlerts)
         try container.encode(walkMinutes, forKey: .walkMinutes)
     }
 
@@ -114,5 +119,38 @@ struct Selection: Codable, Hashable, Sendable {
         selection.stationID = station.id
         selection.routes = station.routes.filter(routes.contains)
         return selection.routes.isEmpty ? .fallback : selection
+    }
+}
+
+extension Selection {
+    /// Opens the app at this train's alerts, from a widget showing one:
+    /// "traintimes://alerts?station=R34&lines=R&direction=N&elevators=0". A
+    /// widget's train can be other than the app's, so it goes along.
+    var alertsURL: URL {
+        var components = URLComponents()
+        components.scheme = "traintimes"
+        components.host = "alerts"
+        components.queryItems = [
+            URLQueryItem(name: "station", value: stationID),
+            URLQueryItem(name: "lines", value: routes.joined(separator: ",")),
+            URLQueryItem(name: "direction", value: direction.rawValue),
+            URLQueryItem(name: "elevators", value: elevatorAlerts ? "1" : "0"),
+        ]
+        return components.url ?? URL(string: "traintimes://alerts")!
+    }
+
+    /// The train an `alertsURL` is for, or nil for any other link.
+    init?(alertsURL url: URL) {
+        guard url.scheme == "traintimes", url.host == "alerts",
+              let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems else { return nil }
+        let value = { (name: String) in items.first { $0.name == name }?.value }
+        guard let station = value("station"), let lines = value("lines"),
+              let direction = value("direction").flatMap(Direction.init(rawValue:)) else { return nil }
+        self.init(stationID: station, routes: lines.split(separator: ",").map(String.init),
+                  direction: direction, elevatorAlerts: value("elevators") == "1")
+        // Not the fallback train, as validated() would give for a station
+        // that's gone or lines it doesn't have: that's not the widget's train
+        guard let known = self.station, known.routes.contains(where: routes.contains) else { return nil }
+        self = validated()
     }
 }

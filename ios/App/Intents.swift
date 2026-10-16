@@ -17,7 +17,7 @@ struct NextTrainIntent: AppIntent {
             return .result(dialog: "I couldn't reach the MTA. Try again in a moment.", view: NextTrainSnippet(selection: selection, trains: []))
         }
         let trains = selection.catchable(board.trains, now: now)
-        let notice = board.notice(includingElevators: selection.elevatorAlerts)?.label
+        let notice = board.notice(for: selection, settings: SharedStore.loadSettings())?.label
         let sentence = Spoken.nextTrain(selection: selection, trains: trains, notice: notice, now: now)
         return .result(dialog: "\(sentence)", view: NextTrainSnippet(selection: selection, trains: Array(trains.prefix(3))))
     }
@@ -39,37 +39,14 @@ struct StartCountdownIntent: LiveActivityIntent {
     }
 }
 
-struct TrainShortcuts: AppShortcutsProvider {
-    static var appShortcuts: [AppShortcut] {
-        AppShortcut(
-            intent: NextTrainIntent(),
-            phrases: [
-                "When's my next train in \(.applicationName)",
-                "When is my next train in \(.applicationName)",
-                "Next train in \(.applicationName)",
-                "Check \(.applicationName)",
-            ],
-            shortTitle: "Next train",
-            systemImageName: "tram.fill"
-        )
-        AppShortcut(
-            intent: StartCountdownIntent(),
-            phrases: [
-                "Start my train countdown in \(.applicationName)",
-                "I'm on my way in \(.applicationName)",
-            ],
-            shortTitle: "Count down to my train",
-            systemImageName: "timer"
-        )
-    }
-}
-
 /// The card Siri and Shortcuts show with the answer.
 struct NextTrainSnippet: View {
     let selection: Selection
     let trains: [Arrival]
+    @Environment(\.accessibilityDifferentiateWithoutColor) private var withoutColor
 
     var body: some View {
+        let marksLive = withoutColor || SharedStore.loadSettings().marksLiveTimes
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 LineBullets(routes: selection.routes, size: 28)
@@ -89,6 +66,9 @@ struct NextTrainSnippet: View {
                         .font(.headline)
                         .monospacedDigit()
                         .foregroundStyle(train.isLive ? Color.liveText : Color.primary)
+                    if marksLive && train.isLive {
+                        LiveMark(size: 12).foregroundStyle(Color.liveText)
+                    }
                     if selection.marksLine(of: train) {
                         LineBullet(route: train.route, size: 18)
                     }

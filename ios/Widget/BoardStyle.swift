@@ -22,13 +22,11 @@ struct BoardStyle {
     var headingUIFont: UIFont { .preferredFont(forTextStyle: isLarge ? .footnote : .caption2) }
     var headingScale: CGFloat { isLarge ? 0.85 : 0.8 }
 
-    // The countdown, and what's wrong above it
+    // The countdown
 
     var countdownSize: CGFloat { isLarge ? 48 : 32 }
     var countdownHeight: CGFloat { isLarge ? 36 : 34 }
     var countdownBullet: CGFloat { isLarge ? 24 : 18 }
-    var alertFont: Font { isLarge ? .footnote : .caption2 }
-    var alertLines: Int { isLarge ? 1 : 2 }
 
     // The column on the right: the later trains, or the stops before yours
 
@@ -37,19 +35,8 @@ struct BoardStyle {
     var columnGap: CGFloat { 10 }
     var rowHeight: CGFloat { isLarge ? 19 : 14.5 }
 
-    /// How many rows the column has room for: one more when it starts at the
-    /// top, beside a short station name, rather than under it.
-    func rows(raised: Bool) -> Int {
-        (isLarge ? 3 : 4) + (raised ? 1 : 0)
-    }
-
-    /// Where the column starts under the station name: level with the
-    /// direction's capitals.
-    var columnTop: CGFloat {
-        let heading = headingUIFont
-        let label = UIFont.preferredFont(forTextStyle: .caption2)
-        return nameUIFont.lineHeight + (heading.ascender - heading.capHeight) - (label.ascender - label.capHeight)
-    }
+    /// How many rows the column has room for, from the top beside the station.
+    var columnRows: Int { isLarge ? 4 : 5 }
 
     var timeFont: Font { isLarge ? .body.weight(.semibold) : .footnote.weight(.semibold) }
     var timeUIFont: UIFont { .monospacedDigitSystemFont(ofSize: Self.points(isLarge ? .body : .footnote), weight: .semibold) }
