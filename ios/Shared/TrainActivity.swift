@@ -84,6 +84,29 @@ struct ToggleMapIntent: AppIntent {
     }
 }
 
+/// A home screen widget's alert banner: shows the alert in full, or the times
+/// again. It runs in the widget, which reloads once it's done.
+struct ToggleAlertIntent: AppIntent {
+    static let title: LocalizedStringResource = "Show the alert"
+    static let isDiscoverable = false
+
+    /// A `Selection.alertID`.
+    @Parameter(title: "Train")
+    var trainID: String
+
+    init() {}
+
+    init(selection: Selection) {
+        trainID = selection.alertID
+    }
+
+    func perform() async throws -> some IntentResult {
+        SharedStore.toggleAlert(for: trainID)
+        SharedStore.saveToggled(.now)
+        return .result()
+    }
+}
+
 /// A widget's walk button: starts the countdown to that widget's train, or
 /// stops it if it's already counting down to that train.
 struct ToggleCountdownIntent: LiveActivityIntent {
@@ -97,11 +120,21 @@ struct ToggleCountdownIntent: LiveActivityIntent {
     @Parameter(title: "Walking time (minutes)")
     var walkMinutes: Int
 
+    // The widget's own choice of what the countdown mentions, not the default widget's
+
+    @Parameter(title: "Elevator outages", default: false)
+    var elevatorAlerts: Bool
+
+    @Parameter(title: "Service alerts", default: true)
+    var serviceAlerts: Bool
+
     init() {}
 
     init(selection: Selection) {
         trainID = selection.trainID
         walkMinutes = selection.walkMinutes
+        elevatorAlerts = selection.elevatorAlerts
+        serviceAlerts = selection.serviceAlerts
     }
 
     func perform() async throws -> some IntentResult {
@@ -109,6 +142,8 @@ struct ToggleCountdownIntent: LiveActivityIntent {
         SharedStore.saveToggled(.now)
         if var selection = StopEntity(id: trainID)?.selection(basedOn: SharedStore.load()) {
             selection.walkMinutes = walkMinutes
+            selection.elevatorAlerts = elevatorAlerts
+            selection.serviceAlerts = serviceAlerts
             try await TrainActivityController.toggle(for: selection)
         }
         #endif

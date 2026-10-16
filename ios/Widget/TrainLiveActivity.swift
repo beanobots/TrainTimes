@@ -1,5 +1,6 @@
 import ActivityKit
 import SwiftUI
+import UIKit
 import WidgetKit
 
 /// The countdown to one train on the Lock Screen and in the Dynamic Island,
@@ -24,11 +25,16 @@ struct TrainLiveActivity: Widget {
                     }
                 }
                 DynamicIslandExpandedRegion(.trailing) {
-                    countdown(context)
-                        .font(.system(size: 26, weight: .bold, design: .rounded))
-                        .monospacedDigit()
-                        .multilineTextAlignment(.trailing)
-                        .foregroundStyle(context.state.isLive ? Color.liveGreen : .white)
+                    HStack(spacing: 4) {
+                        if marksLive(context) {
+                            LiveMark(size: 11)
+                        }
+                        countdown(context)
+                            .font(.system(size: 26, weight: .bold, design: .rounded))
+                            .monospacedDigit()
+                            .multilineTextAlignment(.trailing)
+                    }
+                    .foregroundStyle(context.state.isLive ? Color.liveGreen : .white)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     HStack {
@@ -68,11 +74,17 @@ private struct CountdownBanner: View {
                 Spacer()
                 buttons(context)
             }
-            countdown(context)
-                .font(.system(size: 40, weight: .bold, design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(context.state.isLive ? Color.liveGreen : .white)
-                .multilineTextAlignment(.leading)
+            // The mark goes first: the countdown takes all the width it's given
+            HStack(spacing: 6) {
+                if marksLive(context) {
+                    LiveMark(size: 18)
+                }
+                countdown(context)
+                    .font(.system(size: 40, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+                    .multilineTextAlignment(.leading)
+            }
+            .foregroundStyle(context.state.isLive ? Color.liveGreen : .white)
             Text(summary(context))
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(Color.boardGray)
@@ -106,6 +118,13 @@ private func buttons(_ context: ActivityViewContext<TrainActivityAttributes>) ->
 private func countdown(_ context: ActivityViewContext<TrainActivityAttributes>) -> Text {
     let state = context.state
     return Text(timerInterval: min(state.updated, state.train)...state.train, countsDown: true)
+}
+
+/// Whether the countdown's train is live and Settings › Mark live times, or the
+/// phone's Differentiate Without Color, is on, as on the widgets.
+private func marksLive(_ context: ActivityViewContext<TrainActivityAttributes>) -> Bool {
+    context.state.isLive
+        && (UIAccessibility.shouldDifferentiateWithoutColor || SharedStore.loadSettings().marksLiveTimes)
 }
 
 /// The line of the train it's counting down to, which can be another one running on yours.

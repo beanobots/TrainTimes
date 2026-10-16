@@ -1,77 +1,112 @@
-import AppIntents
 import MapKit
 import SwiftUI
-import WidgetKit
 
-struct ContentView: View {
-    @State private var selection = SharedStore.load()
+/// One train, opened from the Live tab: its times, countdown, alerts and map.
+/// A favorite's walking time is saved with it; ☆ adds or removes it.
+struct TrainDetail: View {
+    @Environment(FavoritesStore.self) private var favorites
+    @Environment(SettingsStore.self) private var settings
+    @Environment(\.accessibilityDifferentiateWithoutColor) private var withoutColor
+    @State private var selection: Selection
     @State private var board: Board?
     @State private var loadState = LoadState.loading
+    /// When the board's alerts and elevator outages were fetched, which change
+    /// far less often than the times.
+    @State private var noticesFetched: Date?
     /// Moves along every few seconds so trains you can no longer catch drop off the list.
     @State private var now = Date.now
-    /// The train the Lock Screen countdown is for, while one is running.
-    @State private var countdownTrain: Date? = TrainActivityController.currentTrain
+    /// The train this train's Lock Screen countdown is for, while one is running.
+    @State private var countdownTrain: Date?
     @State private var countdownProblem: String?
+    /// While a countdown's starting, so a second tap doesn't start another.
+    @State private var startingCountdown = false
     @State private var choosingTrain = false
 
     private enum LoadState { case loading, loaded, failed }
+
+    init(selection: Selection) {
+        _selection = State(initialValue: selection)
+        _countdownTrain = State(initialValue: TrainActivityController.currentTrain(for: selection))
+    }
+
+    private var isFavorite: Bool { favorites.contains(selection) }
 
     private var station: Station? { selection.station }
     /// The trains you can still catch, given the walking time.
     private var trains: [Arrival] { selection.catchable(board?.trains ?? [], now: now) }
 
     var body: some View {
-        NavigationStack {
-            List {
-                trainSection
-                Section {
-                    Stepper(value: $selection.walkMinutes, in: 0...60) {
-                        Text(selection.walkMinutes == 0 ? "Walk to the station: not set" : "Walk to the station: \(selection.walkMinutes) min")
+        List {
+            trainSection
+            Section {
+                Stepper(value: $selection.walkMinutes, in: 0...60) {
+                    Text(selection.walkMinutes == 0 ? "Walk to the station: not set" : "Walk to the station: \(selection.walkMinutes) min")
+                }
+            } header: {
+                Text("Getting there")
+            } footer: {
+                Text(isFavorite
+                     ? "Trains you can't reach in time are left out, here and in Favorites."
+                     : "Trains you can't reach in time are left out. Add this train to Favorites to keep its walking time.")
+            }
+            trainsSection
+            countdownSection
+            if loadState == .loaded, let board {
+                alertsSection(board.alerts)
+            }
+            if let station {
+                accessibilitySection(station)
+                mapSection(station)
+            }
+        }
+        .navigationTitle(station?.name ?? "Train")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button(isFavorite ? "Remove from Favorites" : "Add to Favorites", systemImage: isFavorite ? "star.fill" : "star") {
+                    if isFavorite {
+                        favorites.remove(selection)
+                    } else {
+                        favorites.add(selection)
                     }
-                } header: {
-                    Text("Getting there")
-                } footer: {
-                    Text("Trains you can't reach in time are left out, and the widget counts down to when to leave.")
-                }
-                trainsSection
-                countdownSection
-                if loadState == .loaded, let board {
-                    alertsSection(board.alerts)
-                }
-                if let station {
-                    accessibilitySection(station)
-                    mapSection(station)
-                }
-                Section {
-                    SiriTipView(intent: NextTrainIntent())
-                    ShortcutsLink()
-                } header: {
-                    Text("Siri and Shortcuts")
-                }
-                if !SharedStore.isAvailable {
-                    Section {
-                        Label("The widget can't see your choice on this install, so it keeps showing Prospect Av (R) toward Manhattan.", systemImage: "exclamationmark.triangle")
-                            .foregroundStyle(.orange)
-                    } footer: {
-                        Text("The shared storage the app and widget use wasn't set up when this was installed. Reinstalling with AltStore should fix it.")
-                    }
                 }
             }
-            .navigationTitle("Train Times")
-            .sheet(isPresented: $choosingTrain) {
-                TrainPicker(selection: $selection)
+        }
+        .sheet(isPresented: $choosingTrain) {
+            TrainPicker(selection: chosenTrain)
+        }
+        // The walking time is a favorite's own
+        .onChange(of: selection) { _, selection in favorites.update(selection) }
+        .refreshable { await loadBoard(includingNotices: true) }
+        // New times every 30 seconds, and alerts every 10 minutes; a new walking time needs none
+        .task(id: selection.trainID) {
+            while !Task.isCancelled {
+                await loadBoard()
+                try? await Task.sleep(for: .seconds(30))
             }
-            .refreshable { await loadBoard() }
-            .onChange(of: selection) { _, new in
-                SharedStore.save(new)
-                WidgetCenter.shared.reloadAllTimelines()
+        }
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(10))
+                now = .now
             }
-            .task(id: selection) { await loadBoard() }
-            .onReceive(Timer.publish(every: 10, on: .main, in: .common).autoconnect()) { now = $0 }
         }
     }
 
-    /// The chosen train; tapping it chooses another, in three steps.
+    /// The train the picker changes: a favorite moves to the new train, keeping
+    /// its place and walking time, and the old train's times and alerts go.
+    private var chosenTrain: Binding<Selection> {
+        Binding {
+            selection
+        } set: { chosen in
+            guard chosen.trainID != selection.trainID else { return }
+            favorites.replace(selection, with: chosen)
+            board = nil
+            selection = favorites.favorite(matching: chosen) ?? chosen
+        }
+    }
+
+    /// Which train this is; the arrow chooses another, in three steps.
     private var trainSection: some View {
         Section {
             Button {
@@ -81,7 +116,7 @@ struct ContentView: View {
                     LineBullets(routes: selection.routes, size: 36)
                         .frame(width: 46)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(station?.name ?? "Choose a train").font(.headline).foregroundStyle(.primary)
+                        Text(station?.name ?? "Train").font(.headline)
                         if let station {
                             Text("\(Lines.list(selection.routes)) \(selection.heading) · \(station.borough)")
                                 .font(.subheadline)
@@ -97,10 +132,8 @@ struct ContentView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-        } header: {
-            Text("Train")
-        } footer: {
-            Text("Widgets show this train unless you pick one in a widget's Edit menu.")
+            .accessibilityElement(children: .combine)
+            .accessibilityHint("Choose another station, line or direction")
         }
     }
 
@@ -117,7 +150,8 @@ struct ContentView: View {
                     TrainRow(
                         train: train,
                         leave: selection.walkMinutes > 0 ? selection.leaveTime(for: train) : nil,
-                        marksLine: selection.marksLine(of: train)
+                        marksLine: selection.marksLine(of: train),
+                        marksLive: settings.marksLive(withoutColor: withoutColor)
                     )
                 }
             }
@@ -144,6 +178,7 @@ struct ContentView: View {
                 } label: {
                     Label("I'm on my way", systemImage: "figure.walk.departure")
                 }
+                .disabled(startingCountdown)
             }
             if let countdownProblem {
                 Text(countdownProblem).foregroundStyle(.secondary)
@@ -151,11 +186,13 @@ struct ContentView: View {
         } header: {
             Text("On your way")
         } footer: {
-            Text("Counts down to your train on the Lock Screen and in the Dynamic Island until you stop it. A widget's walk button starts and stops it too. Tap ↻ on it, or open the app, for new times.")
+            Text("Counts down to your train on the Lock Screen and in the Dynamic Island until you stop it, in place of any other countdown. A widget's walk button starts and stops it too. Tap ↻ on it, or open the app, for new times.")
         }
     }
 
     private func startCountdown() async {
+        startingCountdown = true
+        defer { startingCountdown = false }
         do {
             countdownTrain = try await TrainActivityController.start(for: selection)
             countdownProblem = nil
@@ -164,15 +201,17 @@ struct ContentView: View {
         }
     }
 
-    private func alertsSection(_ alerts: [ServiceAlert]) -> some View {
+    private func alertsSection(_ alerts: [ServiceAlert]?) -> some View {
         Section {
-            if alerts.isEmpty {
+            if let alerts, alerts.isEmpty {
                 Label("No alerts for this line here right now", systemImage: "checkmark.circle")
                     .foregroundStyle(.secondary)
-            } else {
+            } else if let alerts {
                 ForEach(alerts) { alert in
                     AlertRow(alert: alert)
                 }
+            } else {
+                Text("Couldn't load alerts from the MTA").foregroundStyle(.secondary)
             }
         } header: {
             Text("Service alerts")
@@ -204,14 +243,17 @@ struct ContentView: View {
             }
             if EquipmentDirectory.hasEquipment(atComplex: station.complex) {
                 let outages = board?.outages ?? []
-                if loadState == .loaded && outages.isEmpty {
-                    Label("All elevators and escalators are working", systemImage: "checkmark.circle")
-                        .foregroundStyle(.secondary)
+                if loadState == .loaded, let board {
+                    if board.outages == nil {
+                        Text("Couldn't load elevator status from the MTA").foregroundStyle(.secondary)
+                    } else if outages.isEmpty {
+                        Label("All elevators and escalators are working", systemImage: "checkmark.circle")
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 ForEach(outages) { outage in
                     OutageRow(outage: outage)
                 }
-                Toggle("Show elevator outages on the widget", isOn: $selection.elevatorAlerts)
             } else {
                 Text("No elevators or escalators at this station").foregroundStyle(.secondary)
             }
@@ -241,16 +283,29 @@ struct ContentView: View {
         }
     }
 
-    private func loadBoard() async {
-        loadState = .loading
+    /// Times already shown stay up while new ones load, and if they don't come.
+    /// Alerts and outages come with them only when `includingNotices`, or when
+    /// the ones shown are 10 minutes old; otherwise those shown stay.
+    private func loadBoard(includingNotices: Bool = false) async {
+        if board == nil { loadState = .loading }
         now = .now
-        countdownTrain = TrainActivityController.currentTrain
+        countdownTrain = TrainActivityController.currentTrain(for: selection)
+        let fetchesNotices = includingNotices || board == nil
+            || noticesFetched.map { now.timeIntervalSince($0) >= 10 * 60 } ?? true
         do {
-            board = try await TrainService.board(for: selection)
+            var fetched = try await TrainService.board(for: selection, includingAlerts: fetchesNotices)
+            // Only once both have come are they good for 10 minutes; until
+            // then, any shown before stay, and the next load tries again
+            if fetchesNotices && fetched.alerts != nil && fetched.outages != nil {
+                noticesFetched = now
+            }
+            fetched.alerts = fetched.alerts ?? board?.alerts
+            fetched.outages = fetched.outages ?? board?.outages
+            board = fetched
             loadState = .loaded
         } catch {
             // a newer choice cancels this load; that isn't a failure
-            if !Task.isCancelled { loadState = .failed }
+            if !Task.isCancelled && board == nil { loadState = .failed }
         }
     }
 }
@@ -261,6 +316,8 @@ private struct TrainRow: View {
     let leave: Date?
     /// Shown with its bullet: one of several lines chosen, or an N running local on the R, say.
     let marksLine: Bool
+    /// Whether a live prediction gets its symbol as well as its green.
+    let marksLive: Bool
 
     var body: some View {
         HStack(spacing: 8) {
@@ -268,6 +325,9 @@ private struct TrainRow: View {
                 .font(.headline)
                 .monospacedDigit()
                 .foregroundStyle(train.isLive ? Color.liveText : Color.primary)
+            if marksLive && train.isLive {
+                LiveMark(size: 12).foregroundStyle(Color.liveText)
+            }
             if marksLine {
                 LineBullet(route: train.route, size: 20)
             }

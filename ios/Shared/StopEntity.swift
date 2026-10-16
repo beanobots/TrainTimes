@@ -40,10 +40,11 @@ struct StopEntity: AppEntity {
     }
 
     /// The selection this stands for, keeping the app's other settings (walking
-    /// time, elevator alerts). One set up when its platform was a station of its
+    /// time, alerts). One set up when its platform was a station of its
     /// own is for the station it's part of.
     func selection(basedOn app: Selection) -> Selection {
-        Selection(stationID: stationID, routes: routes, direction: direction, elevatorAlerts: app.elevatorAlerts, walkMinutes: app.walkMinutes)
+        Selection(stationID: stationID, routes: routes, direction: direction, elevatorAlerts: app.elevatorAlerts,
+                  serviceAlerts: app.serviceAlerts, walkMinutes: app.walkMinutes)
             .validated()
     }
 
@@ -68,6 +69,11 @@ extension Selection {
     /// Its station, direction and lines, as a `StopEntity` id: which train this is,
     /// whatever the walking time.
     var trainID: String { StopEntity(stationID: stationID, direction: direction, routes: routes).id }
+
+    /// Its train and which alerts it mentions: whether its widgets' alert is
+    /// open is kept by this, so a widget that leaves an alert out doesn't close
+    /// it on another that mentions it.
+    var alertID: String { "\(trainID) \(elevatorAlerts) \(serviceAlerts)" }
 }
 
 struct StopQuery: EntityStringQuery {

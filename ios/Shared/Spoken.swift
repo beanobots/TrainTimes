@@ -30,7 +30,8 @@ enum Spoken {
             sentence = "There are no \(trainsPlural(line: lines, heading: selection.heading)) predicted at \(station) right now."
         }
         if let notice {
-            sentence += " Heads up: \(notice.lowercased())."
+            // Only its first letter, so line letters and names inside it keep their capitals
+            sentence += " Heads up: \(notice.prefix(1).lowercased() + notice.dropFirst())."
         }
         return sentence
     }

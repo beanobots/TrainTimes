@@ -86,10 +86,15 @@ enum OutagesFeed {
     /// The feed's dates look like "10/30/2026 10:00:00 PM", New York time.
     private static func date(_ text: String?) -> Date? {
         guard let text, !text.isEmpty else { return nil }
+        return dateFormatter.date(from: text)
+    }
+
+    /// One for every row, rather than one each: the widget has little memory to spare.
+    private static let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone(identifier: "America/New_York")
         formatter.dateFormat = "MM/dd/yyyy hh:mm:ss a"
-        return formatter.date(from: text)
-    }
+        return formatter
+    }()
 }

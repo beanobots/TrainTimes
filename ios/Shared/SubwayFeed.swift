@@ -78,7 +78,7 @@ enum SubwayFeed {
             try reader.message { field in
                 switch field {
                 case 3: // FeedEntity.trip_update
-                    if let arrival = try tripUpdate(reader, at: stopIDs) { arrivals.append(arrival) }
+                    arrivals += try tripUpdate(reader, at: stopIDs)
                 case 4: // FeedEntity.vehicle
                     if let vehicle = try vehiclePosition(reader) { positions[vehicle.trip] = vehicle.position }
                 default:
@@ -95,14 +95,18 @@ enum SubwayFeed {
         return arrivals.sorted { $0.time < $1.time }
     }
 
-    /// The trip's arrival at one of `stopIDs`, or nil if it doesn't stop at them.
-    private static func tripUpdate(_ reader: ProtobufReader, at stopIDs: Set<String>) throws -> Arrival? {
+    /// The trip's arrival at each of `stopIDs` it stops at: the Live tab asks
+    /// about several stations at once, and one trip can call at more than one.
+    private static func tripUpdate(_ reader: ProtobufReader, at stopIDs: Set<String>) throws -> [Arrival] {
         var route = ""
         var isLive = false
         var trip = ""
+        /// The stops it has a time for
         var stops: [Arrival.Stop] = []
-        var at: Int?
-        var time: UInt64 = 0
+        /// Where it ends, whether or not there's a time for it
+        var lastStop: String?
+        /// Where in `stops` the trip calls at one of `stopIDs`
+        var matches: [Int] = []
         try reader.message { field in
             switch field {
             case 1: // TripUpdate.trip
@@ -133,10 +137,12 @@ enum SubwayFeed {
                     }
                     return true
                 }
+                lastStop = stop
+                // Without a time, it would be due in 1970
                 let due = arrival != 0 ? arrival : departure
+                guard due != 0 else { return true }
                 if stopIDs.contains(stop) {
-                    time = due
-                    at = stops.count
+                    matches.append(stops.count)
                 }
                 stops.append(Arrival.Stop(id: stop, time: Date(timeIntervalSince1970: TimeInterval(due))))
             default:
@@ -144,16 +150,18 @@ enum SubwayFeed {
             }
             return true
         }
-        guard let at, time != 0, let last = stops.last else { return nil }
-        return Arrival(
-            route: Lines.normalized(route),
-            time: Date(timeIntervalSince1970: TimeInterval(time)),
-            stop: stops[at].id,
-            lastStop: last.id,
-            isLive: isLive,
-            trip: trip,
-            approach: Array(stops[...at])
-        )
+        guard let lastStop else { return [] }
+        return matches.map { at in
+            Arrival(
+                route: Lines.normalized(route),
+                time: stops[at].time,
+                stop: stops[at].id,
+                lastStop: lastStop,
+                isLive: isLive,
+                trip: trip,
+                approach: Array(stops[...at])
+            )
+        }
     }
 
     /// The trip a VehiclePosition is for, and the stop it's at or on its way to.

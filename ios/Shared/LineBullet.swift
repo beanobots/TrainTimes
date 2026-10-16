@@ -107,6 +107,18 @@ struct LineBullets: View {
     }
 }
 
+/// Beside a live prediction, so it stands out without its green: with
+/// Settings › Mark live times, or the phone's Differentiate Without Color.
+struct LiveMark: View {
+    let size: CGFloat
+
+    var body: some View {
+        Image(systemName: "dot.radiowaves.up.forward")
+            .font(.system(size: size, weight: .bold))
+            .accessibilityLabel("Live")
+    }
+}
+
 extension ServiceAlert.Kind {
     var symbol: String {
         switch self {

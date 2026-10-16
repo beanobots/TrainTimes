@@ -4,31 +4,43 @@ import WidgetKit
 /// The medium widget's other side, behind its map button: where the next train
 /// is, as the stops between it and yours. The feed lists a trip's stops from the
 /// one it's at or heading for, so the list starts there; more than `maxRows`
-/// keep the first few and yours and fold the rest into one row.
+/// keep the first few and yours and fold the rest into one row. Given a
+/// `height`, the rows spread out evenly to fill it.
 struct StopList: View {
     let train: Arrival
     let now: Date
     var maxRows = 4
     var style = BoardStyle.compact
+    var height: CGFloat? = nil
+
+    private var spacing: CGFloat { style.isLarge ? 0 : 1 }
+
+    /// Each row's share of `height` under the label, never less than the style's.
+    private func rowHeight(rows: Int) -> CGFloat {
+        guard let height, rows > 0 else { return style.rowHeight }
+        let label = UIFont.preferredFont(forTextStyle: .caption2).lineHeight
+        return max(style.rowHeight, floor((height - label - spacing) / CGFloat(rows)))
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: style.isLarge ? 0 : 1) {
+        VStack(alignment: .leading, spacing: spacing) {
             if let layout = StopLayout(train: train, now: now, maxRows: maxRows) {
+                let rowHeight = rowHeight(rows: layout.rows.count)
                 Text(layout.label)
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(Color.boardGray)
                     .lineLimit(1)
                 ZStack(alignment: .topLeading) {
-                    StopRail(layout: layout, color: Color(hex: LineStyle.of(train.route).color), style: style)
-                        .frame(width: style.railColumn, height: CGFloat(layout.rows.count) * style.rowHeight)
+                    StopRail(layout: layout, color: Color(hex: LineStyle.of(train.route).color), style: style, rowHeight: rowHeight)
+                        .frame(width: style.railColumn, height: CGFloat(layout.rows.count) * rowHeight)
                     VStack(alignment: .leading, spacing: 0) {
                         ForEach(layout.rows) { row in
-                            stopRow(row, passed: CGFloat(row.id) < layout.trainRow)
+                            stopRow(row, passed: CGFloat(row.id) < layout.trainRow, height: rowHeight)
                         }
                     }
                     TrainMarker(route: train.route, isLive: train.isLive, size: style.markerSize)
                         .offset(x: (style.railColumn - style.markerSize) / 2,
-                                y: layout.trainRow * style.rowHeight + (style.rowHeight - style.markerSize) / 2)
+                                y: layout.trainRow * rowHeight + (rowHeight - style.markerSize) / 2)
                 }
             } else {
                 Text("WHERE IT IS")
@@ -41,7 +53,7 @@ struct StopList: View {
         }
     }
 
-    private func stopRow(_ row: StopLayout.Row, passed: Bool) -> some View {
+    private func stopRow(_ row: StopLayout.Row, passed: Bool, height: CGFloat) -> some View {
         HStack(spacing: style.isLarge ? 7 : 6) {
             // The rail's column
             Color.clear.frame(width: style.railColumn)
@@ -59,7 +71,7 @@ struct StopList: View {
                     .foregroundStyle(Color.boardText)
             }
         }
-        .frame(height: style.rowHeight)
+        .frame(height: height)
     }
 }
 
@@ -149,10 +161,18 @@ private struct StopRail: View {
     let layout: StopLayout
     let color: Color
     let style: BoardStyle
+    let rowHeight: CGFloat
+    @Environment(\.widgetRenderingMode) private var renderingMode
 
     var body: some View {
+        // Tinted and clear Home Screens draw the widget in one color, keeping
+        // only how opaque each part is: there, what's filled with the widget's
+        // background here is cut out of the rail instead
+        let tinted = renderingMode != .fullColor
         Canvas { context, size in
-            let h = style.rowHeight
+            var eraser = context
+            eraser.blendMode = .destinationOut
+            let h = rowHeight
             let x = size.width / 2
             let middle = { (row: CGFloat) in row * h + h / 2 }
             let bar = { (top: CGFloat, bottom: CGFloat) in Path(CGRect(x: x - 2, y: top, width: 4, height: max(0, bottom - top))) }
@@ -179,19 +199,37 @@ private struct StopRail: View {
                 }
             }
             let trainY = middle(layout.trainRow)
-            context.fill(bar(0, trainY), with: .color(Color.boardBackground.opacity(0.62)))
+            if tinted {
+                eraser.fill(bar(0, trainY), with: .color(.black.opacity(0.62)))
+            } else {
+                context.fill(bar(0, trainY), with: .color(Color.boardBackground.opacity(0.62)))
+            }
 
             for row in layout.rows where row.kind != .folded {
                 let y = middle(CGFloat(row.id))
                 if row.kind == .yours {
-                    context.fill(circle(style.ringSize, y), with: .color(Color.boardBackground))
+                    if tinted {
+                        eraser.fill(circle(style.ringSize, y), with: .color(.black))
+                    } else {
+                        context.fill(circle(style.ringSize, y), with: .color(Color.boardBackground))
+                    }
                     context.stroke(circle(style.ringSize - 3, y), with: .color(Color.boardText), lineWidth: 3)
                 } else {
                     var dot = context
                     dot.opacity = y < trainY - 1 ? 0.45 : 1
-                    dot.fill(circle(style.dotSize, y), with: .color(Color.boardBackground))
+                    if tinted {
+                        var hole = eraser
+                        hole.opacity = dot.opacity
+                        hole.fill(circle(style.dotSize, y), with: .color(.black))
+                    } else {
+                        dot.fill(circle(style.dotSize, y), with: .color(Color.boardBackground))
+                    }
                     dot.fill(circle(style.dotSize / 2, y), with: .color(Color.boardText))
                 }
+            }
+            // Room for the train's outline, which can't have a background to part it from the rail
+            if tinted {
+                eraser.fill(circle(style.markerSize + 4, trainY), with: .color(.black))
             }
         }
     }
@@ -203,14 +241,33 @@ private struct TrainMarker: View {
     let route: String
     let isLive: Bool
     let size: CGFloat
+    @Environment(\.widgetRenderingMode) private var renderingMode
 
     var body: some View {
         let style = LineStyle.of(route)
-        let color = Color(hex: style.color)
+        if renderingMode == .fullColor {
+            fullColor(style)
+        } else {
+            // As LineBullet is on tinted and clear Home Screens: filled, it would
+            // be one disc with no letter. The rail leaves room around it.
+            label(style)
+                .frame(width: size, height: size)
+                .overlay(Circle().stroke(lineWidth: 1.5))
+                .widgetAccentable()
+                .accessibilityLabel("\(style.label) train")
+        }
+    }
+
+    private func label(_ style: LineStyle) -> some View {
         let fontSize = size * (style.label.count > 1 ? 0.45 : 0.62)
-        Text(style.label)
+        return Text(style.label)
             .font(.system(size: fontSize, weight: .bold))
             .offset(y: -LineBullet.capitalsOffset(fontSize: fontSize))
+    }
+
+    private func fullColor(_ style: LineStyle) -> some View {
+        let color = Color(hex: style.color)
+        return label(style)
             .foregroundStyle(isLive ? (style.usesDarkText ? Color.black : Color.white) : color)
             .frame(width: size, height: size)
             .background(Circle().fill(isLive ? color : Color.boardBackground))

@@ -1,3 +1,5 @@
+// xcode: set sdk=iOS
+
 import SwiftUI
 
 /// Choosing a train in three steps, each leading straight to the next: the
@@ -36,9 +38,12 @@ struct TrainPicker: View {
                 case .direction(let station, let routes):
                     let current = station.id == selection.station?.id && routes == selection.routes ? selection.direction : nil
                     DirectionStep(station: station, routes: routes, current: current) { direction in
-                        selection.stationID = station.id
-                        selection.routes = routes
-                        selection.direction = direction
+                        // All at once, so a saved widget is never saved half changed
+                        var chosen = selection
+                        chosen.stationID = station.id
+                        chosen.routes = routes
+                        chosen.direction = direction
+                        selection = chosen
                         dismiss()
                     }
                 }
@@ -86,6 +91,15 @@ private struct StationStep: View {
     @State private var search = ""
     /// The bullet label of the line to filter by, e.g. "R" or "S".
     @State private var filter: String?
+    @State private var location = NearbyLocation()
+    @Environment(SettingsStore.self) private var settings
+
+    /// The closest stations, or with a line filtered by, the closest it stops at.
+    private var nearby: [Nearby.Result] {
+        guard let here = location.location else { return [] }
+        let stations = filter.map { label in StationDirectory.all.filter { $0.serves(label: label) } } ?? StationDirectory.all
+        return Nearby.stations(near: here, among: stations)
+    }
 
     private var matches: [Station] {
         let words = search.lowercased().split(separator: " ")
@@ -99,24 +113,27 @@ private struct StationStep: View {
     var body: some View {
         List {
             Section {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 10) {
-                        ForEach(Lines.filterRoutes, id: \.self) { route in
-                            let label = LineStyle.of(route).label
-                            Button {
-                                filter = filter == label ? nil : label
-                            } label: {
-                                LineBullet(route: route, size: 34)
-                                    .opacity(filter == nil || filter == label ? 1 : 0.3)
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityAddTraits(filter == label ? .isSelected : [])
+                // Every line at once: three rows of eight
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 8), spacing: 10) {
+                    ForEach(Lines.filterRoutes, id: \.self) { route in
+                        let label = LineStyle.of(route).label
+                        Button {
+                            filter = filter == label ? nil : label
+                        } label: {
+                            LineBullet(route: route, size: 32)
+                                .opacity(filter == nil || filter == label ? 1 : 0.3)
                         }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(filter == label ? .isSelected : [])
                     }
-                    .padding(.vertical, 4)
                 }
+                .padding(.vertical, 4)
             } header: {
                 Text("Only stations on")
+            }
+
+            if search.isEmpty {
+                nearbySection
             }
 
             Section {
@@ -124,7 +141,7 @@ private struct StationStep: View {
                     Button {
                         pick(station, filter)
                     } label: {
-                        StationRow(station: station, isSelected: station.id == chosenID)
+                        StationRow(station: station, isSelected: station.id == chosenID, marksStepFree: settings.settings.stepFree)
                     }
                 }
             } header: {
@@ -136,12 +153,83 @@ private struct StationStep: View {
         .toolbar {
             ToolbarItem(placement: .principal) { StepTitle(title: "Station", step: 0) }
         }
+        .onAppear { location.start() }
+    }
+
+    /// A button to allow location until it's allowed, then the closest stations,
+    /// or why there are none. Nothing once location is refused.
+    @ViewBuilder
+    private var nearbySection: some View {
+        if location.status == .notDetermined {
+            Section {
+                Button {
+                    location.find()
+                } label: {
+                    Label("Show stations near you", systemImage: "location")
+                }
+            }
+        } else if location.isAllowed {
+            if location.failed {
+                Section {
+                    Button {
+                        location.find()
+                    } label: {
+                        Label("Couldn't find you. Try again", systemImage: "location.slash")
+                    }
+                } header: {
+                    Text("Near you")
+                }
+            } else if location.location == nil {
+                Section {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                        Text("Finding stations near you…").foregroundStyle(.secondary)
+                    }
+                } header: {
+                    Text("Near you")
+                }
+            } else if nearby.isEmpty {
+                Section {
+                    Text(filter.map { "No \($0) stations within \(Nearby.rangeDescription) of you" }
+                         ?? "No stations within \(Nearby.rangeDescription) of you")
+                        .foregroundStyle(.secondary)
+                } header: {
+                    Text("Near you")
+                }
+            } else {
+                Section {
+                    ForEach(nearby) { result in
+                        Button {
+                            pick(result.station, filter)
+                        } label: {
+                            StationRow(station: result.station, isSelected: result.station.id == chosenID,
+                                       marksStepFree: settings.settings.stepFree, distance: result.distance)
+                        }
+                    }
+                } header: {
+                    Text(filter.map { "Near you on the \($0)" } ?? "Near you")
+                }
+            }
+        }
     }
 }
 
 private struct StationRow: View {
     let station: Station
     let isSelected: Bool
+    /// With Settings › Step-free mode, whether it says so where some or all of
+    /// its platforms have no step-free access.
+    var marksStepFree = false
+    /// "0.3 mi", in the stations near you.
+    var distance: String? = nil
+
+    /// "No step-free access", or "Step-free on some platforms", if either.
+    private var stepFreeNote: String? {
+        let stepFree = station.platforms.filter { $0.ada != 0 }.count
+        if stepFree == 0 { return "No step-free access" }
+        if stepFree < station.platforms.count { return "Step-free on some platforms" }
+        return nil
+    }
 
     var body: some View {
         HStack {
@@ -153,8 +241,16 @@ private struct StationRow: View {
                     }
                     Text(station.borough).font(.caption).foregroundStyle(.secondary)
                 }
+                if marksStepFree, let stepFreeNote {
+                    Label(stepFreeNote, systemImage: "figure.stairs")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
             }
             Spacer()
+            if let distance {
+                Text(distance).font(.subheadline).foregroundStyle(.secondary)
+            }
             if isSelected {
                 Image(systemName: "checkmark").foregroundStyle(Color.accentColor)
             }
@@ -170,6 +266,7 @@ private struct LinesStep: View {
     let station: Station
     let next: ([String]) -> Void
     @State private var chosen: [String]
+    @Environment(SettingsStore.self) private var settings
 
     init(station: Station, chosen: [String], next: @escaping ([String]) -> Void) {
         self.station = station
@@ -189,7 +286,8 @@ private struct LinesStep: View {
                     .multilineTextAlignment(.center)
                     .padding(.horizontal)
                 ForEach(station.platforms) { platform in
-                    platformCard(station.routes.filter(platform.routes.contains))
+                    platformCard(station.routes.filter(platform.routes.contains),
+                                 stepFree: !settings.settings.stepFree || platform.ada != 0)
                 }
                 if station.platforms.count > 1 {
                     everyLine
@@ -224,13 +322,19 @@ private struct LinesStep: View {
         return "Next: \(Lines.list(ordered))"
     }
 
-    private func platformCard(_ routes: [String]) -> some View {
+    /// `stepFree` false marks the platform as having no step-free access.
+    private func platformCard(_ routes: [String], stepFree: Bool) -> some View {
         let allChosen = routes.allSatisfy(chosen.contains)
         return VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Text("\(routes.map { LineStyle.of($0).label }.joined(separator: " ")) platform".uppercased())
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(.secondary)
+                if !stepFree {
+                    Label("No step-free access", systemImage: "figure.stairs")
+                        .font(.footnote)
+                        .foregroundStyle(.orange)
+                }
                 Spacer()
                 if routes.count > 1 {
                     Button(allChosen ? "Clear" : "Select all") {
