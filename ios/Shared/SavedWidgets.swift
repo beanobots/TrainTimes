@@ -7,14 +7,17 @@ struct SavedWidget: Codable, Hashable, Identifiable, Sendable {
     /// Blank to go by the station's name.
     var name: String
     var selection: Selection
+    /// Where to change to another train, which the large widget shows.
+    var change: Change?
 
     /// The id of the one made from the app's train before there were saved widgets.
     static let firstID = UUID(uuidString: "5D1C8A0E-0F57-4E2B-9C3A-7B1E2D4F6A01")!
 
-    init(id: UUID = UUID(), name: String = "", selection: Selection) {
+    init(id: UUID = UUID(), name: String = "", selection: Selection, change: Change? = nil) {
         self.id = id
         self.name = name
         self.selection = selection
+        self.change = change
     }
 
     /// Its name, or the station's.
@@ -85,12 +88,14 @@ struct SavedWidgets: Codable, Hashable, Sendable {
         if widget(id) != nil { defaultID = id }
     }
 
-    /// Each saved train checked against the station list, as `Selection.validated` does.
+    /// Each saved train and change checked against the station list, as
+    /// `Selection.validated` and `Change.validated` do.
     func validated() -> SavedWidgets {
         var saved = self
         saved.widgets = widgets.map { widget in
             var widget = widget
             widget.selection = widget.selection.validated()
+            widget.change = widget.change?.validated(for: widget.selection)
             return widget
         }
         return saved

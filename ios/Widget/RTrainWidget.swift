@@ -12,8 +12,8 @@ struct RTrainWidget: Widget {
                 .containerBackground(Color.boardBackground, for: .widget)
         }
         .configurationDisplayName("Next train")
-        .description("Live times for a widget set up in the app. Pick which one in its Edit menu.")
-        .supportedFamilies([.systemSmall, .systemMedium, .accessoryRectangular, .accessoryCircular, .accessoryInline])
+        .description("Live times for a widget set up in the app. Pick which one in its Edit menu. The large one shows where you change trains.")
+        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge, .accessoryRectangular, .accessoryCircular, .accessoryInline])
         // The alert banner runs edge to edge; TrainWidgetView puts the
         // margins back everywhere else
         .contentMarginsDisabled()
@@ -47,6 +47,11 @@ struct TrainEntry: TimelineEntry {
     var largeText = false
     /// The app's Settings, for larger text and marking live times.
     var settings = AppSettings()
+    /// On a large widget with a change, the trains still to catch that get
+    /// there, each with the train it meets; nil without a change.
+    var connections: [Connection]? = nil
+    /// The large widget's change of trains, if its saved widget has one.
+    var change: Change? = nil
 
     var stationName: String { selection.station?.name ?? "Choose a station" }
     var heading: String { selection.heading }
@@ -60,12 +65,14 @@ struct Provider: AppIntentTimelineProvider {
     }
 
     func snapshot(for configuration: TrainWidgetIntent, in context: Context) async -> TrainEntry {
-        if context.isPreview { return .preview }
-        return await Self.plan(for: configuration.selection, family: context.family, largeText: Self.hasRoom(context)).entries[0]
+        if context.isPreview { return context.family == .systemLarge ? .transferPreview() : .preview }
+        return await Self.plan(for: configuration.selection, change: Self.change(for: configuration, in: context),
+                               family: context.family, largeText: Self.hasRoom(context)).entries[0]
     }
 
     func timeline(for configuration: TrainWidgetIntent, in context: Context) async -> Timeline<TrainEntry> {
-        let plan = await Self.plan(for: configuration.selection, family: context.family, largeText: Self.hasRoom(context))
+        let plan = await Self.plan(for: configuration.selection, change: Self.change(for: configuration, in: context),
+                                   family: context.family, largeText: Self.hasRoom(context))
         // iOS rations how often widgets reload, so this may come later;
         // until it does, the entries step through the trains already known.
         let now = Date.now
@@ -103,24 +110,33 @@ struct Provider: AppIntentTimelineProvider {
 
     /// Whether a medium widget is big enough for larger text: 158 points tall
     /// or more, as on an iPhone 12 or later, apart from the minis. With
-    /// Settings › Larger widget text, every medium widget has it.
+    /// Settings › Larger widget text, every medium widget has it. A large
+    /// widget always has.
     private static func hasRoom(_ context: Context) -> Bool {
+        if context.family == .systemLarge { return true }
         guard context.family == .systemMedium else { return false }
         return context.displaySize.height >= 158 || SharedStore.loadSettings().largerWidgetText
     }
 
+    /// The large widget's change of trains, if its saved widget has one.
+    private static func change(for configuration: TrainWidgetIntent, in context: Context) -> Change? {
+        context.family == .systemLarge ? configuration.change : nil
+    }
+
     /// One entry for now, then one as each train's time to leave passes (its
     /// arrival, without a walking time), so the widget moves on to the next
-    /// train you can catch without going back to the network. The medium
-    /// widget also gets one a minute, for its later trains' minutes to go.
-    private static func plan(for selection: Selection, family: WidgetFamily, largeText: Bool) async -> Plan {
+    /// train you can catch without going back to the network; with a change,
+    /// the next that gets there. The medium and large widgets also get one a
+    /// minute, for their later trains' minutes to go and their maps.
+    private static func plan(for selection: Selection, change: Change?, family: WidgetFamily, largeText: Bool) async -> Plan {
         let countdown = SharedStore.loadCountdown().flatMap { $0.ends > .now ? $0 : nil }
         let countingDown = countdown?.trainID == selection.trainID
-        let showsMap = family == .systemMedium && SharedStore.showsMap(for: selection.trainID)
-        let showsAlert = (family == .systemSmall || family == .systemMedium) && SharedStore.showsAlert(for: selection.alertID)
+        let hasMap = family == .systemMedium || family == .systemLarge
+        let showsMap = hasMap && SharedStore.showsMap(for: selection.trainID)
+        let showsAlert = (family == .systemSmall || hasMap) && SharedStore.showsAlert(for: selection.alertID)
         let settings = SharedStore.loadSettings()
         do {
-            let board = try await Self.board(for: selection)
+            let board = try await Self.board(for: selection, change: change)
             // Once the alert's over, the next one starts out closed
             if board.notice == nil {
                 SharedStore.closeAlert(for: selection.alertID)
@@ -128,6 +144,7 @@ struct Provider: AppIntentTimelineProvider {
             // After the fetch, so the entries start when they're shown
             let now = Date.now
             let trains = selection.catchable(board.trains, now: now)
+            let connections = (board.connections ?? []).filter { selection.leaveTime(for: $0.first) > now }
             // ↻ lights up as these new times come in: the first entry lights it
             // and the next fades it back
             let refreshTapped = SharedStore.loadRefreshed().map { now.timeIntervalSince($0) < 30 } ?? false
@@ -147,11 +164,15 @@ struct Provider: AppIntentTimelineProvider {
                 }
                 return TrainEntry(date: date, selection: selection, trains: shown, notice: board.notice, countingDown: countingDown,
                                   anyCountdown: countdown != nil, showsMap: showsMap, showsAlert: showsAlert,
-                                  refreshLit: lit, largeText: largeText, settings: settings)
+                                  refreshLit: lit, largeText: largeText, settings: settings,
+                                  connections: change == nil ? nil : Self.shown(connections, at: date, selection: selection,
+                                                                                 showsMap: showsMap),
+                                  change: change)
             }
-            let leaveTimes = trains.prefix(10).map(selection.leaveTime(for:))
+            // With a change, the trains that get there are the ones to catch
+            let leaveTimes = (change == nil ? trains : connections.map(\.first)).prefix(10).map(selection.leaveTime(for:))
             var dates = Set(leaveTimes)
-            if family == .systemMedium, let lastLeave = leaveTimes.last {
+            if hasMap, let lastLeave = leaveTimes.last {
                 let end = min(lastLeave, now.addingTimeInterval(60 * 60))
                 var minute = now.addingTimeInterval(60)
                 while minute < end {
@@ -165,24 +186,47 @@ struct Provider: AppIntentTimelineProvider {
         } catch {
             return Plan(entries: [TrainEntry(date: .now, selection: selection, trains: [], problem: "Couldn't reach the MTA",
                                              countingDown: countingDown, anyCountdown: countdown != nil, showsMap: showsMap,
-                                             largeText: largeText, settings: settings)])
+                                             largeText: largeText, settings: settings, change: change)])
         }
     }
 
-    /// The trains and alert for `selection`, fetched; or, to redraw at once,
+    /// The connections still to catch at `date`. Only the map shows where the
+    /// trains are, and only the first's; the timeline holds many entries, in
+    /// the widget's little memory, so no other keeps their stops.
+    private static func shown(_ connections: [Connection], at date: Date, selection: Selection,
+                              showsMap: Bool) -> [Connection] {
+        connections.filter { selection.leaveTime(for: $0.first) > date }.enumerated().map { index, connection in
+            var connection = connection
+            connection.first.approach = []
+            if !showsMap || index > 0 {
+                connection.arrival.approach = []
+                connection.next?.approach = []
+            }
+            return connection
+        }
+    }
+
+    /// The trains and alert for `selection`, with `change` those of the large
+    /// widget showing it, fetched; or, to redraw at once,
     /// ones fetched in the last 30 seconds (by another widget, or the
     /// countdown), or after a tap on the map or walk button or the alert
     /// banner, which changes only
     /// how the widget looks, the ones it already shows. Never ones from before ↻.
-    private static func board(for selection: Selection) async throws -> SharedStore.SavedBoard {
+    private static func board(for selection: Selection, change: Change?) async throws -> SharedStore.SavedBoard {
         let now = Date.now
-        if let saved = SharedStore.loadBoard(for: selection), saved.fetched > SharedStore.loadRefreshed() ?? .distantPast {
+        if let saved = SharedStore.loadBoard(for: selection, change: change),
+           saved.fetched > SharedStore.loadRefreshed() ?? .distantPast {
             let age = now.timeIntervalSince(saved.fetched)
             let toggled = SharedStore.loadToggled().map { now.timeIntervalSince($0) < 30 } ?? false
             if age < 30 || (toggled && age < 15 * 60) { return saved }
         }
-        let board = try await TrainService.board(for: selection, includingOutages: selection.elevatorAlerts, now: now)
-        return SharedStore.saveBoard(board, for: selection, fetched: .now)
+        let board: Board
+        if let change {
+            board = try await TrainService.board(for: selection, change: change, includingOutages: selection.elevatorAlerts, now: now)
+        } else {
+            board = try await TrainService.board(for: selection, includingOutages: selection.elevatorAlerts, now: now)
+        }
+        return SharedStore.saveBoard(board, for: selection, change: change, fetched: .now)
     }
 }
 
@@ -211,7 +255,7 @@ struct TrainWidgetView: View {
         // The home screen widgets give an alert a banner across the top, in
         // place of the top margin. Tapping it shows the alert in full, and
         // tapping that opens the app at the train's alerts.
-        if let notice = entry.notice, family == .systemSmall || family == .systemMedium {
+        if let notice = entry.notice, family == .systemSmall || family == .systemMedium || family == .systemLarge {
             VStack(spacing: 0) {
                 banner(notice)
                 Group {
@@ -277,6 +321,8 @@ struct TrainWidgetView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         case .systemSmall:
             small
+        case .systemLarge:
+            large
         default:
             medium
         }
@@ -565,6 +611,315 @@ struct TrainWidgetView: View {
         return trains.map { "\($0.lineLabel) \($0.time.clock)" }.joined(separator: " · ")
     }
 
+    // MARK: Large
+
+    /// With a change, the change's times or map (see `transfer`); without,
+    /// the medium widget's countdown and later trains, or the stops before
+    /// yours, with room for more.
+    @ViewBuilder private var large: some View {
+        if let change = entry.change {
+            GeometryReader { geometry in
+                transfer(change, width: geometry.size.width)
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+            }
+        } else {
+            largeTrain
+        }
+    }
+
+    private var largeTrain: some View {
+        let style = BoardStyle.large
+        return VStack(alignment: .leading, spacing: 0) {
+            header(nameLines: 1, style: style)
+            VStack(alignment: .leading, spacing: 0) {
+                if entry.showsMap, let next {
+                    ViewThatFits(in: .vertical) {
+                        StopList(train: next, now: entry.date, maxRows: 8, style: style)
+                        StopList(train: next, now: entry.date, maxRows: 6, style: style)
+                        StopList(train: next, now: entry.date, maxRows: 4, style: style)
+                    }
+                    .padding(.top, 14)
+                } else if let next {
+                    HStack(spacing: 5) {
+                        countdownLabel(to: next, size: style.countdownSize)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(height: style.countdownHeight)
+                        if entry.selection.marksLine(of: next) {
+                            LineBullet(route: next.route, size: style.countdownBullet)
+                        }
+                    }
+                    .padding(.top, 14)
+                    hairline.padding(.top, 12)
+                    ViewThatFits(in: .vertical) {
+                        laterTrains(8, style: style)
+                        laterTrains(6, style: style)
+                        laterTrains(4, style: style)
+                        laterTrains(2, style: style)
+                    }
+                    .padding(.top, 8)
+                } else {
+                    Text(noTrains)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color.boardText)
+                        .padding(.top, 14)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .invalidatableContent()
+            buttons(style).padding(.top, 8)
+        }
+    }
+
+    /// A rule across the widget, under its countdown.
+    private var hairline: some View {
+        Rectangle()
+            .fill(Color.boardText.opacity(0.12))
+            .frame(height: 1)
+    }
+
+    /// A widget with a change: its line and where it changes to across the
+    /// top; the countdown to your next train that gets there, with the train
+    /// it meets; under it the later ones: when each leaves, when it gets there,
+    /// the wait and the train it meets. Behind the map button, where they are.
+    private func transfer(_ change: Change, width: CGFloat) -> some View {
+        let style = BoardStyle.large
+        let connections = entry.connections ?? []
+        let columns = TransferColumns(connections: Array(connections.prefix(6)), width: width, marksLive: marksLive)
+        return VStack(alignment: .leading, spacing: 0) {
+            transferHeader(change)
+            VStack(alignment: .leading, spacing: 0) {
+                if let first = connections.first {
+                    if entry.showsMap {
+                        TransferMap(connection: first, selection: entry.selection, change: change, now: entry.date)
+                            .padding(.top, 12)
+                    } else {
+                        transferHero(first, change: change, columns: columns)
+                            .padding(.top, 14)
+                        if connections.count > 1 {
+                            hairline.padding(.top, 12)
+                            ViewThatFits(in: .vertical) {
+                                transferList(connections, rows: 5, change: change, columns: columns)
+                                transferList(connections, rows: 4, change: change, columns: columns)
+                                transferList(connections, rows: 3, change: change, columns: columns)
+                                transferList(connections, rows: 2, change: change, columns: columns)
+                            }
+                            .padding(.top, 8)
+                        }
+                    }
+                } else {
+                    Text(entry.problem ?? "No \(entry.lineLabel) trains to \(change.station?.name ?? "the change") predicted")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color.boardText)
+                        .padding(.top, 14)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .invalidatableContent()
+            buttons(style).padding(.top, 8)
+        }
+    }
+
+    /// The line's bullet; "Prospect Av → Atlantic Av-Barclays Ctr"; which way,
+    /// and the lines changed to.
+    private func transferHeader(_ change: Change) -> some View {
+        let style = BoardStyle.large
+        return HStack(alignment: .textMiddle, spacing: style.headerSpacing) {
+            LineBullets(routes: entry.selection.routes, size: style.bulletSize)
+            VStack(alignment: .leading, spacing: 0) {
+                Text("\(entry.stationName) \(Text("→").foregroundStyle(Color.boardGray)) \(change.station?.name ?? "")")
+                    .font(style.nameFont)
+                    .foregroundStyle(Color.boardText)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                HStack(spacing: 3) {
+                    Text("\(entry.heading), then")
+                        .lineLimit(1)
+                        .minimumScaleFactor(style.headingScale)
+                    ForEach(change.routes, id: \.self) { route in
+                        LineBullet(route: route, size: 14)
+                    }
+                }
+                .font(style.headingFont)
+                .foregroundStyle(Color.boardGray)
+            }
+            .alignmentGuide(.textMiddle) { d in
+                (d[.firstTextBaseline] - style.nameUIFont.capHeight + d[.lastTextBaseline]) / 2
+            }
+        }
+    }
+
+    /// The countdown to your next train that gets to the change, and when it
+    /// leaves; beside it, under the list's wait and train met, the change it
+    /// makes: the wait, the train, and how to get to it.
+    private func transferHero(_ connection: Connection, change: Change, columns: TransferColumns) -> some View {
+        let style = BoardStyle.large
+        return ZStack(alignment: .bottomLeading) {
+            VStack(alignment: .leading, spacing: 4) {
+                countdownLabel(to: connection.first, size: style.countdownSize)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(height: style.countdownHeight)
+                Text("\(connection.first.lineLabel) at \(connection.first.time.clock)")
+                    .font(.footnote)
+                    .foregroundStyle(Color.boardGray)
+                    .lineLimit(1)
+            }
+            .frame(width: max(0, columns.waitX - 8), alignment: .leading)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("CHANGE AT \(change.station?.name.uppercased() ?? "")")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(Color.boardGray)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
+                HStack(spacing: 0) {
+                    waitCell(connection, quick: connection.isQuick(within: change.quickMinutes))
+                        .frame(width: columns.wait)
+                    nextCell(connection, columns: columns)
+                        .padding(.leading, columns.gap)
+                }
+                .frame(height: 22)
+                Text(howToChange(connection, change: change))
+                    .font(.footnote)
+                    .foregroundStyle(Color.boardGray)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+            .padding(.leading, columns.waitX)
+        }
+        .invalidatableContent()
+    }
+
+    /// "across the platform", or the walk to another one.
+    private func howToChange(_ connection: Connection, change: Change) -> String {
+        guard let next = connection.next else { return "none predicted yet" }
+        return change.isAcross(next.route, from: entry.selection) ? "across the platform" : "\(change.walkMinutes) min walk to it"
+    }
+
+    /// The trains after the first that get to the change, up to `rows`, under
+    /// their columns' names.
+    private func transferList(_ connections: [Connection], rows: Int, change: Change, columns: TransferColumns) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 0) {
+                Text("LEAVE")
+                    .fixedSize()
+                    .frame(width: columns.leave, alignment: .trailing)
+                Text("ARRIVE")
+                    .fixedSize()
+                    .frame(width: columns.arrive, alignment: .trailing)
+                    .padding(.leading, columns.gap)
+                Text("WAIT")
+                    .fixedSize()
+                    .frame(width: columns.wait)
+                    .padding(.leading, columns.gap)
+                Text(change.isExpress(for: entry.selection) ? "EXPRESS" : "THEN")
+                    .fixedSize()
+                    .frame(width: columns.next, alignment: .leading)
+                    .padding(.leading, columns.gap)
+            }
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(Color.boardGray)
+            .padding(.bottom, 2)
+            ForEach(Array(connections.dropFirst().prefix(rows).enumerated()), id: \.offset) { _, connection in
+                transferRow(connection, change: change, columns: columns)
+            }
+        }
+    }
+
+    /// One of the later trains: when it leaves, when it gets to the change, the
+    /// wait there and the train it meets, on a band when the wait is short.
+    private func transferRow(_ connection: Connection, change: Change, columns: TransferColumns) -> some View {
+        let style = BoardStyle.large
+        let quick = connection.isQuick(within: change.quickMinutes)
+        return HStack(spacing: 0) {
+            HStack(spacing: 3) {
+                if columns.liveSlot {
+                    LiveMark(size: TransferColumns.markSize)
+                        .foregroundStyle(connection.first.statusColor)
+                        .opacity(connection.first.isLive ? 1 : 0)
+                        .accessibilityHidden(!connection.first.isLive)
+                }
+                Text(connection.first.time.clock)
+                    .font(style.timeFont)
+                    .foregroundStyle(connection.first.statusColor)
+                    .fixedSize()
+            }
+            .frame(width: columns.leave, alignment: .trailing)
+            Image(systemName: "arrow.right")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(Color.boardDim)
+                .frame(width: columns.gap)
+                .accessibilityHidden(true)
+            Text(connection.arrival.time.clock)
+                .font(style.minutesFont)
+                .foregroundStyle(Color.boardGray)
+                .fixedSize()
+                .frame(width: columns.arrive, alignment: .trailing)
+            waitCell(connection, quick: quick)
+                .frame(width: columns.wait)
+                .padding(.leading, columns.gap)
+            nextCell(connection, columns: columns)
+                .padding(.leading, columns.gap)
+        }
+        .monospacedDigit()
+        .lineLimit(1)
+        .frame(height: 26)
+        .background {
+            if quick {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.boardText.opacity(0.08))
+                    .padding(.horizontal, -8)
+            }
+        }
+    }
+
+    /// The wait at the change: on a pill when it's short enough to highlight.
+    private func waitCell(_ connection: Connection, quick: Bool) -> some View {
+        let fullColor = renderingMode == .fullColor
+        return Text(connection.waitLabel)
+            .font(.footnote.weight(quick ? .bold : .semibold))
+            .monospacedDigit()
+            .foregroundStyle(quick && fullColor ? Color.boardBackground : quick ? Color.primary : Color.boardGray)
+            .padding(.horizontal, 7)
+            .frame(height: 20)
+            .background {
+                if quick {
+                    // Tinted and clear Home Screens draw a widget in one colour,
+                    // which would fill the pill over its text
+                    if fullColor {
+                        Capsule().fill(Color.boardText)
+                    } else {
+                        Capsule().strokeBorder(lineWidth: 1.5)
+                    }
+                }
+            }
+            .widgetAccentable(quick)
+            .fixedSize()
+            .accessibilityLabel(connection.waitMinutes.map { "\($0) minute wait" } ?? "No train to change to")
+    }
+
+    /// The train met at the change: its bullet, then its time, the times lined up.
+    private func nextCell(_ connection: Connection, columns: TransferColumns) -> some View {
+        let style = BoardStyle.large
+        return HStack(spacing: 5) {
+            if let next = connection.next {
+                LineBullet(route: next.route, size: style.timeBullet)
+                Text(next.time.clock)
+                    .font(style.timeFont)
+                    .monospacedDigit()
+                    .foregroundStyle(next.statusColor)
+                    .fixedSize()
+                    .frame(width: columns.nextTime, alignment: .trailing)
+            } else {
+                Color.clear.frame(width: style.timeBullet, height: style.timeBullet)
+                Text("–")
+                    .font(style.timeFont)
+                    .foregroundStyle(Color.boardGray)
+                    .frame(width: columns.nextTime, alignment: .trailing)
+            }
+        }
+        .lineLimit(1)
+        .frame(width: columns.next, alignment: .leading)
+    }
+
     /// ↻, the medium widget's map button, and the walk button, which starts or
     /// stops the countdown to this widget's train, sharing the row equally. Each
     /// lights up in the line's colour: ↻ just after it's tapped, map while the
@@ -574,7 +929,7 @@ struct TrainWidgetView: View {
             RefreshButton(lit: entry.refreshLit ? LineStyle.of(entry.selection.firstRoute) : nil, fills: true,
                           widgetsOnly: !entry.anyCountdown, large: style.isLarge)
             // While the alert shows in full there are no times to swap for the stops
-            if family == .systemMedium && !alertOpen {
+            if family != .systemSmall && !alertOpen {
                 MapButton(selection: entry.selection, isOn: entry.showsMap, large: style.isLarge)
             }
             WalkButton(intent: ToggleCountdownIntent(selection: entry.selection), route: entry.selection.firstRoute,
@@ -636,7 +991,7 @@ struct TrainWidgetView: View {
                     }
                     .invalidatableContent()
                 }
-                if notice.others > 0, family == .systemMedium {
+                if notice.others > 0, family != .systemSmall {
                     Text("+\(notice.others) more")
                         .foregroundStyle(Color.boardGray)
                 }
@@ -660,6 +1015,48 @@ struct TrainWidgetView: View {
             .lineLimit(1)
             .minimumScaleFactor(0.6)
     }
+}
+
+/// The large widget's columns for a change: when each train leaves, when it
+/// gets there, the wait, and the train it meets, each as wide as its widest,
+/// with even gaps across the widget.
+private struct TransferColumns {
+    let leave: CGFloat
+    let arrive: CGFloat
+    let wait: CGFloat
+    /// The bullet and time of the train met.
+    let next: CGFloat
+    let nextTime: CGFloat
+    let gap: CGFloat
+    /// Room for a live mark before the time a train leaves.
+    let liveSlot: Bool
+
+    static let markSize: CGFloat = 11
+
+    init(connections: [Connection], width: CGFloat, marksLive: Bool) {
+        let style = BoardStyle.large
+        let pillFont = UIFont.monospacedDigitSystemFont(ofSize: UIFont.preferredFont(forTextStyle: .footnote).pointSize,
+                                                        weight: .bold)
+        let liveSlot = marksLive && connections.contains(where: { $0.first.isLive })
+        let mark: CGFloat = liveSlot ? Self.markSize + 3 : 0
+        let leave = (connections.map { $0.first.time.clock.width(in: style.timeUIFont) }.max() ?? 0) + mark
+        let arrive = connections.map { $0.arrival.time.clock.width(in: style.minutesUIFont) }.max() ?? 0
+        // The pill's text and its padding
+        let wait = (connections.map { $0.waitLabel.width(in: pillFont) }.max() ?? 0) + 14
+        let nextTime = connections.compactMap { $0.next?.time.clock.width(in: style.timeUIFont) }.max()
+            ?? "0:00".width(in: style.timeUIFont)
+        let next = style.timeBullet + 5 + nextTime
+        self.liveSlot = liveSlot
+        self.leave = leave
+        self.arrive = arrive
+        self.wait = wait
+        self.nextTime = nextTime
+        self.next = next
+        gap = max(8, (width - leave - arrive - wait - next) / 3)
+    }
+
+    /// Where the wait starts, from the left.
+    var waitX: CGFloat { leave + gap + arrive + gap }
 }
 
 extension Notice {
@@ -751,6 +1148,35 @@ extension TrainEntry {
         }
     }
 
+    /// The R from Prospect Av, changing at Atlantic Av-Barclays Ctr to the D or
+    /// N, for the large widget: a quick change first, then a longer wait.
+    static func transferPreview(showsMap: Bool = false) -> TrainEntry {
+        let now = Date.now
+        let leaving: [Double] = [3.2, 10, 17, 26, 33, 41]
+        let waits: [Double] = [1, 4, 1, 2, 4, 1]
+        let lines = ["D", "D", "N", "N", "N", "D"]
+        let connections = leaving.indices.map { index -> Connection in
+            let at = { (minutes: Double) in now.addingTimeInterval((leaving[index] + minutes) * 60) }
+            let live = leaving[index] < 20
+            // From 25 St, through Prospect Av, 4 Av-9 St and Union St, to Atlantic Av
+            let approach = [("R35N", -1.5), ("R34N", 0.0), ("R33N", 2.0), ("R32N", 4.0), ("R31N", 6.0)].map {
+                Arrival.Stop(id: $0.0, time: at($0.1))
+            }
+            let first = Arrival(route: "R", time: at(0), stop: "R34N", lastStop: "G08N", isLive: live, trip: "R\(index)")
+            let arrival = Arrival(route: "R", time: at(6), stop: "R31N", lastStop: "G08N", isLive: live, trip: "R\(index)",
+                                  approach: approach)
+            // Express from 36 St
+            let meets = at(6 + waits[index])
+            let next = Arrival(route: lines[index], time: meets, stop: "R31N", lastStop: lines[index] == "D" ? "D01N" : "R01N",
+                               isLive: live, trip: "X\(index)",
+                               approach: [Arrival.Stop(id: "R36N", time: meets.addingTimeInterval(-6 * 60)),
+                                          Arrival.Stop(id: "R31N", time: meets)])
+            return Connection(first: first, arrival: arrival, next: next)
+        }
+        return TrainEntry(date: now, selection: .fallback, trains: connections.map(\.first), showsMap: showsMap,
+                          connections: connections, change: Change(stationID: "R31", routes: ["D", "N"]))
+    }
+
     /// Settings › Larger widget text and Mark live times.
     static var accessible: AppSettings {
         var settings = AppSettings()
@@ -805,4 +1231,15 @@ extension TrainEntry {
     // Marked live times, compact and large
     TrainEntry(date: .now, selection: .fallback, trains: TrainEntry.mixed, settings: TrainEntry.accessible)
     TrainEntry(date: .now, selection: .fallback, trains: TrainEntry.mixed, largeText: true, settings: TrainEntry.accessible)
+}
+
+#Preview(as: .systemLarge) {
+    RTrainWidget()
+} timeline: {
+    TrainEntry.transferPreview()
+    TrainEntry.transferPreview(showsMap: true)
+    // Without a change
+    TrainEntry.preview
+    TrainEntry(date: .now, selection: .fallback, trains: TrainEntry.preview.trains, showsMap: true)
+    TrainEntry(date: .now, selection: .fallback, trains: TrainEntry.mixed, notice: TrainEntry.delays, largeText: true)
 }

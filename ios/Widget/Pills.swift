@@ -89,8 +89,8 @@ struct WalkButton<Intent: AppIntent>: View {
     }
 }
 
-/// The medium widget's switch between the later trains and the stops before
-/// yours; lit while the stops show.
+/// The medium and large widgets' switch between the later trains and the stops
+/// before yours (or, with a change, where the trains are); lit while they show.
 struct MapButton: View {
     let selection: Selection
     let isOn: Bool

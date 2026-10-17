@@ -55,6 +55,12 @@ struct TrainWidgetIntent: WidgetConfigurationIntent {
         return earlierTrain(basedOn: saved.defaultWidget.selection) ?? saved.defaultWidget.selection
     }
 
+    /// Where this widget's saved widget changes trains, which the large widget
+    /// shows. Nil for a widget set up before saved widgets.
+    var change: Change? {
+        savedWidget(in: SharedStore.loadWidgets())?.change
+    }
+
     /// The train a widget set up before saved widgets was given, with the
     /// default widget's walking time and alerts, as it had the app's then.
     /// Nil until all three are chosen, or where the line doesn't stop at the station.
@@ -77,7 +83,8 @@ struct SavedWidgetEntity: AppEntity {
     /// A `SavedWidget.id`.
     let id: String
     let title: String
-    /// "Prospect Av · R to Manhattan"
+    /// "Prospect Av · R to Manhattan", then any change: ", then D or N at
+    /// Atlantic Av-Barclays Ctr"
     let subtitle: String
     let routes: [String]
 
@@ -85,7 +92,11 @@ struct SavedWidgetEntity: AppEntity {
         id = widget.id.uuidString
         title = widget.title
         let selection = widget.selection
-        subtitle = "\(selection.station?.name ?? "") · \(Lines.list(selection.routes)) \(selection.heading)"
+        var subtitle = "\(selection.station?.name ?? "") · \(Lines.list(selection.routes)) \(selection.heading)"
+        if let change = widget.change, let station = change.station {
+            subtitle += ", then \(Lines.list(change.routes, joinedBy: "or")) at \(station.name)"
+        }
+        self.subtitle = subtitle
         routes = selection.routes
     }
 

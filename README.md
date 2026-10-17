@@ -18,6 +18,21 @@ the next, how many more, and yours. It starts from the MTA's live train position
 at the widget's last refresh, then moves the train along by when it's due at each
 stop. Tap the button again for the times.
 
+**Changing trains.** A widget can also change trains on the way, say from the R
+at Prospect Av to the D or N express at Atlantic Av-Barclays Ctr. The large
+widget then counts down to your next R that gets there, with the wait at Atlantic
+and the express it meets, and lists the later ones: when each leaves, when it
+gets to Atlantic, the wait, and the express. Waits short enough for a quick
+change (2 minutes or less, unless you choose otherwise) are highlighted. Its map
+button shows your R on the local track and the express beside it on its own,
+each where it would be by how long it has to go to Atlantic, so a quick change
+shows as the two side by side. To set one up, edit a widget in the app's Widgets
+tab and tap **Add a Change**: pick the station from the stops after yours, then
+the lines there (those across the platform are chosen to start with). A line on
+another platform, like the 2 or 3 at Atlantic Av, counts the walk to it in the
+wait; set how long that walk is on the widget. Without a change, the large
+widget shows the medium one's countdown and later trains, with room for more.
+
 **Choosing a train.** In the app, tap the train at the top and choose in three
 steps, each leading to the next: the station (search, or show only one line's),
 its lines, and the direction. The lines are laid out platform by platform: tap

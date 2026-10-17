@@ -237,7 +237,7 @@ private struct StopRail: View {
 
 /// The train on the rail: its line's bullet, or an outline of it while it's
 /// still a timetable time.
-private struct TrainMarker: View {
+struct TrainMarker: View {
     let route: String
     let isLive: Bool
     let size: CGFloat
