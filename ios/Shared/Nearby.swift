@@ -17,6 +17,12 @@ enum Nearby {
             return Measurement(value: value, unit: unit)
                 .formatted(.measurement(width: .abbreviated, usage: .asProvided, numberFormatStyle: .number.precision(.fractionLength(1))))
         }
+
+        /// About how long it takes to walk there: 3 mph, and a fifth more for
+        /// streets that don't go straight there. Never less than a minute.
+        var walkMinutes: Int {
+            max(1, Int((meters * 1.2 / 80).rounded()))
+        }
     }
 
     /// No further than this, so there's no list far from the subway.
@@ -31,11 +37,29 @@ enum Nearby {
 
     /// The closest few of `stations` to `location`, nearest first.
     static func stations(near location: CLLocation, among stations: [Station] = StationDirectory.all, limit: Int = 5) -> [Result] {
-        stations
-            .map { Result(station: $0, meters: location.distance(from: CLLocation(latitude: $0.lat, longitude: $0.lon))) }
+        results(near: location, among: stations)
             .filter { $0.meters <= range }
             .sorted { $0.meters < $1.meters }
             .prefix(limit)
             .map { $0 }
     }
+
+    /// The closest station of all, however far: for saying how far the subway is.
+    static func nearest(to location: CLLocation) -> Result? {
+        results(near: location, among: StationDirectory.all).min { $0.meters < $1.meters }
+    }
+
+    private static func results(near location: CLLocation, among stations: [Station]) -> [Result] {
+        stations.map { Result(station: $0, meters: location.distance(from: CLLocation(latitude: $0.lat, longitude: $0.lon))) }
+    }
+
+    /// The Nearby widget's kind, for the app to reload it when location is turned on.
+    static let widgetKind = "NearbyWidget"
+
+    /// Opens the app at the Live tab, which finds you again: a tap on the Nearby widget.
+    static let url = URL(string: "traintimes://nearby")!
+
+    /// Opens the app to let it have your location: it asks the first time,
+    /// and once location's been turned off, opens Settings.
+    static let allowURL = URL(string: "traintimes://nearby/allow")!
 }

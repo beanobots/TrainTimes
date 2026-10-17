@@ -5,6 +5,7 @@ import WidgetKit
 struct RTrainWidgetBundle: WidgetBundle {
     var body: some Widget {
         RTrainWidget()
+        NearbyWidget()
         TrainLiveActivity()
     }
 }

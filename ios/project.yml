@@ -32,8 +32,8 @@ targets:
               - traintimes
         # The Lock Screen and Dynamic Island countdown
         NSSupportsLiveActivities: true
-        # Stations near you, at the top of the station lists
-        NSLocationWhenInUseUsageDescription: Your location puts the stations near you at the top of the list.
+        # Stations near you, in the Live tab and on the Nearby widget
+        NSLocationWhenInUseUsageDescription: Your location shows the stations near you and their next trains, in the app and on the Nearby widget.
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
@@ -63,6 +63,10 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
+        # The Nearby widget finds you each time it reloads, with the app's
+        # permission, which then reads "While Using the App or Widgets"
+        NSWidgetWantsLocation: true
+        NSLocationWhenInUseUsageDescription: Your location shows the stations near you and their next trains, in the app and on the Nearby widget.
     entitlements:
       path: Config/Widget.entitlements
       properties:

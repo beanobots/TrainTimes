@@ -52,6 +52,19 @@ platform: each line, a platform's lines together, or every line. Until all three
 are chosen, the widget shows the app's train. Widgets set up with a train before
 there were three choices keep it.
 
+**Trains near you.** The large **Trains near you** widget finds where you are
+each time it refreshes and lists the closest stations, with how far each is and
+about how long it takes to walk there. Each line gets a row: its bullet, then the
+way toward Manhattan and its next train ("Now", "1 min", "12 min"), then the
+other way and its next train. In Manhattan the two ways are Uptown and Downtown;
+elsewhere the other way is the borough its trains are headed for, so the G from
+Brooklyn reads Queens and Brooklyn. Lines with no trains just now share a small
+row under the others, and a suspended line shows its alert instead of times. A
+station with more lines than fit shows its first four and "4 more lines ›". Tap a
+time to open that train in the app, or anywhere else for the Live tab's Nearby
+list. The widget uses the app's location permission: choose **While Using the
+App or Widgets** when the app asks.
+
 **Walking time.** Set how long it takes you to walk to the station in the app.
 Trains you can't reach in time are left out, the widgets count down to when to
 leave, and the app shows a leave time for each train.

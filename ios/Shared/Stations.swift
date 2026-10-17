@@ -4,6 +4,8 @@ enum Direction: String, Codable, CaseIterable, Sendable {
     /// The feeds name a platform by its station id plus N or S.
     case north = "N"
     case south = "S"
+
+    var opposite: Direction { self == .north ? .south : .north }
 }
 
 /// One of a station's sets of tracks, as the MTA lists them: the D N R at
@@ -111,6 +113,12 @@ struct Station: Hashable, Identifiable, Sendable {
         Self.directionLabel(direction, on: platforms(serving: routes))
     }
 
+    /// The MTA's name for where `route` goes in `direction` from here: "Manhattan",
+    /// "Uptown & The Bronx"; empty at the end of the line.
+    func directionName(_ direction: Direction, of route: String) -> String {
+        platforms(serving: [route]).lazy.map { $0.directionName(direction) }.first { !$0.isEmpty } ?? ""
+    }
+
     static func directionLabel(_ direction: Direction, on platforms: [Platform]) -> String {
         var names: [String] = []
         for name in platforms.map({ $0.directionName(direction) }) where !name.isEmpty && !names.contains(name) {
@@ -176,6 +184,15 @@ enum StationDirectory {
 
     /// The short name of a stop on a train's way: "R45N" is Bay Ridge.
     static func shortName(forStop stop: String) -> String? {
-        (platformsByID[stop] ?? platformsByID[String(stop.dropLast())])?.short
+        platform(forStop: stop)?.short
+    }
+
+    /// The borough of a stop on a train's way: "R45S" is in Brooklyn.
+    static func borough(ofStop stop: String) -> String? {
+        platform(forStop: stop)?.borough
+    }
+
+    private static func platform(forStop stop: String) -> Platform? {
+        platformsByID[stop] ?? platformsByID[String(stop.dropLast())]
     }
 }

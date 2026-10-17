@@ -101,6 +101,12 @@ enum Lines {
         }
     }
 
+    /// Whether `route` runs into Manhattan: every line but the G, the Franklin
+    /// Av and Rockaway Park shuttles, and the Staten Island Railway.
+    static func servesManhattan(_ route: String) -> Bool {
+        !["G", "FS", "H", "SI"].contains(route)
+    }
+
     /// "R", "42 St Shuttle", "N and R", "D, N and R"
     static func list(_ routes: [String]) -> String {
         let names = routes.count == 1 ? routes.map(name(of:)) : routes.map { LineStyle.of($0).label }
