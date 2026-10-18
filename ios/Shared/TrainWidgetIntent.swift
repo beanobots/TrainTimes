@@ -55,10 +55,12 @@ struct TrainWidgetIntent: WidgetConfigurationIntent {
         return earlierTrain(basedOn: saved.defaultWidget.selection) ?? saved.defaultWidget.selection
     }
 
-    /// Where this widget's saved widget changes trains, which the large widget
-    /// shows. Nil for a widget set up before saved widgets.
-    var change: Change? {
-        savedWidget(in: SharedStore.loadWidgets())?.change
+    /// The saved widget a Transfers widget shows: the one picked, or with none
+    /// picked (or the one picked deleted) the first that changes trains, else
+    /// the default.
+    func transfersWidget(in saved: SavedWidgets) -> SavedWidget {
+        if let widget, let picked = UUID(uuidString: widget.id).flatMap(saved.widget) { return picked }
+        return saved.widgets.first(where: { $0.change != nil }) ?? saved.defaultWidget
     }
 
     /// The train a widget set up before saved widgets was given, with the

@@ -326,9 +326,9 @@ extension WidgetFields {
             Text("Then change")
         } footer: {
             if let change = widget.change, let name = change.station?.name {
-                Text("The large widget pairs each \(Lines.list(selection.routes)) with the first \(Lines.list(change.routes, joinedBy: "or")) it can catch at \(name), and highlights waits this short.")
+                Text("The Transfers widget pairs each \(Lines.list(selection.routes)) with the first \(Lines.list(change.routes, joinedBy: "or")) it can catch at \(name), and highlights waits this short.")
             } else {
-                Text("Change trains on the way, say from a local to an express. The large widget pairs each train with the first one it can catch there.")
+                Text("Change trains on the way, say from a local to an express. The Transfers widget pairs each train with the first one it can catch there.")
             }
         }
         .sheet(isPresented: $choosingChange) {

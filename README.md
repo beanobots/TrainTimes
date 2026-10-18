@@ -19,19 +19,22 @@ at the widget's last refresh, then moves the train along by when it's due at eac
 stop. Tap the button again for the times.
 
 **Changing trains.** A widget can also change trains on the way, say from the R
-at Prospect Av to the D or N express at Atlantic Av-Barclays Ctr. The large
-widget then counts down to your next R that gets there, with the wait at Atlantic
-and the express it meets, and lists the later ones: when each leaves, when it
-gets to Atlantic, the wait, and the express. Waits short enough for a quick
-change (2 minutes or less, unless you choose otherwise) are highlighted. Its map
-button shows your R on the local track and the express beside it on its own,
-each where it would be by how long it has to go to Atlantic, so a quick change
-shows as the two side by side. To set one up, edit a widget in the app's Widgets
-tab and tap **Add a Change**: pick the station from the stops after yours, then
-the lines there (those across the platform are chosen to start with). A line on
-another platform, like the 2 or 3 at Atlantic Av, counts the walk to it in the
-wait; set how long that walk is on the widget. Without a change, the large
-widget shows the medium one's countdown and later trains, with room for more.
+at Prospect Av to the D or N express at Atlantic Av-Barclays Ctr. The
+**Transfers** widget shows it, beside the Next train widget. The medium one has
+your next two changes, each with the countdown to leaving, when your R leaves
+Prospect Av and gets to Atlantic, the wait there, and the express it meets. The
+large one shows the next change big: the countdown, then your R leaving, the
+ride to Atlantic, the wait and the express. Under it are three more. Waits short
+enough for a quick change (2 minutes or less, unless you choose otherwise) are
+highlighted. The large one's map button shows your R on the local track and the
+express beside it, each where it would be by how long it has to go to Atlantic,
+so a quick change shows as the two side by side; the medium one's shows where
+your R is. To set one up, edit a widget in the app's Widgets tab and tap **Add
+a Change**: pick the station from the stops after yours, then the lines there
+(those across the platform are chosen to start with). A line on another
+platform, like the 2 or 3 at Atlantic Av, counts the walk to it in the wait; set
+how long that walk is on the widget. A Transfers widget shows the widget picked
+in its Edit menu, or with none picked the first one that changes trains.
 
 **Choosing a train.** In the app, tap the train at the top and choose in three
 steps, each leading to the next: the station (search, or show only one line's),
@@ -136,8 +139,9 @@ AltStore can tell when there's a new one.
    Search for your station (or show only one line's), tap one or more of its
    lines, then the direction. The widget updates right away.
 5. **Add the widget.** Touch and hold the Home Screen, tap **Edit → Add Widget**,
-   and choose **Train Times**. Until you choose, it shows the R at Prospect Av,
-   toward Manhattan.
+   and choose **Train Times**: Next train, or Transfers for a widget that
+   changes trains. Until you choose, it shows the R at Prospect Av, toward
+   Manhattan.
 
 If the app shows an orange warning that the widget can't see your choice, the
 shared storage the app and widget use wasn't set up when it was installed (it's an
