@@ -47,6 +47,9 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.rtrainwidget.app
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # Every line's bullet, for the icon to follow the default widget's line
+        # (AppIcon.swift); the build lists them in Info.plist
+        ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS: YES
         # Code shared with the widget checks this: only the app may start or update Live Activities
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) APP
   RTrainWidget:

@@ -6,6 +6,7 @@ import UIKit
 struct AppTabs: View {
     private enum AppTab: Hashable { case live, widgets, settings }
 
+    @Environment(\.scenePhase) private var scenePhase
     @State private var store = WidgetStore()
     @State private var favorites = FavoritesStore()
     @State private var settings = SettingsStore()
@@ -32,6 +33,14 @@ struct AppTabs: View {
         .environment(settings)
         .sheet(item: $alertsTrain) { train in
             AlertsSheet(selection: train.selection)
+        }
+        // The icon is the default widget's line: when that changes, and each
+        // time the app opens, in case it couldn't change before
+        .onChange(of: store.defaultWidget.selection.firstRoute) { _, route in
+            AppIcon.show(route)
+        }
+        .onChange(of: scenePhase, initial: true) { _, phase in
+            if phase == .active { AppIcon.show(store.defaultWidget.selection.firstRoute) }
         }
         // A widget's "More ›": the alerts of its train, which can be other than
         // the default's. Here so it opens whichever tab is showing. And the
