@@ -3,9 +3,22 @@ import MapKit
 import SwiftUI
 import UIKit
 
+/// What a tap on the Nearby widget opens in the Live tab.
+enum LiveOpening: Equatable {
+    /// One of its trains.
+    case train(Selection)
+    /// The stations near you, found again.
+    case nearby
+    /// Location for the app: asked for the first time, and once it's been
+    /// turned off, in Settings.
+    case allowLocation
+}
+
 /// The Live tab: the next trains of your favorites, and of every line at the
 /// stations near you. Tapping one opens its times, countdown, alerts and map.
 struct LiveView: View {
+    /// What a tap on the Nearby widget opens; cleared once it's open.
+    @Binding var opening: LiveOpening?
     @Environment(FavoritesStore.self) private var favorites
     @Environment(WidgetStore.self) private var widgets
     @Environment(SettingsStore.self) private var settings
@@ -132,6 +145,25 @@ struct LiveView: View {
                 DropPinSheet(start: (pin ?? location.location)?.coordinate) { pin = $0 }
             }
             .onAppear { location.start() }
+            .onChange(of: opening, initial: true) { _, opening in
+                guard let opening else { return }
+                self.opening = nil
+                switch opening {
+                case .train(let selection):
+                    path = [selection]
+                case .nearby:
+                    path = []
+                    findLocation()
+                case .allowLocation:
+                    path = []
+                    if location.status == .denied || location.status == .restricted,
+                       let url = URL(string: UIApplication.openSettingsURLString) {
+                        UIApplication.shared.open(url)
+                    } else {
+                        findLocation()
+                    }
+                }
+            }
             .onChange(of: here, initial: true) { _, here in
                 nearby = here.map { Nearby.stations(near: $0, limit: 3) } ?? []
             }
@@ -504,7 +536,7 @@ private struct Minutes: View {
 }
 
 #Preview {
-    LiveView()
+    LiveView(opening: .constant(nil))
         .environment(FavoritesStore())
         .environment(WidgetStore())
         .environment(SettingsStore())

@@ -1,5 +1,6 @@
 import CoreLocation
 import Observation
+import WidgetKit
 
 /// Where you are, for the stations near you: asked for only when you tap to
 /// see them, then found once each time the station list opens (the manager
@@ -43,6 +44,10 @@ final class NearbyLocation: NSObject, CLLocationManagerDelegate {
     nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         let status = manager.authorizationStatus
         Task { @MainActor in
+            // The Nearby widget goes by the same permission
+            if status != self.status {
+                WidgetCenter.shared.reloadTimelines(ofKind: Nearby.widgetKind)
+            }
             self.status = status
             if self.isAllowed { self.find() }
         }

@@ -159,9 +159,15 @@ enum TrainService {
 
     /// The trains of each of `selections`, by `Selection.trainID`, found as
     /// `board` finds them but fetching each feed just once, for the Live tab's
-    /// lists. One whose own lines' feeds didn't come is left out.
-    static func trains(for selections: [Selection], now: Date = Date()) async -> [String: [Arrival]] {
-        let feeds = selections.map { Lines.feedURLs(sharingTracksWith: $0.routes) }
+    /// lists. One whose own lines' feeds didn't come is left out. Without
+    /// `includingOtherLines`, only the lines' own feeds are fetched, which is
+    /// enough where only each line's own trains are shown.
+    static func trains(for selections: [Selection], includingOtherLines: Bool = true,
+                       now: Date = Date()) async -> [String: [Arrival]] {
+        let feeds: [(own: [URL], others: [URL])] = selections.map { selection in
+            let all = Lines.feedURLs(sharingTracksWith: selection.routes)
+            return includingOtherLines ? all : (own: all.own, others: [])
+        }
         let urls = Set(feeds.flatMap { $0.own + $0.others })
         let stops = Set(selections.flatMap(\.stopIDs))
         let arrivals = await withTaskGroup(of: (URL, [Arrival]?).self) { group in
@@ -192,10 +198,11 @@ enum TrainService {
     private static let feeds = InFlight<Data>()
     private static let alertLists = InFlight<[AlertsFeed.Entry]>()
 
-    /// The MTA's alerts, decoded once for every board that asks within 30
-    /// seconds: each widget would otherwise decode all of the feed's 1 MB
-    /// itself. What's kept is the small part of it in effect around now.
-    private static func alertEntries(if wanted: Bool) async -> [AlertsFeed.Entry]? {
+    /// The MTA's alerts, decoded once for every board (and the Nearby widget)
+    /// that asks within 30 seconds: each widget would otherwise decode all of
+    /// the feed's 1 MB itself. What's kept is the small part of it in effect
+    /// around now. Nil when not wanted or the feed couldn't be had.
+    static func alertEntries(if wanted: Bool = true) async -> [AlertsFeed.Entry]? {
         guard wanted else { return nil }
         return try? await alertLists.value(for: AlertsFeed.url, reusingFor: 30) {
             try AlertsFeed.entries(in: try await data(from: AlertsFeed.url))

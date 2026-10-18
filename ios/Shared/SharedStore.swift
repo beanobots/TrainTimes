@@ -34,6 +34,7 @@ enum SharedStore {
     private static let boardsFile = container?.appendingPathComponent("boards.json")
     private static let widgetsFile = container?.appendingPathComponent("widgets.json")
     private static let settingsFile = container?.appendingPathComponent("settings.json")
+    private static let placeFile = container?.appendingPathComponent("place.json")
 
     /// Whether a choice made in the app can reach the widget on this install.
     static var isAvailable: Bool { file != nil }
@@ -206,6 +207,25 @@ enum SharedStore {
         let kinds = loadSettings().alertKinds.map(\.rawValue).sorted().map(String.init).joined(separator: ",")
         let key = "\(selection.trainID) \(selection.elevatorAlerts) \(selection.serviceAlerts) \(kinds)"
         return change.map { "\(key) change \($0.key)" } ?? key
+    }
+
+    /// What the Nearby widget last called where you were, so it looks the name
+    /// up again only once you've moved on.
+    struct Place: Codable {
+        var latitude: Double
+        var longitude: Double
+        /// "Park Slope"; nil where the lookup failed.
+        var name: String?
+    }
+
+    static func loadPlace() -> Place? {
+        guard let placeFile, let data = try? Data(contentsOf: placeFile) else { return nil }
+        return try? JSONDecoder().decode(Place.self, from: data)
+    }
+
+    static func savePlace(_ place: Place) {
+        guard let placeFile, let data = try? JSONEncoder().encode(place) else { return }
+        try? data.write(to: placeFile, options: .atomic)
     }
 
     /// The choices made in the app's Settings tab; the defaults until there are any.

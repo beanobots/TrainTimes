@@ -126,22 +126,37 @@ extension Selection {
     /// Opens the app at this train's alerts, from a widget showing one:
     /// "traintimes://alerts?station=R34&lines=R&direction=N&elevators=0". A
     /// widget's train can be other than the app's, so it goes along.
-    var alertsURL: URL {
+    var alertsURL: URL { link(to: "alerts") }
+
+    /// Opens the app at this train's times, from a row of the Nearby widget:
+    /// "traintimes://train?station=R33&lines=R&direction=N&elevators=0".
+    var trainURL: URL { link(to: "train") }
+
+    private func link(to host: String) -> URL {
         var components = URLComponents()
         components.scheme = "traintimes"
-        components.host = "alerts"
+        components.host = host
         components.queryItems = [
             URLQueryItem(name: "station", value: stationID),
             URLQueryItem(name: "lines", value: routes.joined(separator: ",")),
             URLQueryItem(name: "direction", value: direction.rawValue),
             URLQueryItem(name: "elevators", value: elevatorAlerts ? "1" : "0"),
         ]
-        return components.url ?? URL(string: "traintimes://alerts")!
+        return components.url ?? URL(string: "traintimes://\(host)")!
     }
 
     /// The train an `alertsURL` is for, or nil for any other link.
     init?(alertsURL url: URL) {
-        guard url.scheme == "traintimes", url.host == "alerts",
+        self.init(link: url, to: "alerts")
+    }
+
+    /// The train a `trainURL` is for, or nil for any other link.
+    init?(trainURL url: URL) {
+        self.init(link: url, to: "train")
+    }
+
+    private init?(link url: URL, to host: String) {
+        guard url.scheme == "traintimes", url.host == host,
               let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems else { return nil }
         let value = { (name: String) in items.first { $0.name == name }?.value }
         guard let station = value("station"), let lines = value("lines"),

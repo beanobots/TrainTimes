@@ -126,7 +126,7 @@ struct Provider: AppIntentTimelineProvider {
     /// reloads a widget, from 6 am to 11 pm in New York; 15 overnight. A
     /// widget's reloads are budgeted by the day, so fewer at night leaves
     /// more for the day.
-    private static func reloadInterval(at date: Date) -> TimeInterval {
+    static func reloadInterval(at date: Date) -> TimeInterval {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "America/New_York") ?? .current
         let hour = calendar.component(.hour, from: date)
