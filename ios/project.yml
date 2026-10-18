@@ -9,6 +9,8 @@ settings:
     SWIFT_VERSION: "5.0"
     MARKETING_VERSION: "1.0"
     CURRENT_PROJECT_VERSION: "1"
+    # Signing for builds from Xcode; the CI build is unsigned and ignores it
+    DEVELOPMENT_TEAM: XUU899AG4D
 targets:
   NextRTrain:
     type: application
