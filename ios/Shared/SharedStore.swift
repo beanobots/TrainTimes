@@ -168,19 +168,23 @@ enum SharedStore {
         var fetched: Date
         var trains: [Arrival]
         var notice: Notice?
+        /// With a change, the trains that get there and the trains they meet.
+        var connections: [Connection]? = nil
     }
 
-    static func loadBoard(for selection: Selection) -> SavedBoard? {
-        savedBoards()[boardKey(selection)]
+    /// With `change`, the times of the large widget showing it.
+    static func loadBoard(for selection: Selection, change: Change? = nil) -> SavedBoard? {
+        savedBoards()[boardKey(selection, change: change)]
     }
 
     /// Kept for 20 minutes, twice as long as a widget waits to reload.
     @discardableResult
-    static func saveBoard(_ board: Board, for selection: Selection, fetched: Date) -> SavedBoard {
+    static func saveBoard(_ board: Board, for selection: Selection, change: Change? = nil, fetched: Date) -> SavedBoard {
         let saved = SavedBoard(fetched: fetched, trains: board.trains,
-                               notice: board.notice(for: selection, settings: loadSettings()))
+                               notice: board.notice(for: selection, settings: loadSettings()),
+                               connections: change == nil ? nil : board.connections)
         guard let boardsFile else { return saved }
-        let key = boardKey(selection)
+        let key = boardKey(selection, change: change)
         changing(boardsFile) {
             var boards = savedBoards().filter { fetched.timeIntervalSince($0.value.fetched) < 20 * 60 }
             boards[key] = saved
@@ -197,11 +201,12 @@ enum SharedStore {
         return boards
     }
 
-    /// The board depends on the train and on which alerts it mentions, which
-    /// Settings has a say in too.
-    private static func boardKey(_ selection: Selection) -> String {
+    /// The board depends on the train, any change, and which alerts it
+    /// mentions, which Settings has a say in too.
+    private static func boardKey(_ selection: Selection, change: Change?) -> String {
         let kinds = loadSettings().alertKinds.map(\.rawValue).sorted().map(String.init).joined(separator: ",")
-        return "\(selection.trainID) \(selection.elevatorAlerts) \(selection.serviceAlerts) \(kinds)"
+        let key = "\(selection.trainID) \(selection.elevatorAlerts) \(selection.serviceAlerts) \(kinds)"
+        return change.map { "\(key) change \($0.key)" } ?? key
     }
 
     /// What the Nearby widget last called where you were, so it looks the name

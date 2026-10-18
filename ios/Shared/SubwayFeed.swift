@@ -95,6 +95,52 @@ enum SubwayFeed {
         return arrivals.sorted { $0.time < $1.time }
     }
 
+    /// For each trip of `routes` that calls at one of `stopIDs`, the stops it
+    /// lists after that one, in order: where its train goes on to.
+    static func stops(after stopIDs: Set<String>, on routes: Set<String>, in data: Data) throws -> [[String]] {
+        let reader = ProtobufReader(data)
+        var lists: [[String]] = []
+        try reader.fields(until: reader.count) { field in
+            guard field == 2 else { return false } // FeedMessage.entity
+            try reader.message { field in
+                guard field == 3 else { return false } // FeedEntity.trip_update
+                let trip = try tripStops(reader)
+                if routes.contains(Lines.normalized(trip.route)), let at = trip.stops.firstIndex(where: stopIDs.contains) {
+                    lists.append(Array(trip.stops[(at + 1)...]))
+                }
+                return true
+            }
+            return true
+        }
+        return lists
+    }
+
+    /// A trip's route and every stop it lists, in order.
+    private static func tripStops(_ reader: ProtobufReader) throws -> (route: String, stops: [String]) {
+        var route = ""
+        var stops: [String] = []
+        try reader.message { field in
+            switch field {
+            case 1: // TripUpdate.trip
+                try reader.message { field in
+                    guard field == 5 else { return false } // TripDescriptor.route_id
+                    route = try reader.string()
+                    return true
+                }
+            case 2: // TripUpdate.stop_time_update
+                try reader.message { field in
+                    guard field == 4 else { return false } // stop_id
+                    stops.append(try reader.string())
+                    return true
+                }
+            default:
+                return false
+            }
+            return true
+        }
+        return (route, stops)
+    }
+
     /// The trip's arrival at each of `stopIDs` it stops at: the Live tab asks
     /// about several stations at once, and one trip can call at more than one.
     private static func tripUpdate(_ reader: ProtobufReader, at stopIDs: Set<String>) throws -> [Arrival] {

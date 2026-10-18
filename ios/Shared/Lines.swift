@@ -107,10 +107,10 @@ enum Lines {
         !["G", "FS", "H", "SI"].contains(route)
     }
 
-    /// "R", "42 St Shuttle", "N and R", "D, N and R"
-    static func list(_ routes: [String]) -> String {
+    /// "R", "42 St Shuttle", "N and R", "D, N and R"; or joined by "or", "D or N"
+    static func list(_ routes: [String], joinedBy conjunction: String = "and") -> String {
         let names = routes.count == 1 ? routes.map(name(of:)) : routes.map { LineStyle.of($0).label }
         guard let last = names.last, names.count > 1 else { return names.first ?? "" }
-        return names.dropLast().joined(separator: ", ") + " and " + last
+        return names.dropLast().joined(separator: ", ") + " \(conjunction) " + last
     }
 }
