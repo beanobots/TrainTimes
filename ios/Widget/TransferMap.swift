@@ -1,37 +1,36 @@
 import SwiftUI
 import WidgetKit
 
-/// The large widget's other side for a change, behind its map button: your
-/// train's stops on the way to the change, its track down the left, and beside
-/// it the track of the lines changed to. Each train is drawn where it would be
-/// by how long it has to go to the change, so two that meet with little wait
-/// ride side by side.
-struct TransferMap: View {
+/// The large Transfers widget's map, under its next change: your train's stops
+/// on the way to the change along the top track, left to right, and below it
+/// the track of the lines changed to, the two meeting at the change. Each train
+/// is drawn where it would be by how long it has to go to the change, so two
+/// that meet with little wait ride side by side.
+struct TransferTrack: View {
     let connection: Connection
     let selection: Selection
     let change: Change
     let now: Date
+    /// Your train's times under its stops.
+    var showsTimes = true
+    /// Where the train it meets is, when it's further off than the track, and the change's name.
+    var showsNote = true
 
-    private var style: BoardStyle { .large }
-
-    /// The tracks' column, and where each runs down it.
-    static let railsWidth: CGFloat = 52
-    static let localX: CGFloat = 13
-    static let otherX: CGFloat = 41
-    /// Below the last row: where trains still on their way to it are.
-    static let tail: CGFloat = 22
+    static let localY: CGFloat = 28
+    private var otherY: CGFloat { showsTimes ? 64 : 50 }
+    private var height: CGFloat { otherY + (showsNote ? 30 : 14) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             labels
-            if let layout = TransferMapLayout(connection: connection, selection: selection, now: now) {
+            if let layout = TransferMapLayout(connection: connection, selection: selection, now: now, maxRows: 5) {
                 GeometryReader { geometry in
-                    let rowHeight = min(36, max(20, (geometry.size.height - Self.tail) / CGFloat(layout.rows.count)))
-                    diagram(layout, rowHeight: rowHeight)
+                    diagram(layout, width: geometry.size.width)
                 }
+                .frame(height: height)
             } else {
                 Text("The MTA hasn't said yet")
-                    .font(style.stopFont)
+                    .font(BoardStyle.large.stopFont)
                     .foregroundStyle(Color.boardGray)
             }
         }
@@ -54,9 +53,9 @@ struct TransferMap: View {
         return HStack(spacing: 5) {
             Text("WHERE THEY ARE")
             Spacer(minLength: 8)
-            swatch([localColor], width: 4)
+            swatch([localColor], height: 4)
             Text(express ? "LOCAL" : selection.routes.map { LineStyle.of($0).label }.joined(separator: " "))
-            swatch(otherColors, width: 3)
+            swatch(otherColors, height: 3)
                 .padding(.leading, 6)
             Text(express ? "EXPRESS" : change.routes.map { LineStyle.of($0).label }.joined(separator: " "))
         }
@@ -65,121 +64,112 @@ struct TransferMap: View {
         .lineLimit(1)
     }
 
-    private func swatch(_ colors: [Color], width: CGFloat) -> some View {
-        HStack(spacing: 2) {
+    private func swatch(_ colors: [Color], height: CGFloat) -> some View {
+        VStack(spacing: 2) {
             ForEach(Array(colors.enumerated()), id: \.offset) { _, color in
                 RoundedRectangle(cornerRadius: 1)
                     .fill(color)
-                    .frame(width: width, height: 11)
+                    .frame(width: 14, height: height)
             }
         }
         .accessibilityHidden(true)
     }
 
-    private func diagram(_ layout: TransferMapLayout, rowHeight: CGFloat) -> some View {
-        let middle = { (row: CGFloat) in row * rowHeight + rowHeight / 2 }
-        let marker = style.markerSize
+    private func diagram(_ layout: TransferMapLayout, width: CGFloat) -> some View {
+        let track = TrackGeometry(width: width, stops: layout.rows.count)
+        let marker = BoardStyle.large.markerSize
+        // The change's name goes under it, out of the way of the stop before
+        let station = layout.rows[0].name.split(separator: "-").first.map(String.init) ?? layout.rows[0].name
         return ZStack(alignment: .topLeading) {
-            TransferRails(layout: layout, rowHeight: rowHeight, localColor: localColor, otherColors: otherColors)
-                .frame(width: Self.railsWidth, height: CGFloat(layout.rows.count) * rowHeight + Self.tail)
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(layout.rows) { row in
-                    rowLabel(row, layout: layout)
-                        .frame(height: rowHeight)
+            TrackRails(layout: layout, track: track, localY: Self.localY, otherY: otherY,
+                       localColor: localColor, otherColors: otherColors)
+                .frame(width: width, height: height)
+            ForEach(Array(layout.rows.dropFirst())) { row in
+                stopName(row, layout: layout)
+                    .frame(width: max(0, track.spacing - 4))
+                    .position(x: track.x(CGFloat(row.id)), y: 7)
+                if showsTimes && row.kind != .folded {
+                    stopTime(row, layout: layout)
+                        .position(x: track.x(CGFloat(row.id)), y: 44)
                 }
+            }
+            if let row = layout.nextRow, let next = connection.next {
+                TrainMarker(route: next.route, isLive: next.isLive, size: marker)
+                    .position(x: max(marker / 2, track.x(row)), y: otherY)
+            }
+            TrainMarker(route: connection.first.route, isLive: connection.first.isLive, size: marker)
+                .position(x: max(marker / 2, track.x(layout.firstRow)), y: Self.localY)
+            if showsNote {
                 if let note = layout.nextNote {
                     Text(note)
                         .font(.caption.italic())
                         .foregroundStyle(Color.boardGray)
                         .lineLimit(1)
-                        .frame(height: Self.tail)
+                        .frame(width: width * 0.62, alignment: .leading)
+                        .position(x: width * 0.31, y: otherY + 22)
                 }
-            }
-            .padding(.leading, Self.railsWidth + 10)
-            if let row = layout.nextRow, let next = connection.next {
-                TrainMarker(route: next.route, isLive: next.isLive, size: marker)
-                    .offset(x: Self.otherX - marker / 2, y: middle(row) - marker / 2)
-            }
-            TrainMarker(route: connection.first.route, isLive: connection.first.isLive, size: marker)
-                .offset(x: Self.localX - marker / 2, y: middle(layout.firstRow) - marker / 2)
-        }
-    }
-
-    /// A stop's name and when your train is due there; the change's also has
-    /// when the train it meets leaves, and the wait between.
-    @ViewBuilder
-    private func rowLabel(_ row: TransferMapLayout.Row, layout: TransferMapLayout) -> some View {
-        // Stops it has passed are dimmed; the one it's at or heading for stands out
-        let passed = CGFloat(row.id) > layout.firstRow + 0.01
-        let isTrainStop = row.id == min(layout.rows.count - 1, Int(layout.firstRow.rounded(.down)))
-        switch row.kind {
-        case .change:
-            changeLabel(row)
-        case .folded:
-            Text(row.name)
-                .font(style.stopFont.italic())
-                .foregroundStyle(Color.boardGray)
-                .lineLimit(1)
-        case .origin, .stop:
-            let yours = row.kind == .origin
-            HStack(spacing: 4) {
-                Text(row.name)
-                    .font(style.stopFont.weight(yours ? .bold : isTrainStop ? .semibold : .medium))
-                    .foregroundStyle(yours || isTrainStop ? Color.boardText : passed ? Color.boardDim : Color.boardGray)
+                Text(station)
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(Color.boardText)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
-                Spacer(minLength: 4)
-                Text(row.time.clock)
-                    .font(yours ? style.departsFont : .footnote.weight(.medium))
-                    .monospacedDigit()
-                    .foregroundStyle(yours ? connection.first.statusColor : passed ? Color.boardDim : Color.boardGray)
+                    .frame(width: width * 0.36, alignment: .trailing)
+                    .position(x: width * 0.82, y: otherY + 22)
             }
         }
     }
 
-    /// The change's name, then your train getting there, the wait, and the
-    /// train it meets leaving.
-    private func changeLabel(_ row: TransferMapLayout.Row) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text(row.name)
-                .font(.subheadline.weight(.bold))
-                .foregroundStyle(Color.boardText)
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
-            HStack(spacing: 4) {
-                LineBullet(route: connection.arrival.route, size: 13)
-                Text(connection.arrival.time.clock)
-                    .foregroundStyle(connection.arrival.statusColor)
-                if let next = connection.next {
-                    waitPill
-                    LineBullet(route: next.route, size: 13)
-                    Text(next.time.clock)
-                        .foregroundStyle(next.statusColor)
-                }
-            }
-            .font(.footnote.weight(.semibold))
-            .monospacedDigit()
+    /// Yours stands out, as does the one your train is at or heading for; those
+    /// it has passed are dimmed.
+    private func stopName(_ row: TransferMapLayout.Row, layout: TransferMapLayout) -> some View {
+        let passed = CGFloat(row.id) > layout.firstRow + 0.01
+        let isTrainStop = row.id == min(layout.rows.count - 1, Int(layout.firstRow.rounded(.down)))
+        let yours = row.kind == .origin
+        return Text(row.name)
+            .font(.caption2.weight(yours ? .bold : isTrainStop ? .semibold : .medium))
+            .italic(row.kind == .folded)
+            .foregroundStyle(yours || isTrainStop ? Color.boardText : passed ? Color.boardDim : Color.boardGray)
             .lineLimit(1)
-        }
+            .minimumScaleFactor(0.7)
     }
 
-    /// The wait, small, and filled when it's short enough to highlight.
-    private var waitPill: some View {
-        let quick = connection.isQuick(within: change.quickMinutes)
-        return Text(connection.waitLabel)
-            .font(.caption2.weight(.bold))
-            .foregroundStyle(quick ? Color.boardBackground : Color.boardGray)
-            .padding(.horizontal, 5)
-            .frame(height: 15)
-            .background {
-                if quick { Capsule().fill(Color.boardText) }
-            }
-            .widgetAccentable(quick)
+    /// When your train is due there.
+    private func stopTime(_ row: TransferMapLayout.Row, layout: TransferMapLayout) -> some View {
+        let passed = CGFloat(row.id) > layout.firstRow + 0.01
+        let yours = row.kind == .origin
+        return Text(row.time.clock)
+            .font(.caption.weight(yours ? .semibold : .medium))
+            .monospacedDigit()
+            .foregroundStyle(yours ? connection.first.statusColor : passed ? Color.boardDim : Color.boardGray)
+            .fixedSize()
     }
 }
 
-/// Which stops the map shows, top to bottom from the change, and where the two
-/// trains are among them, in rows from the middle of the first.
+/// Where the track's stops go across the widget: the change near the right
+/// edge, the others evenly spaced to its left, with room before the first for
+/// a train still on its way to it.
+struct TrackGeometry {
+    let right: CGFloat
+    let spacing: CGFloat
+
+    /// The change's way in from the right edge, past the platform's outline.
+    static let changeInset: CGFloat = 12
+    /// The furthest left a train is drawn.
+    static let leftmost: CGFloat = 10
+
+    init(width: CGFloat, stops: Int) {
+        right = width - Self.changeInset
+        spacing = (right - Self.leftmost) / (CGFloat(max(1, stops - 1)) + 0.6)
+    }
+
+    /// Where a stop is, or a train between stops, counted from the change.
+    func x(_ row: CGFloat) -> CGFloat {
+        right - row * spacing
+    }
+}
+
+/// Which stops the map shows, from the change back to where your train is, and
+/// where the two trains are among them, in stops from the change.
 struct TransferMapLayout {
     enum Kind: Equatable {
         case change, origin, stop, folded
@@ -196,9 +186,10 @@ struct TransferMapLayout {
         let shared: Bool
     }
 
+    /// From the change, at the right end of the track, back to the left end.
     let rows: [Row]
     /// Where your train is: 0 at the change, 1.5 midway between the second and
-    /// third rows, and past the last row while it's on its way to it.
+    /// third stops, and past the last while it's on its way to it.
     let firstRow: CGFloat
     /// Where the train it meets would be on your train's way with as long to
     /// go to the change; nil without one.
@@ -214,7 +205,7 @@ struct TransferMapLayout {
         guard let origin = stops.firstIndex(where: { yours.contains($0.id) }), origin < stops.count - 1 else { return nil }
         let last = stops.count - 1
 
-        // The change at the top, then the stops between it and yours, yours, the
+        // The change first, then the stops between it and yours, yours, the
         // stops between yours and where the train is, and that. When there are
         // too many, the longer of the runs between folds into one row, then
         // the other.
@@ -264,8 +255,8 @@ struct TransferMapLayout {
         }
     }
 
-    /// Where your train is at `time`: between two rows by how far it has come
-    /// from one to the next, or below the last while it's on its way there.
+    /// Where your train is at `time`: between two stops by how far it has come
+    /// from one to the next, or before the last while it's on its way there.
     private static func row(at time: Date, in rows: [Row]) -> CGFloat {
         guard let top = rows.first, time < top.time else { return 0 }
         for index in rows.indices.dropLast() where time >= rows[index + 1].time {
@@ -292,13 +283,15 @@ struct TransferMapLayout {
     }
 }
 
-/// The two tracks: your train's down the left, dashed past folded stops, with a
-/// dot at each stop and a ring at yours; beside it a line for each colour of the
+/// The two tracks: your train's along the top, dashed past folded stops, with a
+/// dot at each stop and a ring at yours; below it a line for each colour of the
 /// lines changed to; and a platform's outline across both where they stop
-/// together. Both fade out below the last row, where trains come from.
-private struct TransferRails: View {
+/// together. Both fade in from the left, where trains come from.
+private struct TrackRails: View {
     let layout: TransferMapLayout
-    let rowHeight: CGFloat
+    let track: TrackGeometry
+    let localY: CGFloat
+    let otherY: CGFloat
     let localColor: Color
     let otherColors: [Color]
     @Environment(\.widgetRenderingMode) private var renderingMode
@@ -308,46 +301,43 @@ private struct TransferRails: View {
         // only how opaque each part is: there, what's filled with the widget's
         // background here is cut out of the tracks instead
         let tinted = renderingMode != .fullColor
-        Canvas { context, size in
+        Canvas { context, _ in
             var eraser = context
             eraser.blendMode = .destinationOut
-            let h = rowHeight
-            let middle = { (row: CGFloat) in row * h + h / 2 }
-            let top = middle(0)
-            let bottom = middle(CGFloat(layout.rows.count - 1))
-            let localX = TransferMap.localX
-            let bar = { (x: CGFloat, width: CGFloat, from: CGFloat, to: CGFloat) in
-                Path(CGRect(x: x - width / 2, y: from, width: width, height: max(0, to - from)))
+            let right = track.x(0)
+            let left = track.x(CGFloat(layout.rows.count - 1))
+            let bar = { (y: CGFloat, thickness: CGFloat, from: CGFloat, to: CGFloat) in
+                Path(CGRect(x: from, y: y - thickness / 2, width: max(0, to - from), height: thickness))
             }
             let circle = { (x: CGFloat, y: CGFloat, diameter: CGFloat) in
                 Path(ellipseIn: CGRect(x: x - diameter / 2, y: y - diameter / 2, width: diameter, height: diameter))
             }
 
             for row in layout.rows.dropLast() {
-                let from = middle(CGFloat(row.id))
-                let to = middle(CGFloat(row.id + 1))
+                let from = track.x(CGFloat(row.id + 1))
+                let to = track.x(CGFloat(row.id))
                 if row.kind == .folded || layout.rows[row.id + 1].kind == .folded {
                     var dashes = Path()
-                    dashes.move(to: CGPoint(x: localX, y: from))
-                    dashes.addLine(to: CGPoint(x: localX, y: to))
+                    dashes.move(to: CGPoint(x: from, y: localY))
+                    dashes.addLine(to: CGPoint(x: to, y: localY))
                     context.stroke(dashes, with: .color(localColor), style: StrokeStyle(lineWidth: 4, dash: [3, 3]))
                 } else {
-                    context.fill(bar(localX, 4, from, to), with: .color(localColor))
+                    context.fill(bar(localY, 4, from, to), with: .color(localColor))
                 }
             }
-            context.fill(bar(localX, 4, bottom, size.height), with: Self.fading(localColor, x: localX, from: bottom, to: size.height))
+            context.fill(bar(localY, 4, 0, left), with: Self.fading(localColor, y: localY, to: left))
 
             let count = CGFloat(otherColors.count)
             for (index, color) in otherColors.enumerated() {
-                let x = TransferMap.otherX - (count * 5 - 2) / 2 + 1.5 + CGFloat(index) * 5
-                context.fill(bar(x, 3, top, bottom), with: .color(color))
-                context.fill(bar(x, 3, bottom, size.height), with: Self.fading(color, x: x, from: bottom, to: size.height))
+                let y = otherY - (count * 5 - 2) / 2 + 1.5 + CGFloat(index) * 5
+                context.fill(bar(y, 3, left, right), with: .color(color))
+                context.fill(bar(y, 3, 0, left), with: Self.fading(color, y: y, to: left))
             }
 
             for row in layout.rows where row.kind != .folded {
-                let y = middle(CGFloat(row.id))
+                let x = track.x(CGFloat(row.id))
                 if row.shared {
-                    let outline = CGRect(x: 3, y: y - 9, width: TransferMap.railsWidth - 4, height: 18)
+                    let outline = CGRect(x: x - 9, y: localY - 12, width: 18, height: otherY - localY + 24)
                     let platform = Path(roundedRect: outline, cornerRadius: 9)
                     if tinted {
                         eraser.fill(platform, with: .color(.black))
@@ -358,29 +348,31 @@ private struct TransferRails: View {
                                    with: .color(Color.boardText), lineWidth: 2.5)
                 } else if row.kind == .origin {
                     if tinted {
-                        eraser.fill(circle(localX, y, 16), with: .color(.black))
+                        eraser.fill(circle(x, localY, 16), with: .color(.black))
                     } else {
-                        context.fill(circle(localX, y, 16), with: .color(Color.boardBackground))
+                        context.fill(circle(x, localY, 16), with: .color(Color.boardBackground))
                     }
-                    context.stroke(circle(localX, y, 13), with: .color(Color.boardText), lineWidth: 3)
+                    context.stroke(circle(x, localY, 13), with: .color(Color.boardText), lineWidth: 3)
                 } else {
-                    context.fill(circle(localX, y, 8), with: .color(Color.boardText))
+                    context.fill(circle(x, localY, 8), with: .color(Color.boardText))
                 }
             }
 
             // Room for the trains' outlines, which can't have a background to part them from the tracks
             if tinted {
                 let room = BoardStyle.large.markerSize + 4
-                eraser.fill(circle(localX, middle(layout.firstRow), room), with: .color(.black))
+                let edge = BoardStyle.large.markerSize / 2
+                eraser.fill(circle(max(edge, track.x(layout.firstRow)), localY, room), with: .color(.black))
                 if let row = layout.nextRow {
-                    eraser.fill(circle(TransferMap.otherX, middle(row), room), with: .color(.black))
+                    eraser.fill(circle(max(edge, track.x(row)), otherY, room), with: .color(.black))
                 }
             }
         }
     }
 
-    private static func fading(_ color: Color, x: CGFloat, from: CGFloat, to: CGFloat) -> GraphicsContext.Shading {
-        .linearGradient(Gradient(colors: [color, color.opacity(0)]),
-                        startPoint: CGPoint(x: x, y: from), endPoint: CGPoint(x: x, y: to))
+    /// Fading in from the widget's left edge to `x`.
+    private static func fading(_ color: Color, y: CGFloat, to x: CGFloat) -> GraphicsContext.Shading {
+        .linearGradient(Gradient(colors: [color.opacity(0), color]),
+                        startPoint: CGPoint(x: 0, y: y), endPoint: CGPoint(x: x, y: y))
     }
 }

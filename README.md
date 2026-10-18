@@ -26,10 +26,11 @@ Prospect Av and gets to Atlantic, the wait there, and the express it meets. The
 large one shows the next change big: the countdown, then your R leaving, the
 ride to Atlantic, the wait and the express. Under it are three more. Waits short
 enough for a quick change (2 minutes or less, unless you choose otherwise) are
-highlighted. The large one's map button shows your R on the local track and the
-express beside it, each where it would be by how long it has to go to Atlantic,
-so a quick change shows as the two side by side; the medium one's shows where
-your R is. To set one up, edit a widget in the app's Widgets tab and tap **Add
+highlighted. The large one's map button keeps the next change at the top and
+swaps the three below it for the tracks to Atlantic: your R on the local track
+and the express below it on its own, each where it would be by how long it has
+to go to Atlantic, so a quick change shows as the two side by side. The medium
+one's shows where your R is. To set one up, edit a widget in the app's Widgets tab and tap **Add
 a Change**: pick the station from the stops after yours, then the lines there
 (those across the platform are chosen to start with). A line on another
 platform, like the 2 or 3 at Atlantic Av, counts the walk to it in the wait; set

@@ -726,8 +726,8 @@ struct TrainWidgetView: View {
     }
 
     /// The trip and which way across the top; the next change big; then three
-    /// more in the medium widget's columns. Behind the map button, your train
-    /// on its track and the one it meets beside it.
+    /// more in the medium widget's columns, or with the map button the tracks
+    /// to the change, your train on one and the one it meets on the other.
     private func transfersLarge(_ change: Change, width: CGFloat) -> some View {
         let style = BoardStyle.large
         let connections = entry.connections ?? []
@@ -738,22 +738,27 @@ struct TrainWidgetView: View {
             transferHeader(change)
             VStack(alignment: .leading, spacing: 0) {
                 if let first = connections.first {
+                    transferCard(first, change: change)
+                        .padding(.top, 14)
                     if entry.showsMap {
-                        TransferMap(connection: first, selection: entry.selection, change: change, now: entry.date)
-                            .padding(.top, 12)
-                    } else {
-                        transferCard(first, change: change)
-                            .padding(.top, 14)
-                        if !later.isEmpty {
-                            transferLabels(change, columns: columns)
-                                .padding(.top, 14)
-                            ViewThatFits(in: .vertical) {
-                                laterTransfers(later, change: change, columns: columns)
-                                laterTransfers(Array(later.prefix(2)), change: change, columns: columns)
-                                laterTransfers(Array(later.prefix(1)), change: change, columns: columns)
-                            }
-                            .padding(.top, 4)
+                        // On a shorter widget, without the note, then without the times
+                        ViewThatFits(in: .vertical) {
+                            TransferTrack(connection: first, selection: entry.selection, change: change, now: entry.date)
+                            TransferTrack(connection: first, selection: entry.selection, change: change, now: entry.date,
+                                          showsNote: false)
+                            TransferTrack(connection: first, selection: entry.selection, change: change, now: entry.date,
+                                          showsTimes: false, showsNote: false)
                         }
+                        .padding(.top, 14)
+                    } else if !later.isEmpty {
+                        transferLabels(change, columns: columns)
+                            .padding(.top, 14)
+                        ViewThatFits(in: .vertical) {
+                            laterTransfers(later, change: change, columns: columns)
+                            laterTransfers(Array(later.prefix(2)), change: change, columns: columns)
+                            laterTransfers(Array(later.prefix(1)), change: change, columns: columns)
+                        }
+                        .padding(.top, 4)
                     }
                 } else {
                     Text(noTransfers(change))
