@@ -65,6 +65,8 @@ jobs:
           test -f Payload/NextRTrain.app/PlugIns/RTrainWidget.appex/stations.json
           test -f Payload/NextRTrain.app/equipment.json
           test -f Payload/NextRTrain.app/PlugIns/RTrainWidget.appex/equipment.json
+          # and every line's icon, for the app to switch to
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIcons:CFBundleAlternateIcons:AppIcon-SI" Payload/NextRTrain.app/Info.plist
           zip -qr TrainTimes.ipa Payload
 
       - name: Write the AltStore source

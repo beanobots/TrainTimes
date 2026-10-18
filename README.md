@@ -110,6 +110,10 @@ station-board look is black in dark mode and white in light. On tinted Home
 Screens a widget's line bullet turns into an outline so the letter stays
 readable. The Lock Screen countdown is always dark.
 
+**The app's icon** is the bullet of your default widget's line (the first one,
+if it has more than one). Make another widget the default in the Widgets tab, or
+change the default's line, and the icon follows; iOS says so with an alert.
+
 There are two versions:
 
 - `ios/`: a native app and widget. You pick any station and line in the app, and
