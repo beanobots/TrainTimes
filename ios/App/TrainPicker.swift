@@ -60,17 +60,18 @@ struct TrainPicker: View {
     }
 }
 
-/// The step's name, and three dashes for how far along it is.
-private struct StepTitle: View {
+/// The step's name, and a dash for each step, lit up to this one.
+struct StepTitle: View {
     let title: String
-    /// 0, 1 or 2.
+    /// From 0.
     let step: Int
+    var count = 3
 
     var body: some View {
         VStack(spacing: 5) {
             Text(title).font(.headline)
             HStack(spacing: 6) {
-                ForEach(0..<3) { index in
+                ForEach(0..<count, id: \.self) { index in
                     Capsule()
                         .fill(index <= step ? Color.accentColor : Color(.systemGray4))
                         .frame(width: 28, height: 4)
@@ -79,7 +80,7 @@ private struct StepTitle: View {
             .accessibilityHidden(true)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(title), step \(step + 1) of 3")
+        .accessibilityLabel("\(title), step \(step + 1) of \(count)")
     }
 }
 
@@ -391,7 +392,7 @@ private struct LinesStep: View {
 
 /// A line's bullet to tap on or off: in its colour with a tick when chosen,
 /// gray when not.
-private struct LineToggle: View {
+struct LineToggle: View {
     let route: String
     let isOn: Bool
     let toggle: () -> Void

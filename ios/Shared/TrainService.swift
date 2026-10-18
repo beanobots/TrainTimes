@@ -13,6 +13,9 @@ struct Board: Sendable {
     /// Elevator and escalator outages at the station, current ones first. Nil,
     /// as with `alerts`, when they weren't asked for or couldn't be had.
     var outages: [Outage]?
+    /// For a widget with a change, those of `trains` that get there, each with
+    /// the first train there it can catch.
+    var connections: [Connection] = []
 
     /// The one thing the widget has room to mention, and how many more there are.
     func notice(includingElevators: Bool, includingAlerts: Bool = true,
@@ -77,6 +80,62 @@ enum TrainService {
         let trains = arrivals.filter { $0.time > now && selection.shows($0) }.sorted { $0.time < $1.time }.oncePerTrip()
         let alerts = await alertEntries.map { AlertsFeed.alerts(for: selection, in: $0, now: now) }
         return Board(trains: trains, alerts: alerts, outages: await outages)
+    }
+
+    /// For a widget with a change: `board`'s trains and alerts, and those of the
+    /// trains that get to the change, each with the first train there it can
+    /// catch. The feeds of its own lines and of those changed to are required.
+    static func board(for selection: Selection, change: Change, includingOutages: Bool = true,
+                      now: Date = Date()) async throws -> Board {
+        let routes = selection.routes + change.routes.filter { !selection.routes.contains($0) }
+        let feeds = Lines.feedURLs(sharingTracksWith: routes)
+        async let trainData = data(from: feeds.own)
+        async let otherTrainData = optionalData(from: feeds.others)
+        async let alertEntries = alertEntries(if: true)
+        async let outages = outages(for: selection, if: includingOutages)
+
+        let origin = Set(selection.stopIDs)
+        let arriving = Set(change.arrivalStops(for: selection))
+        let leaving = Set(change.departureStops(for: selection))
+        let stops = origin.union(arriving).union(leaving)
+        var arrivals: [Arrival] = []
+        for data in try await trainData {
+            arrivals += try SubwayFeed.arrivals(at: stops, in: data)
+        }
+        for data in await otherTrainData {
+            arrivals += (try? SubwayFeed.arrivals(at: stops, in: data)) ?? []
+        }
+        arrivals.sort { $0.time < $1.time }
+        let trains = arrivals.filter { origin.contains($0.stop) && $0.time > now && selection.shows($0) }.oncePerTrip()
+        let departures = arrivals
+            .filter { leaving.contains($0.stop) && change.routes.contains($0.route) && $0.time > now }
+            .oncePerTrip()
+        let connections = change.connections(for: trains, atChange: arrivals.filter { arriving.contains($0.stop) },
+                                             departures: departures, selection: selection)
+        let alerts = await alertEntries.map { AlertsFeed.alerts(for: selection, in: $0, now: now) }
+        return Board(trains: trains, alerts: alerts, outages: await outages, connections: connections)
+    }
+
+    /// The stations `selection`'s train calls at after yours, in order, for
+    /// choosing where to change: those of the running trip of its lines that
+    /// lists the most of them. Empty when none is running.
+    static func stations(after selection: Selection) async throws -> [Station] {
+        let feeds = Lines.feedURLs(sharingTracksWith: selection.routes)
+        let origin = Set(selection.stopIDs)
+        let routes = Set(selection.routes)
+        var longest: [String] = []
+        for feed in try await data(from: feeds.own) {
+            for stops in try SubwayFeed.stops(after: origin, on: routes, in: feed) where stops.count > longest.count {
+                longest = stops
+            }
+        }
+        // A station once, where the trip first calls at it, and never yours
+        var seen = Set([selection.station?.id ?? ""])
+        return longest.compactMap { stop in
+            guard let station = StationDirectory.station(id: String(stop.dropLast())),
+                  seen.insert(station.id).inserted else { return nil }
+            return station
+        }
     }
 
     /// Just the alerts and (when asked for) outages for `selection`, as `board`

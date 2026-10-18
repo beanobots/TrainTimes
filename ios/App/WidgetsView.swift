@@ -104,11 +104,15 @@ private struct WidgetRow: View {
     let isDefault: Bool
     let placed: Int
 
-    /// The station under a name of its own; under the station's name, which way.
+    /// The station under a name of its own; under the station's name, which
+    /// way. Then any change: "R to Manhattan, then D or N".
     private var subtitle: String {
         let selection = widget.selection
-        guard widget.title == selection.station?.name else { return selection.station?.name ?? "" }
-        return "\(Lines.list(selection.routes)) \(selection.heading)"
+        let base = widget.title == selection.station?.name
+            ? "\(Lines.list(selection.routes)) \(selection.heading)"
+            : selection.station?.name ?? ""
+        guard let change = widget.change else { return base }
+        return "\(base), then \(Lines.list(change.routes, joinedBy: "or"))"
     }
 
     var body: some View {
@@ -215,13 +219,30 @@ private struct AddWidget: View {
     }
 }
 
-/// What adding and editing a widget have in common: its name, its train and
-/// which alerts it mentions.
+/// What adding and editing a widget have in common: its name, its train, any
+/// change of trains, and which alerts it mentions.
 private struct WidgetFields: View {
     @Binding var widget: SavedWidget
     @State private var choosingTrain = false
+    @State private var choosingChange = false
 
     private var station: Station? { widget.selection.station }
+
+    private var quickMinutes: Binding<Int> {
+        Binding {
+            widget.change?.quickMinutes ?? Change.defaultQuickMinutes
+        } set: {
+            widget.change?.quickMinutes = $0
+        }
+    }
+
+    private var walkMinutes: Binding<Int> {
+        Binding {
+            widget.change?.walkMinutes ?? Change.defaultWalkMinutes
+        } set: {
+            widget.change?.walkMinutes = $0
+        }
+    }
 
     var body: some View {
         Section {
@@ -236,6 +257,16 @@ private struct WidgetFields: View {
         .sheet(isPresented: $choosingTrain) {
             TrainPicker(selection: $widget.selection)
         }
+        // Another line or direction goes on another way, which the change
+        // isn't on; another station on the same way keeps it
+        .onChange(of: widget.selection) { old, new in
+            if old.routes != new.routes || old.direction != new.direction {
+                widget.change = nil
+            } else {
+                widget.change = widget.change?.validated(for: new)
+            }
+        }
+        changeSection
         Section("Name") {
             TextField(station?.name ?? "Name", text: $widget.name)
         }
@@ -256,6 +287,84 @@ private struct WidgetFields: View {
         } footer: {
             Text("The app always lists them all.")
         }
+    }
+}
+
+extension WidgetFields {
+    /// Where the train is left for another, and how short a wait the large
+    /// widget highlights; or a button to add one.
+    @ViewBuilder fileprivate var changeSection: some View {
+        let selection = widget.selection
+        Section {
+            if let change = widget.change {
+                Button {
+                    choosingChange = true
+                } label: {
+                    ChangeRow(change: change, selection: selection)
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint("Choose another station or lines to change to")
+                Stepper(value: quickMinutes, in: 0...15) {
+                    Text("Quick change: up to \(change.quickMinutes) min")
+                }
+                if !change.isAllAcross(from: selection) {
+                    Stepper(value: walkMinutes, in: 1...15) {
+                        Text("Walk between platforms: \(change.walkMinutes) min")
+                    }
+                }
+                Button("Remove Change", role: .destructive) {
+                    widget.change = nil
+                }
+            } else {
+                Button {
+                    choosingChange = true
+                } label: {
+                    Label("Add a Change", systemImage: "arrow.triangle.swap")
+                }
+            }
+        } header: {
+            Text("Then change")
+        } footer: {
+            if let change = widget.change, let name = change.station?.name {
+                Text("The Transfers widget pairs each \(Lines.list(selection.routes)) with the first \(Lines.list(change.routes, joinedBy: "or")) it can catch at \(name), and highlights waits this short.")
+            } else {
+                Text("Change trains on the way, say from a local to an express. The Transfers widget pairs each train with the first one it can catch there.")
+            }
+        }
+        .sheet(isPresented: $choosingChange) {
+            ChangePicker(selection: selection, change: $widget.change)
+        }
+    }
+}
+
+/// A widget's change: the lines changed to, where, which way and how.
+private struct ChangeRow: View {
+    let change: Change
+    let selection: Selection
+
+    private var subtitle: String {
+        let heading = change.station?.directionLabel(selection.direction, routes: change.routes) ?? ""
+        let how = change.isAllAcross(from: selection) ? "across the platform" : "\(change.walkMinutes) min walk"
+        return "\(Lines.list(change.routes, joinedBy: "or")) \(heading) · \(how)"
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            LineBullets(routes: change.routes, size: 36)
+                .frame(width: 46)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(change.station?.name ?? "Choose a station").font(.headline).foregroundStyle(.primary)
+                Text(subtitle)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Image(systemName: "chevron.right")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
     }
 }
 

@@ -57,10 +57,13 @@ final class WidgetStore {
         }
         guard let infos = try? result.get() else { return }
         var counts: [UUID: Int] = [:]
-        for info in infos where info.kind == "RTrainWidget" {
+        for info in infos where info.kind == "RTrainWidget" || info.kind == "TransfersWidget" {
             // One set up before saved widgets, with its own train, shows none of them
             let shown: SavedWidget?
-            if let intent = info.widgetConfigurationIntent(of: TrainWidgetIntent.self) {
+            let intent = info.widgetConfigurationIntent(of: TrainWidgetIntent.self)
+            if info.kind == "TransfersWidget" {
+                shown = (intent ?? TrainWidgetIntent()).transfersWidget(in: saved)
+            } else if let intent {
                 shown = intent.savedWidget(in: saved)
             } else {
                 shown = saved.defaultWidget
