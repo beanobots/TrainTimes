@@ -3,24 +3,35 @@ name: Build iOS app
 on:
   push:
     branches: [main]
+    # Only a change to the app, or to how it's built and published, makes a
+    # new version; run the workflow by hand on main to publish anyway. Changes
+    # to the server alone are built and tested on their pull requests.
+    paths:
+      - ios/**
+      - tools/make_altstore_source.py
+      - .github/workflows/build-ios.yml
   pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# One run at a time for each branch or pull request, so two builds of main
-# can't publish at once; a build of main that's still waiting gives way to a
-# newer one. A newer push to a pull request cancels its older run.
+# One run at a time for each kind of run and branch or pull request, so two
+# pushes to main can't publish at once; a push's build that's still waiting
+# gives way to a newer push's, never to a run started by hand. A newer push to
+# a pull request cancels its older run.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # Each build gets its own number, so AltStore can tell a new build is an update
   VERSION: 1.0.${{ github.run_number }}
   BUILD: ${{ github.run_number }}
+  # The latest release has the newest build's source.json, .ipa and icon
   RELEASE_URL: https://github.com/${{ github.repository }}/releases/download/latest
+  # Each build's own release keeps its .ipa, where its source.json points
+  BUILD_URL: https://github.com/${{ github.repository }}/releases/download/v1.0.${{ github.run_number }}
 
 jobs:
   build:
@@ -75,17 +86,24 @@ jobs:
           test -f Payload/NextRTrain.app/PlugIns/RTrainWidget.appex/stations.json
           test -f Payload/NextRTrain.app/equipment.json
           test -f Payload/NextRTrain.app/PlugIns/RTrainWidget.appex/equipment.json
-          # and every line's icon, for the app to switch to
-          /usr/libexec/PlistBuddy -c "Print :CFBundleIcons:CFBundleAlternateIcons:AppIcon-SI" Payload/NextRTrain.app/Info.plist
+          # and every line's icon for the app to switch to, as Lines.swift has
+          # the lines (the R's is the main icon)
+          labels=$(python3 ../tools/line_styles.py)
+          for label in $labels; do
+            if [ "$label" != R ]; then
+              /usr/libexec/PlistBuddy -c "Print :CFBundleIcons:CFBundleAlternateIcons:AppIcon-$label" Payload/NextRTrain.app/Info.plist >/dev/null
+            fi
+          done
+          echo "Icons for $labels"
           zip -qr TrainTimes.ipa Payload
 
       - name: Write the AltStore source
         # source.json describes the .ipa (version, size, entitlements), read from the
-        # .ipa itself so AltStore's checks pass. Add its URL in AltStore to install
-        # and get updates.
+        # .ipa itself so AltStore's checks pass, and downloads it from the build's
+        # own release. Add its URL in AltStore to install and get updates.
         run: |
           python3 tools/make_altstore_source.py ios/TrainTimes.ipa ios/source.json \
-            --download-url "$RELEASE_URL/TrainTimes.ipa" \
+            --download-url "$BUILD_URL/TrainTimes.ipa" \
             --icon-url "$RELEASE_URL/icon.png" \
             --notes "Build $BUILD, from ${GITHUB_SHA::7}: $(git log -1 --format=%s)"
           cp ios/App/Assets.xcassets/AppIcon.appiconset/icon.png ios/icon.png
@@ -99,9 +117,10 @@ jobs:
             ios/source.json
 
       - name: Publish as the latest release
-        # Only a push to main publishes, and only while it's main's newest commit,
+        # A push to main publishes, and so does a run started by hand on main,
+        # but only while it's main's newest commit and no newer build is out,
         # so an older run, or a re-run of one, can't replace a newer build
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -110,11 +129,35 @@ jobs:
             echo "main has moved on to ${main::7}; not publishing ${GITHUB_SHA::7}"
             exit 0
           fi
-          gh release delete latest --cleanup-tag --yes || true
-          gh release create latest ios/TrainTimes.ipa ios/source.json ios/icon.png \
-            --target "$GITHUB_SHA" \
-            --title "Train Times $VERSION" \
-            --notes "Built from ${GITHUB_SHA::7}. In AltStore, add the source $RELEASE_URL/source.json, or install TrainTimes.ipa directly."
+          if newest=$(gh release view latest --json name --jq '.name | split(".") | last' 2>/dev/null) &&
+            [ "$newest" -gt "$BUILD" ] 2>/dev/null; then
+            echo "Build $newest is already out; not publishing build $BUILD"
+            exit 0
+          fi
+          # The build's own release, which its source.json downloads it from, so
+          # an AltStore that read the source before the next build still gets the
+          # build it describes. A re-run replaces its .ipa.
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            gh release upload "v$VERSION" ios/TrainTimes.ipa --clobber
+          else
+            gh release create "v$VERSION" ios/TrainTimes.ipa \
+              --target "$GITHUB_SHA" \
+              --title "Train Times $VERSION" \
+              --notes "Built from ${GITHUB_SHA::7}."
+          fi
+          # Then the latest release takes its files in place, so the source's
+          # address always has one. Its tag stays where it was made, as this
+          # token may not move a tag past a change to the workflows.
+          notes="Build $BUILD, from ${GITHUB_SHA::7} (its own release is v$VERSION). In AltStore, add the source $RELEASE_URL/source.json, or install TrainTimes.ipa directly."
+          if gh release view latest >/dev/null 2>&1; then
+            gh release upload latest ios/source.json ios/icon.png ios/TrainTimes.ipa --clobber
+            gh release edit latest --title "Train Times $VERSION" --notes "$notes"
+          else
+            gh release create latest ios/source.json ios/icon.png ios/TrainTimes.ipa \
+              --target "$GITHUB_SHA" \
+              --title "Train Times $VERSION" \
+              --notes "$notes"
+          fi
 
   server:
     # The server compiles eight of ios/Shared's files in Swift 6 mode, which the

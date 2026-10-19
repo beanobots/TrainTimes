@@ -20,6 +20,7 @@ import csv
 import json
 import re
 import sys
+from collections import Counter
 
 BOROUGHS = {"M": "Manhattan", "Bk": "Brooklyn", "Q": "Queens", "Bx": "Bronx", "SI": "Staten Island"}
 STREET = re.compile(r"\b(St|Av|Blvd|Pkwy|Rd|Tpke)$")
@@ -46,6 +47,11 @@ def short_name(name):
     first = first.strip()
     # "163 St-Amsterdam Av" stays whole: "163 St" alone would be ambiguous
     return first if dash and first and STREET.search(rest) and not STREET.search(first) else name
+
+
+def natural(name):
+    """Sorts numbers by their value: "2 Av" before "14 St", and "14 St" before "103 St"."""
+    return [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", name.lower())]
 
 
 def entrances_by_stop(path):
@@ -151,7 +157,12 @@ def main(source, entrances_path, equipment_path, target_dir):
     for station in stations:
         if not station["entrances"]:
             station["entrances"] = by_complex[station["complex"]]
-    stations.sort(key=lambda station: (station["name"].lower(), station["borough"]))
+    # The app looks each platform up by its id, so two with one id would crash it
+    repeated = sorted(stop for stop, count in Counter(station["id"] for station in stations).items() if count > 1)
+    if repeated:
+        sys.exit(f"{source} lists these GTFS Stop IDs more than once: {', '.join(repeated)}")
+    # By name, as the app lists them
+    stations.sort(key=lambda station: (natural(station["name"]), station["borough"]))
     target = f"{target_dir}/stations.json"
     with open(target, "w", encoding="utf-8") as file:
         file.write("[\n" + ",\n".join(json.dumps(s, ensure_ascii=False) for s in stations) + "\n]\n")

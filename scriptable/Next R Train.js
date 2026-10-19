@@ -5,20 +5,31 @@
 // Next Manhattan-bound R train at Prospect Av, Brooklyn.
 // A home-screen and lock-screen widget for Scriptable (https://scriptable.app).
 // Reads the MTA's real-time feed for the N/Q/R/W lines; no API key needed.
+// For another stop or line, change the settings below: the feed, the color and
+// the terminals go with the line.
 
 // ---- Settings ---------------------------------------------------------------
 const STOP_ID = "R34N"; // Prospect Av, Manhattan-bound ("R34S" is toward Bay Ridge)
 const ROUTES = ["R"]; // add "N" to also show N trains when they run local
 const STATION = "Prospect Av";
 const HEADING = "to Manhattan";
+// The feed for ROUTES' group of lines: it ends -ace, -bdfm, -g, -jz, -l, -nqrw or
+// -si, or at "gtfs" for the 1 to 7 and the 42 St shuttle
 const FEED_URL = "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs-nqrw";
+// The line's color, for its bullet (the label on it is black if it's light)
+const LINE_COLOR = "#FCCC0A";
 // The MTA makes its feed anew about every 30 seconds; one older than this has stopped updating
 const STALE_SECONDS = 3 * 60;
 // Where a train ends up, keyed by the last stop of its trip
-const TERMINALS = { G08N: "Forest Hills", G21N: "Queens Plaza", R27N: "Whitehall St", R45S: "Bay Ridge" };
+const TERMINALS = {
+  R01N: "Astoria", G08N: "Forest Hills", G21N: "Queens Plaza", R27N: "Whitehall St",
+  R45S: "Bay Ridge", D43S: "Coney Island",
+};
 // -----------------------------------------------------------------------------
 
-const YELLOW = new Color("#FCCC0A");
+const BULLET = new Color(LINE_COLOR);
+// Black on the light bullets, as on the N, Q, R and W, and white on the rest
+const BULLET_LABEL = 0.299 * BULLET.red + 0.587 * BULLET.green + 0.114 * BULLET.blue > 0.57 ? Color.black() : Color.white();
 const GREEN = new Color("#4CD964");
 const BACKGROUND = new Color("#111111");
 const DIM = new Color("#9A9A9A");
@@ -290,11 +301,12 @@ function bullet(stack, route, size) {
   const circle = stack.addStack();
   circle.size = new Size(size, size);
   circle.cornerRadius = size / 2;
-  circle.backgroundColor = YELLOW;
+  circle.backgroundColor = BULLET;
   circle.centerAlignContent();
   const letter = circle.addText(route);
-  letter.font = Font.boldSystemFont(Math.round(size * 0.62));
-  letter.textColor = Color.black();
+  // Two letters, as on the SI, are smaller
+  letter.font = Font.boldSystemFont(Math.round(size * (route.length > 1 ? 0.45 : 0.62)));
+  letter.textColor = BULLET_LABEL;
 }
 
 function messageWidget(title, detail) {
