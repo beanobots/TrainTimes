@@ -204,6 +204,89 @@ import Testing
         #expect(try SubwayFeed.arrivals(at: ["R34N"], in: GTFSFeed.feed(made: nil, [rTrip]), now: now).count == 1)
     }
 
+    @Test func whenAFeedWasMade() {
+        #expect(SubwayFeed.made(GTFSFeed.feed(made: -2, [rTrip])) == time(-2))
+        #expect(SubwayFeed.made(GTFSFeed.feed(made: nil, [rTrip])) == nil)
+        #expect(SubwayFeed.newest([GTFSFeed.feed(made: -2, []), GTFSFeed.feed(made: -1, []), GTFSFeed.feed(made: nil, [])])
+            == time(-1))
+        #expect(SubwayFeed.newest([GTFSFeed.feed(made: nil, [])]) == nil)
+    }
+
+    @Test func aFastClockGoesByTheNewestFeed() throws {
+        // This device's clock 5 minutes fast, with the newest feed made just now
+        let fast = time(5)
+        let newest = time(0)
+        #expect(try SubwayFeed.arrivals(at: ["R34N"], in: GTFSFeed.feed([rTrip]), newest: newest, now: fast).count == 1)
+        // One that stopped updating 4 minutes before it is out of date all the same
+        #expect(throws: FeedError.stale) {
+            try SubwayFeed.arrivals(at: ["R34N"], in: GTFSFeed.feed(made: -4, [rTrip]), newest: newest, now: fast)
+        }
+        // By the clock alone, every feed would be
+        #expect(throws: FeedError.stale) {
+            try SubwayFeed.arrivals(at: ["R34N"], in: GTFSFeed.feed([rTrip]), now: fast)
+        }
+    }
+
+    @Test func aFeedWithNoNewerOneGoesByTheClockAndTheAllowance() throws {
+        let limit = (SubwayFeed.staleAfter + SubwayFeed.clockAllowance) / 60
+        let feed = GTFSFeed.feed([rTrip])
+        let made = SubwayFeed.made(feed)
+        #expect(try SubwayFeed.arrivals(at: ["R34N"], in: feed, newest: made, now: time(limit)).count == 1)
+        #expect(throws: FeedError.stale) {
+            try SubwayFeed.arrivals(at: ["R34N"], in: feed, newest: made, now: time(limit + 0.5))
+        }
+    }
+
+    @Test func aNewestFeedAheadOfTheClockGoesByTheClock() {
+        // One feed an hour ahead doesn't put the others out of date
+        #expect(!SubwayFeed.isStale(made: time(-1), newest: time(60), now: now))
+        #expect(SubwayFeed.isStale(made: time(-3.5), newest: time(60), now: now))
+        // Nor does a clock that's slow
+        #expect(!SubwayFeed.isStale(made: time(1), newest: time(2), now: now))
+    }
+
+    @Test func aTimeOutOfRangeIsNone() throws {
+        let oddTimes = Protobuf { entity in
+            entity.string(1, "000001R1") // FeedEntity.id
+            entity.message(3) { update in // FeedEntity.trip_update
+                update.message(1) { trip in // TripUpdate.trip
+                    trip.string(1, "R1") // trip_id
+                    trip.string(5, "R") // route_id
+                }
+                let stops: [(id: String, arrival: Int64, departure: Int64?)] = [
+                    ("R35N", -1, nil), // a negative time, which protobuf writes as a huge number
+                    ("R34N", -1, Int64(GTFSFeed.seconds(3))),
+                    ("G08N", Int64(GTFSFeed.seconds(40)) * 1000, nil), // in milliseconds
+                ]
+                for stop in stops {
+                    update.message(2) { stopTime in // TripUpdate.stop_time_update
+                        stopTime.message(2) { $0.int(2, stop.arrival) } // arrival.time
+                        if let departure = stop.departure {
+                            stopTime.message(3) { $0.int(2, departure) } // departure.time
+                        }
+                        stopTime.string(4, stop.id) // stop_id
+                    }
+                }
+            }
+        }
+        let arrivals = try SubwayFeed.arrivals(at: ["R35N", "R34N", "G08N"], in: GTFSFeed.feed([oddTimes]), now: now)
+        #expect(arrivals.count == 1)
+        let train = try #require(arrivals.first)
+        #expect(train.stop == "R34N")
+        #expect(train.time == time(3))
+        #expect(train.departure == nil)
+        #expect(train.approach.map(\.id) == ["R34N"])
+        #expect(train.lastStop == "G08N")
+
+        // A feed whose time is out of range doesn't say when it was made
+        let feed = Protobuf { feed in
+            feed.message(1) { $0.int(3, -1) } // FeedHeader.timestamp
+            feed.message(2, rTrip) // FeedMessage.entity
+        }.data
+        #expect(SubwayFeed.made(feed) == nil)
+        #expect(try SubwayFeed.arrivals(at: ["R34N"], in: feed, now: now).count == 1)
+    }
+
     @Test func theStopsAfterYours() throws {
         let feed = GTFSFeed.feed([
             rTrip,

@@ -10,8 +10,9 @@ struct Board: Sendable {
     /// important first. Nil when they weren't asked for or couldn't be had, which
     /// isn't the same as none.
     var alerts: [ServiceAlert]?
-    /// Elevator and escalator outages at the station, current ones first. Nil,
-    /// as with `alerts`, when they weren't asked for or couldn't be had.
+    /// Outages of the station's elevators and escalators that serve the chosen
+    /// lines' platforms, current ones first. Nil, as with `alerts`, when they
+    /// weren't asked for or couldn't be had.
     var outages: [Outage]?
     /// For a widget with a change, those of `trains` that get there, each with
     /// the first train there it can catch.
@@ -65,7 +66,7 @@ struct Notice: Codable, Hashable, Sendable {
 enum TrainService {
     /// Trains, alerts and (when asked for) elevator outages for `selection`, fetched
     /// together. Only the chosen lines' own train feeds are required, and up to
-    /// date (`SubwayFeed.staleAfter`): without the other lines' feeds there are
+    /// date (`SubwayFeed.isStale`): without the other lines' feeds there are
     /// just no rerouted trains, and without alerts or outages the board has nil
     /// for them. Without `includingAlerts`, it has neither.
     /// Without `includingOtherLines`, only the chosen lines' feeds are fetched,
@@ -147,21 +148,26 @@ enum TrainService {
         return Board(trains: [], alerts: alerts, outages: await outages)
     }
 
-    /// The outages at `selection`'s station: nil when not wanted or the feed
-    /// couldn't be had or read.
+    /// The outages that matter to `selection`, as `outages(for:in:)` has them:
+    /// nil when not wanted or the feed couldn't be had or read.
     private static func outages(for selection: Selection, if wanted: Bool) async -> [Outage]? {
         guard wanted else { return nil }
-        guard selection.station != nil else { return [] }
+        // Where there are no elevators or escalators, there's nothing to fetch
+        guard let complex = selection.platforms.first?.complex,
+              EquipmentDirectory.hasEquipment(atComplex: complex) else { return [] }
         return outages(for: selection, in: await optionalData(from: OutagesFeed.url))
     }
 
-    /// The outages at `selection`'s station in `data`, the outages feed, which
-    /// the push server fetches once for all its countdowns: nil when the feed
-    /// couldn't be had or read.
+    /// The outages that matter to `selection` in `data`, the outages feed,
+    /// which the push server fetches once for all its countdowns: those at its
+    /// station of elevators and escalators that serve its lines' platforms, or
+    /// might, so they go by the platforms alone. None where there are no
+    /// elevators or escalators; nil when the feed couldn't be had or read.
     static func outages(for selection: Selection, in data: Data?) -> [Outage]? {
-        guard let complex = selection.station?.complex else { return [] }
+        let platforms = selection.platforms
+        guard let complex = platforms.first?.complex, EquipmentDirectory.hasEquipment(atComplex: complex) else { return [] }
         guard let data else { return nil }
-        return try? OutagesFeed.outages(atComplex: complex, in: data)
+        return (try? OutagesFeed.outages(atComplex: complex, in: data))?.filter { $0.serves(anyOf: platforms) }
     }
 
     /// The trains of each of `selections`, by `Selection.trainID`, found as
@@ -177,19 +183,17 @@ enum TrainService {
         let feeds = unique.map { feedURLs(for: $0, includingOtherLines: includingOtherLines) }
         let urls = Set(feeds.flatMap { $0.own + $0.others })
         let stops = Set(unique.flatMap(\.stopIDs))
-        let arrivals = await withTaskGroup(of: (URL, [Arrival]?).self) { group in
+        let fetched = await withTaskGroup(of: (URL, Data?).self) { group in
             for url in urls {
-                group.addTask {
-                    guard let data = await optionalData(from: url) else { return (url, nil) }
-                    return (url, try? SubwayFeed.arrivals(at: stops, in: data, now: now))
-                }
+                group.addTask { (url, await optionalData(from: url)) }
             }
-            var all: [URL: [Arrival]] = [:]
-            for await (url, arrivals) in group {
-                all[url] = arrivals
+            var all: [URL: Data] = [:]
+            for await (url, data) in group {
+                all[url] = data
             }
             return all
         }
+        let arrivals = Self.arrivals(at: stops, in: fetched, now: now)
         return trains(for: unique, in: arrivals, includingOtherLines: includingOtherLines, now: now)
     }
 
@@ -223,16 +227,26 @@ enum TrainService {
 
     /// The arrivals at `stops` in the feeds of a selection's own lines, all of
     /// which have to be read and up to date, and of the other lines, any of
-    /// which can be left out.
+    /// which can be left out. How old each is goes by the newest of them all
+    /// (`SubwayFeed.isStale`).
     static func arrivals(at stops: Set<String>, own: [Data], others: [Data], now: Date) throws -> [Arrival] {
+        let newest = SubwayFeed.newest(own + others)
         var arrivals: [Arrival] = []
         for data in own {
-            arrivals += try SubwayFeed.arrivals(at: stops, in: data, now: now)
+            arrivals += try SubwayFeed.arrivals(at: stops, in: data, newest: newest, now: now)
         }
         for data in others {
-            arrivals += (try? SubwayFeed.arrivals(at: stops, in: data, now: now)) ?? []
+            arrivals += (try? SubwayFeed.arrivals(at: stops, in: data, newest: newest, now: now)) ?? []
         }
         return arrivals
+    }
+
+    /// Each of `feeds`' arrivals at `stops`, with none for one that can't be
+    /// read or is out of date, which goes by the newest of them
+    /// (`SubwayFeed.isStale`).
+    static func arrivals(at stops: Set<String>, in feeds: [URL: Data], now: Date) -> [URL: [Arrival]] {
+        let newest = SubwayFeed.newest(Array(feeds.values))
+        return feeds.compactMapValues { try? SubwayFeed.arrivals(at: stops, in: $0, newest: newest, now: now) }
     }
 
     /// The feeds `selection`'s trains can be in; without `includingOtherLines`,

@@ -73,19 +73,52 @@ struct Arrival: Codable, Hashable, Sendable {
 
 enum SubwayFeed {
     /// How old a feed can be and still be gone by: the MTA makes each one anew
-    /// about every 30 seconds, and this allows for one that's late and for a
-    /// clock that's a little off. One older than this has stopped updating.
-    /// Its age goes by this device's clock: on one set more than this far
-    /// ahead, every feed is out of date and fails as though it hadn't come.
+    /// about every 30 seconds, and this allows for one that's late. One older
+    /// than this has stopped updating. Its age goes by the newest of the feeds
+    /// fetched with it rather than by this device's clock, which may be fast.
     static let staleAfter: TimeInterval = 3 * 60
+    /// How fast this device's clock can be without every feed going out of
+    /// date. A feed with no newer one to go by, or a set of them that have all
+    /// stopped updating, goes out of date only this much later.
+    static let clockAllowance: TimeInterval = 7 * 60
+
+    /// Whether a feed made at `made` has stopped updating: it's more than
+    /// `staleAfter` older than `newest`, the newest of the feeds fetched with
+    /// it (or than `now`, where that's earlier), or more than `staleAfter` and
+    /// `clockAllowance` older than `now`.
+    static func isStale(made: Date, newest: Date?, now: Date) -> Bool {
+        let newest = min(newest ?? now, now)
+        return newest.timeIntervalSince(made) > staleAfter
+            || now.timeIntervalSince(made) > staleAfter + clockAllowance
+    }
+
+    /// When the newest of `feeds` was made, for the others' age to go by; nil
+    /// when none of them says.
+    static func newest(_ feeds: [Data]) -> Date? {
+        feeds.compactMap { made($0) }.max()
+    }
+
+    /// When a feed says it was made; nil when it doesn't say or can't be read.
+    static func made(_ data: Data) -> Date? {
+        let reader = ProtobufReader(data)
+        var time: UInt64 = 0
+        try? reader.fields(until: reader.count) { field in
+            guard field == 1 else { return false } // FeedMessage.header
+            time = try timestamp(reader)
+            return true
+        }
+        return time != 0 ? Date(timeIntervalSince1970: TimeInterval(time)) : nil
+    }
 
     /// Decodes just enough of a GTFS-realtime feed (gtfs.org/realtime) to list,
     /// for every trip that stops at one of `stopIDs`, its route, arrival time
     /// (and departure time, if later), which of them it stops at, the stops
     /// before it, its last stop, whether a train is assigned to it and where
-    /// that train is, so the widget needs no protobuf library. A feed that says
-    /// it was made more than `staleAfter` before `now` throws `FeedError.stale`.
-    static func arrivals(at stopIDs: Set<String>, in data: Data, now: Date = Date()) throws -> [Arrival] {
+    /// that train is, so the widget needs no protobuf library. A feed that has
+    /// stopped updating (`isStale`, where `newest` is when the newest of the
+    /// feeds fetched with it was made) throws `FeedError.stale`.
+    static func arrivals(at stopIDs: Set<String>, in data: Data, newest: Date? = nil,
+                         now: Date = Date()) throws -> [Arrival] {
         let reader = ProtobufReader(data)
         var arrivals: [Arrival] = []
         var positions: [String: Arrival.Position] = [:]
@@ -94,7 +127,9 @@ enum SubwayFeed {
             case 1: // FeedMessage.header
                 let made = try timestamp(reader)
                 // 0 is a feed that doesn't say when it was made
-                if made != 0, now.timeIntervalSince1970 - TimeInterval(made) > staleAfter { throw FeedError.stale }
+                if made != 0, isStale(made: Date(timeIntervalSince1970: TimeInterval(made)), newest: newest, now: now) {
+                    throw FeedError.stale
+                }
             case 2: // FeedMessage.entity
                 try reader.message { field in
                     switch field {
@@ -261,7 +296,8 @@ enum SubwayFeed {
         return (trip, Arrival.Position(stop: stop, isStopped: status == 1))
     }
 
-    /// FeedHeader.timestamp: when the feed was made, in seconds since 1970.
+    /// FeedHeader.timestamp: when the feed was made, in seconds since 1970;
+    /// 0 when it doesn't say, or says a time outside `plausibleTimes`.
     private static func timestamp(_ reader: ProtobufReader) throws -> UInt64 {
         var time: UInt64 = 0
         try reader.message { field in
@@ -269,10 +305,10 @@ enum SubwayFeed {
             time = try reader.varint()
             return true
         }
-        return time
+        return plausibleTimes.contains(time) ? time : 0
     }
 
-    /// StopTimeEvent.time
+    /// StopTimeEvent.time; 0, as for none, when it's outside `plausibleTimes`.
     private static func eventTime(_ reader: ProtobufReader) throws -> UInt64 {
         var time: UInt64 = 0
         try reader.message { field in
@@ -280,8 +316,13 @@ enum SubwayFeed {
             time = try reader.varint()
             return true
         }
-        return time
+        return plausibleTimes.contains(time) ? time : 0
     }
+
+    /// The times a feed can mean, from 2000 to 2100, in seconds since 1970.
+    /// One outside them is taken as none: a negative one, say, which reads as
+    /// one far in the future.
+    private static let plausibleTimes: ClosedRange<UInt64> = 946_684_800...4_102_444_800
 }
 
 enum FeedError: Error {

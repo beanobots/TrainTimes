@@ -216,18 +216,18 @@ final class Poller: Service {
         let trains = await TrainService.trains(for: selections, now: now)
         let (entries, outagesFeed) = await (alertEntries, outageData)
 
-        var outagesByComplex: [String: [Outage]?] = [:]
+        var outagesByPlatforms: [[String]: [Outage]?] = [:]
         var boards: [Selection: Board] = [:]
         for selection in Set(selections) {
             guard let trains = trains[selection.trainID] else { continue }
             var outages: [Outage]? = nil
             if selection.elevatorAlerts {
-                let complex = selection.station?.complex ?? ""
-                if let cached = outagesByComplex[complex] {
+                let platforms = selection.platforms.map(\.id)
+                if let cached = outagesByPlatforms[platforms] {
                     outages = cached
                 } else {
                     outages = TrainService.outages(for: selection, in: outagesFeed)
-                    outagesByComplex[complex] = outages
+                    outagesByPlatforms[platforms] = outages
                 }
             }
             boards[selection] = Board(
