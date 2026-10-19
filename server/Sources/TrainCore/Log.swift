@@ -59,47 +59,63 @@ struct LogReopener: Service {
 }
 
 /// Lines about refused requests, which anyone can cause as often as the rate
-/// limit lets them: at most `perMinute` a minute. How many more there were is
+/// limit lets them: at most `perMinute` a minute, and as many errors besides,
+/// so a flood of the one can't hide the other. How many more there were is
 /// logged with the first line of a later minute.
 actor RefusalLog {
+    /// One kind of line's count this minute.
+    private struct Count {
+        var written = 0
+        var leftOut = 0
+
+        /// Counts a line, and says whether it's within `limit`.
+        mutating func admit(_ limit: Int) -> Bool {
+            guard written < limit else {
+                leftOut += 1
+                return false
+            }
+            written += 1
+            return true
+        }
+    }
+
     private let perMinute: Int
     private var minute = Date.distantPast
-    private var written = 0
-    private var leftOut = 0
+    private var infos = Count()
+    private var errors = Count()
 
     init(perMinute: Int = 20) { self.perMinute = perMinute }
 
     /// Writes `message` unless this minute's lines are used up. Says whether it did.
     @discardableResult
     func info(_ message: String, now: Date = .now) -> Bool {
-        guard admit(now: now) else { return false }
+        startMinute(of: now)
+        guard infos.admit(perMinute) else { return false }
         Log.info(message)
         return true
     }
 
+    /// The same, with this minute's error lines.
     @discardableResult
     func error(_ message: String, now: Date = .now) -> Bool {
-        guard admit(now: now) else { return false }
+        startMinute(of: now)
+        guard errors.admit(perMinute) else { return false }
         Log.error(message)
         return true
     }
 
-    private func admit(now: Date) -> Bool {
+    private func startMinute(of now: Date) {
         let start = Date(timeIntervalSince1970: (now.timeIntervalSince1970 / 60).rounded(.down) * 60)
-        if start != minute {
-            if leftOut > 0 {
-                Log.info("… and \(leftOut) more refused requests in the minute from \(minute.formatted(.iso8601))")
-            }
-            minute = start
-            written = 0
-            leftOut = 0
+        guard start != minute else { return }
+        if infos.leftOut > 0 {
+            Log.info("… and \(infos.leftOut) more refused requests in the minute from \(minute.formatted(.iso8601))")
         }
-        guard written < perMinute else {
-            leftOut += 1
-            return false
+        if errors.leftOut > 0 {
+            Log.error("… and \(errors.leftOut) more such errors in the minute from \(minute.formatted(.iso8601))")
         }
-        written += 1
-        return true
+        minute = start
+        infos = Count()
+        errors = Count()
     }
 }
 

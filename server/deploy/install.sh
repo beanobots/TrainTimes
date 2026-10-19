@@ -46,6 +46,10 @@ dscl . -create "/Users/$SERVICE_USER" IsHidden 1
 # never recursed into, nor followed if it's a link.
 step "Installing into $PREFIX (root's; data/, the log and the key $SERVICE_USER's)"
 install -d -o root -g wheel -m 755 "$PREFIX"
+# newsyslog, as root, chowns and chmods the log's old copies as it moves them
+# down. While $PREFIX was the service's it could have put links by those
+# names, so all but plain files with one name go.
+find "$PREFIX" -maxdepth 1 -name 'server.log.*' ! \( -type f -links 1 \) -exec rm -rf {} +
 if [[ ! -e $PREFIX/data && ! -L $PREFIX/data ]]; then
     install -d -o "$SERVICE_USER" -m 700 "$PREFIX/data"
 fi

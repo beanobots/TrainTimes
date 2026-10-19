@@ -219,9 +219,10 @@ restart.
 
 ## Install, operate, update
 
-It builds on macOS 14 or later with Swift 6.2 or later (Xcode 26), which the
-dependencies need. It builds only on macOS, whose SDK has the `SQLite3` module
-it uses for the system's libsqlite3.
+It runs on macOS 14 or later, and builds with Swift 6.2 or later, which the
+dependencies need (Xcode 26, which needs macOS 15.6 or later). It builds only
+on macOS, whose SDK has the `SQLite3` module it uses for the system's
+libsqlite3.
 
     sudo ./deploy/install.sh
 
@@ -248,7 +249,9 @@ rotation needs `LOG_FILE` added (the script reminds you). Delete its
 
 - **Logs:** `sudo tail -f /usr/local/traintimes/server.log`. It has one line
   per pass with its totals, and a line for each registration, drop and error.
-  Refused requests get at most 20 lines a minute, then a count of the rest.
+  Refused requests get at most 20 lines a minute, and the errors of a full
+  server (`MAX_CHALLENGES` or `MAX_REGISTRATIONS` reached) 20 more; the count
+  of the rest is logged with the next one.
   newsyslog rotates the log once it's over 10 MB, keeping 7 old ones
   (`server.log.0` is the newest).
 - **Backup:** `traintimes.sqlite` is in WAL mode. Copy it with SQLite's online

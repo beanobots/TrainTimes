@@ -7,13 +7,20 @@ import Testing
         let log = RefusalLog(perMinute: 2)
         let minute = Date(timeIntervalSince1970: 60 * 30_000_000)
         #expect(await log.info("one", now: minute))
-        #expect(await log.error("two", now: minute + 10))
+        #expect(await log.info("two", now: minute + 10))
         #expect(await !log.info("three", now: minute + 59))
-        #expect(await !log.error("four", now: minute + 59))
+        // Errors have their own, so a flood of refusals doesn't hide them
+        #expect(await log.error("four", now: minute + 59))
+        #expect(await log.error("five", now: minute + 59))
+        #expect(await !log.error("six", now: minute + 59))
+        #expect(await !log.info("seven", now: minute + 59))
         // The next minute has its own
-        #expect(await log.info("five", now: minute + 60))
-        #expect(await log.info("six", now: minute + 61))
-        #expect(await !log.info("seven", now: minute + 62))
+        #expect(await log.info("eight", now: minute + 60))
+        #expect(await log.error("nine", now: minute + 61))
+        #expect(await log.info("ten", now: minute + 61))
+        #expect(await !log.info("eleven", now: minute + 62))
+        #expect(await log.error("twelve", now: minute + 62))
+        #expect(await !log.error("thirteen", now: minute + 62))
     }
 
     @Test func relativeTimesNeverCrash() {
