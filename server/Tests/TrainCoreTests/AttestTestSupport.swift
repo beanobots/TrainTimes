@@ -81,11 +81,14 @@ struct TestAuthority {
                      signer: P256.Signing.PrivateKey? = nil) throws -> [UInt8] {
         let keyID = Self.keyID(of: deviceKey)
         let credential = credentialID ?? keyID
-        let authData = Array(SHA256.hash(data: Data(appID.utf8))) + [0x40]
-            + withUnsafeBytes(of: counter.bigEndian, Array.init)
-            + environment.aaguid
-            + [UInt8(credential.count >> 8), UInt8(credential.count & 0xff)] + credential
-            + [0xa0] // a COSE key, which isn't looked at
+        // Built a piece at a time: as one `+` chain it's too much for the type checker
+        var authData: [UInt8] = Array(SHA256.hash(data: Data(appID.utf8)))
+        authData.append(0x40)
+        authData += withUnsafeBytes(of: counter.bigEndian) { Array($0) }
+        authData += environment.aaguid
+        authData += [UInt8(credential.count >> 8), UInt8(credential.count & 0xff)]
+        authData += credential
+        authData.append(0xa0) // a COSE key, which isn't looked at
         let nonce = Array(SHA256.hash(data: authData + Array(SHA256.hash(data: nonceChallenge ?? challenge))))
         let now = Date.now
         let leaf = try Certificate(
