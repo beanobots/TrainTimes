@@ -64,9 +64,10 @@ struct Notice: Codable, Hashable, Sendable {
 
 enum TrainService {
     /// Trains, alerts and (when asked for) elevator outages for `selection`, fetched
-    /// together. Only the chosen lines' own train feeds are required: without the
-    /// other lines' feeds there are just no rerouted trains, and without alerts or
-    /// outages the board has nil for them. Without `includingAlerts`, it has neither.
+    /// together. Only the chosen lines' own train feeds are required, and up to
+    /// date (`SubwayFeed.staleAfter`): without the other lines' feeds there are
+    /// just no rerouted trains, and without alerts or outages the board has nil
+    /// for them. Without `includingAlerts`, it has neither.
     /// Without `includingOtherLines`, only the chosen lines' feeds are fetched,
     /// which is quicker, and there are no rerouted trains.
     static func board(for selection: Selection, includingAlerts: Bool = true, includingOutages: Bool = true,
@@ -78,15 +79,9 @@ enum TrainService {
         async let alertEntries = alertEntries(if: includingAlerts)
         async let outages = outages(for: selection, if: includingOutages)
 
-        let stops = Set(selection.stopIDs)
-        var arrivals: [Arrival] = []
-        for data in try await trainData {
-            arrivals += try SubwayFeed.arrivals(at: stops, in: data)
-        }
-        for data in await otherTrainData {
-            arrivals += (try? SubwayFeed.arrivals(at: stops, in: data)) ?? []
-        }
-        let trains = arrivals.filter { $0.time > now && selection.shows($0) }.sorted { $0.time < $1.time }.oncePerTrip()
+        let arrivals = try Self.arrivals(at: Set(selection.stopIDs), own: try await trainData,
+                                         others: await otherTrainData, now: now)
+        let trains = Self.trains(for: selection, in: arrivals, now: now)
         let alerts = await alertEntries.map { AlertsFeed.alerts(for: selection, in: $0, now: now) }
         return Board(trains: trains, alerts: alerts, outages: await outages)
     }
@@ -107,17 +102,12 @@ enum TrainService {
         let arriving = Set(change.arrivalStops(for: selection))
         let leaving = Set(change.departureStops(for: selection))
         let stops = origin.union(arriving).union(leaving)
-        var arrivals: [Arrival] = []
-        for data in try await trainData {
-            arrivals += try SubwayFeed.arrivals(at: stops, in: data)
-        }
-        for data in await otherTrainData {
-            arrivals += (try? SubwayFeed.arrivals(at: stops, in: data)) ?? []
-        }
+        var arrivals = try Self.arrivals(at: stops, own: try await trainData, others: await otherTrainData, now: now)
         arrivals.sort { $0.time < $1.time }
-        let trains = arrivals.filter { origin.contains($0.stop) && $0.time > now && selection.shows($0) }.oncePerTrip()
+        let trains = Self.trains(for: selection, in: arrivals.filter { origin.contains($0.stop) }, now: now)
+        // Your train can end at the change, but the one changed to has to leave from it
         let departures = arrivals
-            .filter { leaving.contains($0.stop) && change.routes.contains($0.route) && $0.time > now }
+            .filter { leaving.contains($0.stop) && change.routes.contains($0.route) && !$0.endsHere && $0.leaves > now }
             .oncePerTrip()
         let connections = change.connections(for: trains, atChange: arrivals.filter { arriving.contains($0.stop) },
                                              departures: departures, selection: selection)
@@ -161,29 +151,37 @@ enum TrainService {
     /// couldn't be had or read.
     private static func outages(for selection: Selection, if wanted: Bool) async -> [Outage]? {
         guard wanted else { return nil }
+        guard selection.station != nil else { return [] }
+        return outages(for: selection, in: await optionalData(from: OutagesFeed.url))
+    }
+
+    /// The outages at `selection`'s station in `data`, the outages feed, which
+    /// the push server fetches once for all its countdowns: nil when the feed
+    /// couldn't be had or read.
+    static func outages(for selection: Selection, in data: Data?) -> [Outage]? {
         guard let complex = selection.station?.complex else { return [] }
-        guard let data = await optionalData(from: OutagesFeed.url) else { return nil }
+        guard let data else { return nil }
         return try? OutagesFeed.outages(atComplex: complex, in: data)
     }
 
     /// The trains of each of `selections`, by `Selection.trainID`, found as
-    /// `board` finds them but fetching each feed just once, for the Live tab's
-    /// lists. One whose own lines' feeds didn't come is left out. Without
+    /// `board` finds them but fetching and reading each feed just once, for the
+    /// Live tab's lists and the push server's countdowns. One whose own lines'
+    /// feeds didn't come, or are out of date, is left out. Without
     /// `includingOtherLines`, only the lines' own feeds are fetched, which is
     /// enough where only each line's own trains are shown.
     static func trains(for selections: [Selection], includingOtherLines: Bool = true,
                        now: Date = Date()) async -> [String: [Arrival]] {
-        let feeds: [(own: [URL], others: [URL])] = selections.map { selection in
-            let all = Lines.feedURLs(sharingTracksWith: selection.routes)
-            return includingOtherLines ? all : (own: all.own, others: [])
-        }
+        // Each train once: the push server has thousands of countdowns, many for the same one
+        let unique = Array(Dictionary(selections.map { ($0.trainID, $0) }, uniquingKeysWith: { first, _ in first }).values)
+        let feeds = unique.map { feedURLs(for: $0, includingOtherLines: includingOtherLines) }
         let urls = Set(feeds.flatMap { $0.own + $0.others })
-        let stops = Set(selections.flatMap(\.stopIDs))
+        let stops = Set(unique.flatMap(\.stopIDs))
         let arrivals = await withTaskGroup(of: (URL, [Arrival]?).self) { group in
             for url in urls {
                 group.addTask {
                     guard let data = await optionalData(from: url) else { return (url, nil) }
-                    return (url, try? SubwayFeed.arrivals(at: stops, in: data))
+                    return (url, try? SubwayFeed.arrivals(at: stops, in: data, now: now))
                 }
             }
             var all: [URL: [Arrival]] = [:]
@@ -192,16 +190,56 @@ enum TrainService {
             }
             return all
         }
+        return trains(for: unique, in: arrivals, includingOtherLines: includingOtherLines, now: now)
+    }
+
+    /// `trains(for:includingOtherLines:now:)` once the feeds are read: `feeds`
+    /// has each one's arrivals at the selections' stops, and none for one that
+    /// didn't come or couldn't be read. They're indexed by stop, so each
+    /// selection looks only at its own: linear in the number of selections.
+    static func trains(for selections: [Selection], in feeds: [URL: [Arrival]], includingOtherLines: Bool = true,
+                       now: Date) -> [String: [Arrival]] {
+        let byStop = feeds.mapValues { Dictionary(grouping: $0, by: \.stop) }
         var trains: [String: [Arrival]] = [:]
-        for (selection, feeds) in zip(selections, feeds) where feeds.own.allSatisfy({ arrivals[$0] != nil }) {
-            let stops = Set(selection.stopIDs)
-            trains[selection.trainID] = (feeds.own + feeds.others)
-                .flatMap { arrivals[$0] ?? [] }
-                .filter { stops.contains($0.stop) && $0.time > now && selection.shows($0) }
-                .sorted { $0.time < $1.time }
-                .oncePerTrip()
+        for selection in selections {
+            let urls = feedURLs(for: selection, includingOtherLines: includingOtherLines)
+            guard urls.own.allSatisfy({ byStop[$0] != nil }) else { continue }
+            let stopIDs = selection.stopIDs
+            let arrivals = (urls.own + urls.others).flatMap { url in stopIDs.flatMap { byStop[url]?[$0] ?? [] } }
+            trains[selection.trainID] = Self.trains(for: selection, in: arrivals, now: now)
         }
         return trains
+    }
+
+    /// Of `arrivals`, the trains `selection` shows that are still to leave
+    /// their stop and go on from it, soonest first and each trip once: what a
+    /// board lists.
+    static func trains(for selection: Selection, in arrivals: [Arrival], now: Date) -> [Arrival] {
+        arrivals
+            .filter { !$0.endsHere && $0.leaves > now && selection.shows($0) }
+            .sorted { $0.time < $1.time }
+            .oncePerTrip()
+    }
+
+    /// The arrivals at `stops` in the feeds of a selection's own lines, all of
+    /// which have to be read, and of the other lines, any of which can be
+    /// left out.
+    private static func arrivals(at stops: Set<String>, own: [Data], others: [Data], now: Date) throws -> [Arrival] {
+        var arrivals: [Arrival] = []
+        for data in own {
+            arrivals += try SubwayFeed.arrivals(at: stops, in: data, now: now)
+        }
+        for data in others {
+            arrivals += (try? SubwayFeed.arrivals(at: stops, in: data, now: now)) ?? []
+        }
+        return arrivals
+    }
+
+    /// The feeds `selection`'s trains can be in; without `includingOtherLines`,
+    /// only its own lines'.
+    private static func feedURLs(for selection: Selection, includingOtherLines: Bool) -> (own: [URL], others: [URL]) {
+        let all = Lines.feedURLs(sharingTracksWith: selection.routes)
+        return includingOtherLines ? all : (own: all.own, others: [])
     }
 
     private static let feeds = InFlight<Data>()
@@ -279,7 +317,8 @@ enum TrainService {
         }
     }
 
-    private static func optionalData(from url: URL?) async -> Data? {
+    /// A feed fetched as `data(from:)` fetches it, or nil when it couldn't be had.
+    static func optionalData(from url: URL?) async -> Data? {
         guard let url else { return nil }
         return try? await data(from: url)
     }

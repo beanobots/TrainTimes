@@ -5,6 +5,9 @@ struct Arrival: Codable, Hashable, Sendable {
     /// A real-time route id, with express versions folded in ("6X" is "6").
     let route: String
     let time: Date
+    /// When it's due to leave, where that's later than `time`: it waits at the
+    /// platform. Nil when it leaves as it gets there.
+    var departure: Date? = nil
     /// Where it stops at the station: its platform's id plus N or S, e.g. "R31N".
     let stop: String
     /// The last stop of the trip, whose station is where the train ends up.
@@ -21,6 +24,11 @@ struct Arrival: Codable, Hashable, Sendable {
     var approach: [Stop] = []
     /// Where the feed says the train is; nil when it doesn't say.
     var position: Position? = nil
+
+    /// When it leaves the stop, so until when it can still be caught there.
+    var leaves: Date { max(departure ?? time, time) }
+    /// Whether its trip ends at this stop, so it doesn't leave from here.
+    var endsHere: Bool { stop == lastStop }
 
     var terminal: String? { StationDirectory.terminalName(forStop: lastStop) }
     var lineLabel: String { LineStyle.of(route).label }
@@ -64,27 +72,41 @@ struct Arrival: Codable, Hashable, Sendable {
 }
 
 enum SubwayFeed {
+    /// How old a feed can be and still be gone by: the MTA makes each one anew
+    /// about every 30 seconds, and this allows for one that's late and for a
+    /// clock that's a little off. One older than this has stopped updating.
+    static let staleAfter: TimeInterval = 3 * 60
+
     /// Decodes just enough of a GTFS-realtime feed (gtfs.org/realtime) to list,
-    /// for every trip that stops at one of `stopIDs`, its route, arrival time,
-    /// which of them it stops at, the stops before it, its last stop, whether a
-    /// train is assigned to it and where that train is, so the widget needs no
-    /// protobuf library.
-    static func arrivals(at stopIDs: Set<String>, in data: Data) throws -> [Arrival] {
+    /// for every trip that stops at one of `stopIDs`, its route, arrival time
+    /// (and departure time, if later), which of them it stops at, the stops
+    /// before it, its last stop, whether a train is assigned to it and where
+    /// that train is, so the widget needs no protobuf library. A feed that says
+    /// it was made more than `staleAfter` before `now` throws `FeedError.stale`.
+    static func arrivals(at stopIDs: Set<String>, in data: Data, now: Date = Date()) throws -> [Arrival] {
         let reader = ProtobufReader(data)
         var arrivals: [Arrival] = []
         var positions: [String: Arrival.Position] = [:]
         try reader.fields(until: reader.count) { field in
-            guard field == 2 else { return false } // FeedMessage.entity
-            try reader.message { field in
-                switch field {
-                case 3: // FeedEntity.trip_update
-                    arrivals += try tripUpdate(reader, at: stopIDs)
-                case 4: // FeedEntity.vehicle
-                    if let vehicle = try vehiclePosition(reader) { positions[vehicle.trip] = vehicle.position }
-                default:
-                    return false
+            switch field {
+            case 1: // FeedMessage.header
+                let made = try timestamp(reader)
+                // 0 is a feed that doesn't say when it was made
+                if made != 0, now.timeIntervalSince1970 - TimeInterval(made) > staleAfter { throw FeedError.stale }
+            case 2: // FeedMessage.entity
+                try reader.message { field in
+                    switch field {
+                    case 3: // FeedEntity.trip_update
+                        arrivals += try tripUpdate(reader, at: stopIDs)
+                    case 4: // FeedEntity.vehicle
+                        if let vehicle = try vehiclePosition(reader) { positions[vehicle.trip] = vehicle.position }
+                    default:
+                        return false
+                    }
+                    return true
                 }
-                return true
+            default:
+                return false
             }
             return true
         }
@@ -151,8 +173,9 @@ enum SubwayFeed {
         var stops: [Arrival.Stop] = []
         /// Where it ends, whether or not there's a time for it
         var lastStop: String?
-        /// Where in `stops` the trip calls at one of `stopIDs`
-        var matches: [Int] = []
+        /// Where in `stops` the trip calls at one of `stopIDs`, and when it
+        /// leaves there if that's later than it gets there
+        var matches: [(at: Int, departure: UInt64?)] = []
         try reader.message { field in
             switch field {
             case 1: // TripUpdate.trip
@@ -188,7 +211,7 @@ enum SubwayFeed {
                 let due = arrival != 0 ? arrival : departure
                 guard due != 0 else { return true }
                 if stopIDs.contains(stop) {
-                    matches.append(stops.count)
+                    matches.append((at: stops.count, departure: departure > due ? departure : nil))
                 }
                 stops.append(Arrival.Stop(id: stop, time: Date(timeIntervalSince1970: TimeInterval(due))))
             default:
@@ -197,15 +220,16 @@ enum SubwayFeed {
             return true
         }
         guard let lastStop else { return [] }
-        return matches.map { at in
+        return matches.map { match in
             Arrival(
                 route: Lines.normalized(route),
-                time: stops[at].time,
-                stop: stops[at].id,
+                time: stops[match.at].time,
+                departure: match.departure.map { Date(timeIntervalSince1970: TimeInterval($0)) },
+                stop: stops[match.at].id,
                 lastStop: lastStop,
                 isLive: isLive,
                 trip: trip,
-                approach: Array(stops[...at])
+                approach: Array(stops[...match.at])
             )
         }
     }
@@ -235,6 +259,17 @@ enum SubwayFeed {
         return (trip, Arrival.Position(stop: stop, isStopped: status == 1))
     }
 
+    /// FeedHeader.timestamp: when the feed was made, in seconds since 1970.
+    private static func timestamp(_ reader: ProtobufReader) throws -> UInt64 {
+        var time: UInt64 = 0
+        try reader.message { field in
+            guard field == 3 else { return false }
+            time = try reader.varint()
+            return true
+        }
+        return time
+    }
+
     /// StopTimeEvent.time
     private static func eventTime(_ reader: ProtobufReader) throws -> UInt64 {
         var time: UInt64 = 0
@@ -249,6 +284,8 @@ enum SubwayFeed {
 
 enum FeedError: Error {
     case malformed
+    /// Made too long ago to go by (`SubwayFeed.staleAfter`).
+    case stale
 }
 
 /// Reads protobuf wire format: varints, strings and nested messages.

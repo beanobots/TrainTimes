@@ -1,0 +1,58 @@
+import Foundation
+import Testing
+@testable import TrainCore
+
+/// `Selection`: which trains it shows, and choices saved by older versions of the app.
+@Suite struct SelectionTests {
+    /// A `route` train at `stop`.
+    func train(_ route: String, at stop: String) -> Arrival {
+        Arrival(route: route, time: now, stop: stop, lastStop: "G08N", isLive: true)
+    }
+
+    @Test func showsItsLinesAndLinesRunningOnThem() {
+        // Prospect Av has only the R
+        #expect(prospect.shows(train("R", at: "R34N")))
+        #expect(prospect.shows(train("N", at: "R34N")))
+        #expect(prospect.shows(train("D", at: "R34N")))
+    }
+
+    @Test func leavesOutLinesThatUsuallyStopThereUnlessChosen() {
+        // Atlantic Av-Barclays Ctr's D N R platform
+        let atlantic = Selection(stationID: "R31", routes: ["R"], direction: .north)
+        #expect(atlantic.stopIDs == ["R31N"])
+        #expect(atlantic.shows(train("R", at: "R31N")))
+        #expect(!atlantic.shows(train("D", at: "R31N")))
+        #expect(!atlantic.shows(train("N", at: "R31N")))
+        // The Q usually stops on another of the station's platforms, not this one
+        #expect(atlantic.shows(train("Q", at: "R31N")))
+
+        var both = atlantic
+        both.routes = ["N", "R"]
+        #expect(both.shows(train("N", at: "R31N")))
+        #expect(!both.shows(train("D", at: "R31N")))
+    }
+
+    @Test func aChoiceOfOneLineSavedBeforeThereCouldBeMore() throws {
+        let json = #"{"stationID":"R34","route":"R","direction":"N"}"#
+        let selection = try JSONDecoder().decode(Selection.self, from: Data(json.utf8))
+        #expect(selection == prospect)
+        #expect(selection.routes == ["R"])
+        #expect(!selection.elevatorAlerts)
+        #expect(selection.serviceAlerts)
+        #expect(selection.walkMinutes == 0)
+    }
+
+    @Test func savesAsItLoads() throws {
+        let selection = Selection(stationID: "R31", routes: ["N", "R"], direction: .south, elevatorAlerts: true,
+                                  serviceAlerts: false, walkMinutes: 4)
+        let data = try JSONEncoder().encode(selection)
+        #expect(try JSONDecoder().decode(Selection.self, from: data) == selection)
+        let keys = (try JSONSerialization.jsonObject(with: data) as? [String: Any]).map { Set($0.keys) }
+        #expect(keys == ["stationID", "routes", "direction", "elevatorAlerts", "serviceAlerts", "walkMinutes"])
+    }
+
+    @Test func aChoiceWithNeitherLineNorLinesDoesntLoad() {
+        let json = #"{"stationID":"R34","direction":"N"}"#
+        #expect(throws: DecodingError.self) { try JSONDecoder().decode(Selection.self, from: Data(json.utf8)) }
+    }
+}

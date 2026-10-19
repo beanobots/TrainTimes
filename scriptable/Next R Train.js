@@ -12,6 +12,8 @@ const ROUTES = ["R"]; // add "N" to also show N trains when they run local
 const STATION = "Prospect Av";
 const HEADING = "to Manhattan";
 const FEED_URL = "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs-nqrw";
+// The MTA makes its feed anew about every 30 seconds; one older than this has stopped updating
+const STALE_SECONDS = 3 * 60;
 // Where a train ends up, keyed by the last stop of its trip
 const TERMINALS = { G08N: "Forest Hills", G21N: "Queens Plaza", R27N: "Whitehall St", R45S: "Bay Ridge" };
 // -----------------------------------------------------------------------------
@@ -46,9 +48,10 @@ async function upcomingTrains() {
 }
 
 // Decodes just enough of the GTFS-realtime protobuf (gtfs.org/realtime) to list,
-// for every trip that stops at stopId, its route, arrival time, last stop and
-// whether a train is assigned to it (live=true: a live prediction; false: the
-// MTA hasn't assigned a train yet, so the time is still the timetable's).
+// for every trip that stops at stopId and goes on from it, its route, arrival
+// time, last stop and whether a train is assigned to it (live=true: a live
+// prediction; false: the MTA hasn't assigned a train yet, so the time is still
+// the timetable's). Throws if the feed says it was made over STALE_SECONDS ago.
 function arrivalsAt(stopId, bytes) {
   let pos = 0;
   const varint = () => {
@@ -99,7 +102,9 @@ function arrivalsAt(stopId, bytes) {
   };
 
   const arrivals = [];
+  let made = 0;
   fields(bytes.length, {
+    1: () => message({ 3: () => (made = varint()) }), // FeedMessage.header: its timestamp
     2: () => message({ // FeedMessage.entity
       3: () => { // FeedEntity.trip_update
         let route = "";
@@ -124,10 +129,16 @@ function arrivalsAt(stopId, bytes) {
             lastStop = stop;
           },
         });
-        if (time) arrivals.push({ route, time: new Date(time * 1000), terminal: TERMINALS[lastStop], live });
+        // A trip that ends at stopId doesn't leave from it
+        if (time && lastStop !== stopId) {
+          arrivals.push({ route, time: new Date(time * 1000), terminal: TERMINALS[lastStop], live });
+        }
       },
     }),
   });
+  if (made && Date.now() / 1000 - made > STALE_SECONDS) {
+    throw new Error(`The MTA's feed hasn't updated since ${clock(new Date(made * 1000), true)}`);
+  }
   return arrivals.sort((a, b) => a.time - b.time);
 }
 

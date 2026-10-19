@@ -1,8 +1,5 @@
 import Foundation
 import ServiceLifecycle
-#if canImport(FoundationNetworking)
-import FoundationNetworking
-#endif
 
 /// Every so often, new times for every registered countdown, pushed when
 /// they're worth it. One pass at a time: one that overruns skips ticks.
@@ -207,53 +204,28 @@ final class Poller: Service {
 
     /// A board for each of `selections`, as `TrainService.board(for:includingOutages:now:)`
     /// makes the app's countdown's (outages only for those that mention
-    /// elevators). Each feed is fetched and read once for all of them, as
-    /// `TrainService.trains(for:)` does, but its arrivals are indexed by stop,
-    /// so each selection looks only at its own: linear in the number of them.
-    /// One whose own lines' feeds didn't come is left out.
+    /// elevators), with the trains from `TrainService.trains(for:)`, which
+    /// fetches and reads each feed once for all of them. One whose own lines'
+    /// feeds didn't come, or are out of date, is left out.
     @Sendable
     static func liveBoards(for selections: [Selection], now: Date) async -> [Selection: Board] {
-        let unique = Array(Set(selections))
-        let feeds = unique.map { Lines.feedURLs(sharingTracksWith: $0.routes) }
-        let urls = Set(feeds.flatMap { $0.own + $0.others })
-        let stops = Set(unique.flatMap(\.stopIDs))
-
         async let alertEntries = TrainService.alertEntries()
-        async let outageData = unique.contains(where: \.elevatorAlerts) ? fetch(OutagesFeed.url) : nil
-        let arrivals = await withTaskGroup(of: (URL, [String: [Arrival]]?).self) { group in
-            for url in urls {
-                group.addTask {
-                    guard let data = await fetch(url), let arrivals = try? SubwayFeed.arrivals(at: stops, in: data) else {
-                        return (url, nil)
-                    }
-                    return (url, Dictionary(grouping: arrivals, by: \.stop))
-                }
-            }
-            var all: [URL: [String: [Arrival]]] = [:]
-            for await (url, byStop) in group {
-                all[url] = byStop
-            }
-            return all
-        }
+        async let outageData = selections.contains(where: \.elevatorAlerts)
+            ? TrainService.optionalData(from: OutagesFeed.url) : nil
+        let trains = await TrainService.trains(for: selections, now: now)
         let (entries, outagesFeed) = await (alertEntries, outageData)
 
         var outagesByComplex: [String: [Outage]?] = [:]
         var boards: [Selection: Board] = [:]
-        for (selection, feeds) in zip(unique, feeds) where feeds.own.allSatisfy({ arrivals[$0] != nil }) {
-            // Mirrors TrainService.trains(for:): own and other lines' feeds, these stops, soonest first, once per trip
-            let stopIDs = selection.stopIDs
-            let trains = (feeds.own + feeds.others)
-                .flatMap { url in stopIDs.flatMap { arrivals[url]?[$0] ?? [] } }
-                .filter { $0.time > now && selection.shows($0) }
-                .sorted { $0.time < $1.time }
-                .oncePerTrip()
+        for selection in Set(selections) {
+            guard let trains = trains[selection.trainID] else { continue }
             var outages: [Outage]? = nil
             if selection.elevatorAlerts {
                 let complex = selection.station?.complex ?? ""
                 if let cached = outagesByComplex[complex] {
                     outages = cached
                 } else {
-                    outages = Self.outages(for: selection, in: outagesFeed)
+                    outages = TrainService.outages(for: selection, in: outagesFeed)
                     outagesByComplex[complex] = outages
                 }
             }
@@ -264,29 +236,5 @@ final class Poller: Service {
             )
         }
         return boards
-    }
-
-    /// Mirrors the private `TrainService.outages(for:if:)`: nil when the feed
-    /// couldn't be had or read.
-    private static func outages(for selection: Selection, in data: Data?) -> [Outage]? {
-        guard let complex = selection.station?.complex else { return [] }
-        guard let data else { return nil }
-        return try? OutagesFeed.outages(atComplex: complex, in: data)
-    }
-
-    /// As the private `TrainService.data(from:)` fetches.
-    private static func fetch(_ url: URL) async -> Data? {
-        let request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
-              (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
-        return data
-    }
-}
-
-private extension [Arrival] {
-    /// Mirrors the private `oncePerTrip()` in TrainService.swift.
-    func oncePerTrip() -> [Arrival] {
-        var seen = Set<String>()
-        return filter { $0.trip.isEmpty || seen.insert($0.trip).inserted }
     }
 }
