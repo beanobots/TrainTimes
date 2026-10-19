@@ -1,15 +1,31 @@
 # TrainTimesServer
 
 Keeps the app's Lock Screen countdown (its Live Activity) up to date while the
-app isn't running, for everyone who uses the app. The app registers a
-countdown's push token. Every `POLL_SECONDS` the server reads the MTA's feeds
-with the app's own code (`Sources/TrainCore/Shared` links to `../ios/Shared`).
-It sends an ActivityKit push through APNs when the train's time, the train, the
-next trains or the notice change, plus a low-priority refresh every 5 minutes.
-After 8 hours it ends the countdown, as iOS would.
+app isn't running, for each countdown registered with it by its push token.
+Every `POLL_SECONDS` the server reads the MTA's feeds with the app's own code
+(`Sources/TrainCore/Shared` links to `../ios/Shared`). It sends an ActivityKit
+push through APNs when the train's time, the train, the next trains or the
+notice change, plus a low-priority refresh every 5 minutes. After 8 hours it
+ends the countdown, as iOS would.
 
 Requests that change registrations are signed with App Attest, so only the
 genuine app on a real device can make them.
+
+**The app doesn't register its countdowns yet.** It doesn't ask iOS for a
+countdown's push token and has no App Attest code, so a running server has
+nothing to push to, and the countdown still gets new times only while the app
+runs. [In the app, in order](#in-the-app-in-order) is what the app will need to
+do. It will also need the Push Notifications capability, and
+`NSSupportsLiveActivitiesFrequentUpdates` in its Info.plist, or iOS will
+throttle the server's high-priority pushes.
+
+**Only builds signed by one team can use it**: the team whose APNs key it has
+(`APNS_TEAM_ID`), with the bundle ID that `APP_ID` and `APNS_TOPIC` name. That's
+a build from Xcode with a paid developer account, or from TestFlight or the App
+Store. Installs from AltStore with a free Apple ID, as the
+[main README](../README.md) describes, can't use it: a free account can't have
+push notifications, and AltStore signs each install under its owner's own team,
+which gives it another App ID.
 
 ## How it's reached
 

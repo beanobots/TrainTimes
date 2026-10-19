@@ -62,14 +62,15 @@ The app also shows, for the station and line you choose:
 - **A map** of the station and its entrances, with elevator entrances marked,
   and walking directions in Maps.
 
-**More than one widget.** Every widget follows the app's choice until you give
-it its own, for example one widget for home and one for work: touch and hold the
-widget, tap **Edit Widget**, and choose a **Station**, a **Line** and a
-**Direction**, in any order. Choose the line first and the stations are only the
-ones it stops at; choose the station first and its lines are listed platform by
-platform: each line, a platform's lines together, or every line. Until all three
-are chosen, the widget shows the app's train. Widgets set up with a train before
-there were three choices keep it.
+**More than one widget.** Set up as many as you like in the app's **Widgets**
+tab, for example one for home and one for work. Each has its own train, any
+change of trains, walking time and the alerts it mentions, and can show another
+train at certain times of day (**Commuting hours**), say your train home in the
+evening. Then touch and hold a widget, tap **Edit Widget**, and pick one of
+them. A Next train widget with none picked shows the default one, starred in the
+Widgets tab, where you can make another the default. Changes in the Widgets tab
+update every widget showing that one. Widgets set up before the Widgets tab,
+with a station, a line and a direction, keep that train until you pick one.
 
 **Trains near you.** The large **Trains near you** widget finds where you are
 each time it refreshes and lists the closest stations, with how far each is and
@@ -94,7 +95,9 @@ Lock Screen and in the Dynamic Island. It stays up until you tap the walk button
 again, on the widget or the countdown, or for 8 hours, when iOS ends it. It can
 only get new times while the app runs, which needs no push server: tap ↻ on the
 countdown or a widget, or open the app. In between it keeps ticking, and once your
-train has gone a refresh moves it to the next one.
+train has gone a refresh moves it to the next one. The push server in `server/`
+is for updating it with the app closed, but the app doesn't use it yet, and
+installs from AltStore can't (see [its README](server/README.md)).
 
 **Siri and Shortcuts.** Say "When's my next train in Train Times?" Siri answers
 with the next train you can catch (and when to leave, and any delays) and shows
@@ -131,7 +134,9 @@ Every push to `main` builds the app on a GitHub Mac (see the Actions tab; about
 two minutes) and publishes it as the [latest release](../../releases/tag/latest):
 `TrainTimes.ipa`, plus `source.json`, an AltStore source that describes it. Each
 build gets its own version number (1.0.N, where N is the build number), so
-AltStore can tell when there's a new one.
+AltStore can tell when there's a new one. A build that finishes after `main`
+has moved on isn't published. Pull requests are built too, but not published,
+and every run also builds and tests the push server in `server/`.
 
 1. **Install AltStore** on your iPhone by following the official guide at
    [altstore.io](https://altstore.io). It needs AltServer running on your
@@ -187,7 +192,7 @@ Built into the app (refresh them now and then):
   plus the [subway entrances](https://data.ny.gov/Transportation/MTA-Subway-Entrances-and-Exits-2024/i9wp-a4ja)
   from data.ny.gov.
 - `ios/Shared/equipment.json`: the MTA's list of elevators and escalators, which
-  ties each one to its station.
+  ties each one to its station and the platforms it serves.
 
 To refresh both, follow the download steps at the top of `tools/make_stations.py`,
 then run `python3 tools/make_stations.py Stations.csv entrances.json equipment.json ios/Shared`

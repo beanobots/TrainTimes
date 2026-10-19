@@ -13,7 +13,7 @@ accessible it is. The MTA lists a station's sets of platforms apart, such as
 Atlantic Av-Barclays Ctr's D N R, B Q and 2 3 4 5; the app joins those with the
 same name in the same complex into one station. The equipment list ties each elevator and escalator to its
 station complex, so the outage feed, which names only the equipment, can be
-matched to a station.
+matched to a station, and to the stops whose platforms it serves.
 """
 import csv
 import json
@@ -59,26 +59,35 @@ def entrances_by_stop(path):
         }
         if row.get("entry_allowed") == "NO":
             entrance["exitOnly"] = True
-        entrances.setdefault(row["gtfs_stop_id"], []).append(entrance)
+        # A station on two levels lists both its stops: "A32; D20"
+        for stop in row["gtfs_stop_id"].split(";"):
+            entrances.setdefault(stop.strip(), []).append(entrance)
     return entrances
 
 
 def equipment(path, complexes):
     """The elevators and escalators at subway stations, by id, including those a
-    building owner runs rather than the MTA (they're in the outage feed too)."""
+    building owner runs rather than the MTA (they're in the outage feed too).
+    Each lists the GTFS stops whose platforms it serves, where the MTA says."""
     with open(path, encoding="utf-8") as file:
         rows = json.load(file)
-    return {
-        row["equipmentno"]: {
+    machines = {}
+    for row in sorted(rows, key=lambda row: row["equipmentno"]):
+        if row["stationcomplexid"] not in complexes:
+            continue
+        machine = {
             "complex": row["stationcomplexid"],
             "elevator": row["equipmenttype"] == "EL",
             "ada": row["ADA"] == "Y",
             "serving": row["serving"],
             "alternative": (row.get("alternativeroute") or "").strip(),
         }
-        for row in sorted(rows, key=lambda row: row["equipmentno"])
-        if row["stationcomplexid"] in complexes
-    }
+        # "L03/R20": 14 St-Union Sq's L and its N Q R W
+        stops = [stop.strip() for stop in (row.get("elevatorsgtfsstopid") or "").split("/") if stop.strip()]
+        if stops:
+            machine["stops"] = stops
+        machines[row["equipmentno"]] = machine
+    return machines
 
 
 def main(source, entrances_path, equipment_path, target_dir):
@@ -104,6 +113,9 @@ def main(source, entrances_path, equipment_path, target_dir):
         }
         for row in rows
     ]
+    unmatched = sorted(set(entrances) - {station["id"] for station in stations})
+    if unmatched:
+        print(f"warning: entrances of unknown stops left out: {', '.join(unmatched)}", file=sys.stderr)
     # The entrance list files a complex's shared entrances under one of its stations
     by_complex = {}
     for station in stations:

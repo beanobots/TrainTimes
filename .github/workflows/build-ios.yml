@@ -3,10 +3,18 @@ name: Build iOS app
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
 permissions:
-  contents: write # to publish the latest build as a release
+  contents: read
+
+# One run at a time for each branch or pull request, so two builds of main
+# can't publish at once; a build of main that's still waiting gives way to a
+# newer one. A newer push to a pull request cancels its older run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # Each build gets its own number, so AltStore can tell a new build is an update
@@ -17,6 +25,8 @@ env:
 jobs:
   build:
     runs-on: macos-latest
+    permissions:
+      contents: write # to publish the latest build as a release
     steps:
       - uses: actions/checkout@v4
 
@@ -89,12 +99,32 @@ jobs:
             ios/source.json
 
       - name: Publish as the latest release
-        if: github.ref == 'refs/heads/main'
+        # Only a push to main publishes, and only while it's main's newest commit,
+        # so an older run, or a re-run of one, can't replace a newer build
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          main=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
+          if [ "$main" != "$GITHUB_SHA" ]; then
+            echo "main has moved on to ${main::7}; not publishing ${GITHUB_SHA::7}"
+            exit 0
+          fi
           gh release delete latest --cleanup-tag --yes || true
           gh release create latest ios/TrainTimes.ipa ios/source.json ios/icon.png \
             --target "$GITHUB_SHA" \
             --title "Train Times $VERSION" \
             --notes "Built from ${GITHUB_SHA::7}. In AltStore, add the source $RELEASE_URL/source.json, or install TrainTimes.ipa directly."
+
+  server:
+    # The server compiles eight of ios/Shared's files in Swift 6 mode, which the
+    # app's build doesn't. It needs macOS for SQLite.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the server
+        run: swift build --package-path server
+
+      - name: Test the server
+        run: swift test --package-path server
