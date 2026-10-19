@@ -82,8 +82,9 @@ import Testing
             alert("5", type: "Extra Service"),
         ]
         let entries = try AlertsFeed.entries(in: feed(entities), now: now)
+        // No trains at all before slow ones
         #expect(AlertsFeed.alerts(for: prospect, in: entries, now: now).map(\.kind)
-            == [.delays, .suspended, .serviceChange, .notice, .notice])
+            == [.suspended, .delays, .serviceChange, .notice, .notice])
     }
 
     @Test func kindsFromTheMTAsTypes() {
