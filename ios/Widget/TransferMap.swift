@@ -79,7 +79,7 @@ struct TransferTrack: View {
         let track = TrackGeometry(width: width, stops: layout.rows.count)
         let marker = BoardStyle.large.markerSize
         // The change's name goes under it, out of the way of the stop before
-        let station = layout.rows[0].name.split(separator: "-").first.map(String.init) ?? layout.rows[0].name
+        let station = layout.rows[0].name.mainStationName
         return ZStack(alignment: .topLeading) {
             TrackRails(layout: layout, track: track, localY: Self.localY, otherY: otherY,
                        localColor: localColor, otherColors: otherColors)
@@ -142,6 +142,7 @@ struct TransferTrack: View {
             .font(.caption.weight(yours ? .semibold : .medium))
             .monospacedDigit()
             .foregroundStyle(yours ? connection.first.statusColor : passed ? Color.boardDim : Color.boardGray)
+            .widgetAccentable(yours && connection.first.isLive)
             .fixedSize()
     }
 }
@@ -378,5 +379,20 @@ private struct TrackRails: View {
     private static func fading(_ color: Color, y: CGFloat, to x: CGFloat) -> GraphicsContext.Shading {
         .linearGradient(Gradient(colors: [color.opacity(0), color]),
                         startPoint: CGPoint(x: 0, y: y), endPoint: CGPoint(x: x, y: y))
+    }
+}
+
+extension String {
+    /// A station's name up to any second name: "Atlantic Av" for Atlantic
+    /// Av-Barclays Ctr, "47-50 Sts" for 47-50 Sts-Rockefeller Ctr. A hyphen
+    /// after a single word or number joins it to the next, so
+    /// Hoyt-Schermerhorn Sts and 174-175 Sts stay whole.
+    var mainStationName: String {
+        var rest = self[...]
+        while let hyphen = rest.firstIndex(of: "-") {
+            if self[..<hyphen].contains(" ") { return String(self[..<hyphen]) }
+            rest = self[index(after: hyphen)...]
+        }
+        return self
     }
 }

@@ -15,10 +15,7 @@ enum BulletImage {
         if let cached = cache.object(forKey: key) { return cached as Data }
         let gap: CGFloat = 3
         let count = routes.count
-        let columns = count == 1 ? 1 : count <= 4 ? 2 : 3
-        let rows = (count + columns - 1) / columns
-        let across = CGFloat(max(columns, rows))
-        let size = (side - gap * (across - 1)) / across
+        let (columns, rows, size) = LineBullets.grid(count: count, side: side, gap: gap)
         let format = UIGraphicsImageRendererFormat()
         format.scale = scale
         format.opaque = false

@@ -33,7 +33,9 @@ struct BoardStyle {
     var columnWidth: CGFloat { isLarge ? 150 : 130 }
     /// Between the column and what's to its left.
     var columnGap: CGFloat { 10 }
-    var rowHeight: CGFloat { isLarge ? 19 : 14.5 }
+    /// Taller as the phone's text size makes its times taller, so the column
+    /// has fewer rows rather than ones run into each other.
+    var rowHeight: CGFloat { (isLarge ? 19 : 14.5) * Self.growth(isLarge ? .body : .footnote) }
 
     /// How many rows the column has room for, from the top beside the station.
     var columnRows: Int { isLarge ? 4 : 5 }
@@ -59,6 +61,14 @@ struct BoardStyle {
 
     private static func points(_ style: UIFont.TextStyle) -> CGFloat {
         UIFont.preferredFont(forTextStyle: style).pointSize
+    }
+
+    /// How much larger `style` is at the phone's text size than at the
+    /// default; 1 at smaller sizes too.
+    private static func growth(_ style: UIFont.TextStyle) -> CGFloat {
+        let standard = UIFont.preferredFont(forTextStyle: style,
+                                            compatibleWith: UITraitCollection(preferredContentSizeCategory: .large))
+        return max(1, points(style) / standard.pointSize)
     }
 }
 

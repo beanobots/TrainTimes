@@ -38,6 +38,9 @@ struct NearbyEntry: TimelineEntry {
 }
 
 struct NearbyProvider: TimelineProvider {
+    /// How long a timeline's entries go on for, one a minute.
+    static let minutesShown = 30
+
     func placeholder(in context: Context) -> NearbyEntry {
         .preview
     }
@@ -92,7 +95,7 @@ struct NearbyProvider: TimelineProvider {
             let stations = near.map { NearbyStation($0, trains: trains, alerts: alerts, kinds: settings.alertKinds, now: now) }
             let shown = NearbyLayout.fit(stations, in: NearbyLayout.room(height: height, unreachable: unreachable))
             let content = NearbyEntry.Content.stations(place: place, stations: shown, unreachable: unreachable)
-            let entries = (0..<30).map { minute in
+            let entries = (0..<Self.minutesShown).map { minute in
                 NearbyEntry(date: now.addingTimeInterval(Double(minute) * 60), content: content, settings: settings)
             }
             return (entries, reload)
@@ -176,11 +179,27 @@ struct NearbyLine: Identifiable {
             : goes.first(where: { station.directionName($0, of: route).contains("Manhattan") })
         let order = towardManhattan.map { [$0, $0.opposite] } ?? [.north, .south]
 
+        // The last entry's next train is the first after the timeline ends
+        let end = now.addingTimeInterval(TimeInterval(NearbyProvider.minutesShown * 60))
         var ways: [Direction: Way] = [:]
         for direction in order where goes.contains(direction) {
             let selection = Selection(stationID: station.id, routes: [route], direction: direction)
-            // Each line's own trains, not those of another line running on its tracks
-            let own = trains[selection.trainID].map { Array($0.filter { $0.route == route }.prefix(4)) }
+            // Each line's own trains, not those of another line running on its
+            // tracks: every one due before the timeline ends, and the one after,
+            // so each entry has its next train. Without their stops, which the
+            // widget doesn't show, to keep them small in its little memory
+            let own = trains[selection.trainID].map { list in
+                var kept = list.filter { $0.route == route }
+                if let after = kept.firstIndex(where: { $0.time > end }) {
+                    kept = Array(kept[...after])
+                }
+                return kept.map { train in
+                    var train = train
+                    train.approach = []
+                    train.position = nil
+                    return train
+                }
+            }
             let shown = alerts.map { AlertsFeed.alerts(for: selection, in: $0, now: now).filter { kinds.contains($0.kind) } } ?? []
             ways[direction] = Way(selection: selection, trains: own, alerts: shown)
         }
@@ -268,25 +287,29 @@ enum NearbyLayout {
         height - 2 * margins - header - gap - (unreachable ? problem : 0)
     }
 
-    /// As many of `stations` as fit in `room`, nearest first. One with more
-    /// lines than there's room for shows its first four and the others'
-    /// bullets; failing that, the farthest station is left off; and failing
-    /// that, they show fewer lines still.
+    /// As many of `stations` as fit in `room`, nearest first, each with as
+    /// many of its lines as fit. One with more lines than there's room for
+    /// shows its first four and the others' bullets; failing that, the
+    /// farthest station is left off, and the room it leaves goes back to the
+    /// others' lines; and failing that, the nearest shows fewer lines still.
     static func fit(_ stations: [NearbyStation], in room: CGFloat) -> [NearbyStation] {
-        var stations = stations
-        func fits() -> Bool {
+        func fits(_ stations: [NearbyStation]) -> Bool {
             stations.map(\.height).reduce(0, +) + gap * CGFloat(max(stations.count - 1, 0)) <= room
         }
-        while !fits(), let index = longest(of: stations, over: 4) {
-            stations[index].leaveOutLastLine()
+        // Each count starts again from every line, so none stays folded for
+        // a station that's since been left off
+        for count in stride(from: stations.count, to: 1, by: -1) {
+            var kept = Array(stations.prefix(count))
+            while !fits(kept), let index = longest(of: kept, over: 4) {
+                kept[index].leaveOutLastLine()
+            }
+            if fits(kept) { return kept }
         }
-        while !fits(), stations.count > 1 {
-            stations.removeLast()
+        var nearest = Array(stations.prefix(1))
+        while !fits(nearest), let index = longest(of: nearest, over: 1) {
+            nearest[index].leaveOutLastLine()
         }
-        while !fits(), let index = longest(of: stations, over: 1) {
-            stations[index].leaveOutLastLine()
-        }
-        return stations
+        return nearest
     }
 
     /// The station with the most rows, if any has more than `count`.
@@ -301,10 +324,13 @@ enum NearbyLayout {
 
 struct NearbyWidgetView: View {
     @Environment(\.accessibilityDifferentiateWithoutColor) private var withoutColor
+    @Environment(\.widgetRenderingMode) private var renderingMode
     let entry: NearbyEntry
 
-    /// Whether live times get their symbol as well as their green.
-    private var marksLive: Bool { withoutColor || entry.settings.marksLiveTimes }
+    /// Whether live times get their symbol as well as their green: always
+    /// where the widget is drawn in one colour, as on tinted and clear Home
+    /// Screens, which would leave out the green.
+    private var marksLive: Bool { withoutColor || renderingMode != .fullColor || entry.settings.marksLiveTimes }
     /// Whether timetable times get their symbol.
     private var marksScheduled: Bool { entry.settings.marksScheduledTimes }
 
@@ -353,6 +379,9 @@ struct NearbyWidgetView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        // Its rows are as tall as `NearbyLayout` has them, which fits text up
+        // to this size, and two ways of a line share each one
+        .dynamicTypeSize(...DynamicTypeSize.xLarge)
         .widgetURL(url)
     }
 
@@ -430,8 +459,11 @@ struct NearbyWidgetView: View {
             Link(destination: direction.selection.trainURL) {
                 HStack(spacing: 6) {
                     HStack(spacing: 3) {
+                        // On a smaller phone, beside a live mark or at a larger
+                        // text size, "Manhattan" or "Downtown" shrinks to fit
                         Text(direction.label)
                             .lineLimit(1)
+                            .minimumScaleFactor(0.7)
                         if let alert = direction.alert {
                             Image(systemName: alert.symbol)
                                 .font(.caption2)

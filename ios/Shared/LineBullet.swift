@@ -74,7 +74,8 @@ extension VerticalAlignment {
 }
 
 /// The bullets of the chosen lines in about the room of one: side by side for
-/// two, two rows of two for three or four.
+/// two, two rows of two for three or four, and rows of three for more, in the
+/// same square as four.
 struct LineBullets: View {
     let routes: [String]
     let size: CGFloat
@@ -88,6 +89,17 @@ struct LineBullets: View {
         }
     }
 
+    /// How `count` lines' bullets share a square `side` across, `gap` apart:
+    /// one, two to a row for up to four, three for more; how many rows that
+    /// makes; and how big each bullet is, so the rows fit the square too.
+    /// `BulletImage` draws them the same way.
+    static func grid(count: Int, side: CGFloat, gap: CGFloat) -> (columns: Int, rows: Int, bullet: CGFloat) {
+        let columns = count <= 1 ? 1 : count <= 4 ? 2 : 3
+        let rows = (count + columns - 1) / columns
+        let across = CGFloat(max(columns, rows))
+        return (columns, rows, (side - gap * (across - 1)) / across)
+    }
+
     var body: some View {
         if routes.count < 2 {
             LineBullet(route: routes.first ?? "", size: size)
@@ -96,10 +108,13 @@ struct LineBullets: View {
                 ForEach(routes, id: \.self) { LineBullet(route: $0, size: size * 0.8) }
             }
         } else {
+            let grid = Self.grid(count: routes.count, side: Self.width(count: routes.count, size: size), gap: 2)
             VStack(alignment: .leading, spacing: 2) {
-                ForEach(Array(stride(from: 0, to: routes.count, by: 2)), id: \.self) { start in
+                ForEach(Array(stride(from: 0, to: routes.count, by: grid.columns)), id: \.self) { start in
                     HStack(spacing: 2) {
-                        ForEach(routes[start..<min(start + 2, routes.count)], id: \.self) { LineBullet(route: $0, size: size * 0.6) }
+                        ForEach(routes[start..<min(start + grid.columns, routes.count)], id: \.self) {
+                            LineBullet(route: $0, size: grid.bullet)
+                        }
                     }
                 }
             }
@@ -112,8 +127,10 @@ struct LineBullets: View {
 struct LiveMark: View {
     let size: CGFloat
 
+    static let symbol = "dot.radiowaves.up.forward"
+
     var body: some View {
-        Image(systemName: "dot.radiowaves.up.forward")
+        Image(systemName: Self.symbol)
             .font(.system(size: size, weight: .bold))
             .accessibilityLabel("Live")
     }
@@ -124,8 +141,10 @@ struct LiveMark: View {
 struct ScheduledMark: View {
     let size: CGFloat
 
+    static let symbol = "clock"
+
     var body: some View {
-        Image(systemName: "clock")
+        Image(systemName: Self.symbol)
             .font(.system(size: size, weight: .bold))
             .accessibilityLabel("Scheduled")
     }
