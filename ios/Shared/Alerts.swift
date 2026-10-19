@@ -2,9 +2,10 @@ import Foundation
 
 /// A service alert from the MTA: delays, planned work, skipped stops, station notices.
 struct ServiceAlert: Identifiable, Hashable, Sendable {
-    /// Ordered by how much it matters to someone waiting for a train, most
-    /// first. The numbers are how Settings saves a choice of kinds, and how the
-    /// app sends it to the server, so each kind keeps its own.
+    /// Compared by how much it matters to someone waiting for a train, most
+    /// first; declared in the order Settings lists them. The numbers are how
+    /// Settings saves a choice of kinds, and how the app sends it to the
+    /// server, so each kind keeps its own.
     enum Kind: Int, Codable, Comparable, CaseIterable, Sendable {
         case delays = 0, suspended = 1, serviceChange = 2, notice = 3
 
@@ -111,8 +112,8 @@ enum AlertsFeed {
         fileprivate let id: String
         fileprivate let periods: [Period]
         fileprivate let informed: [Informed]
-        /// Where else riders are affected: stations before skipped stops or a
-        /// suspension, whose trains won't get as far.
+        /// Where else riders are affected: stations before skipped, rerouted or
+        /// suspended stops, whose trains are changed further along.
         fileprivate let affected: [Informed]
         fileprivate let type: String
         fileprivate let header: String
@@ -138,7 +139,7 @@ enum AlertsFeed {
                 id: entity.id,
                 periods: alert.active_period ?? [],
                 informed: alert.informed_entity ?? [],
-                affected: alert.mercury?.affected_stations ?? [],
+                affected: alert.mercury?.affected_stations?.compactMap(\.value) ?? [],
                 type: alert.mercury?.alert_type ?? "",
                 header: alert.header_text?.english ?? "",
                 details: alert.description_text?.english ?? "",
@@ -150,7 +151,7 @@ enum AlertsFeed {
 
     /// The alerts in effect at `now` that affect `selection`'s lines at their
     /// platforms and direction, most important first: those about there, and
-    /// those whose trains from there won't get as far as usual.
+    /// those whose trains from there are changed further along.
     static func alerts(for selection: Selection, in entries: [Entry], now: Date = Date()) -> [ServiceAlert] {
         let time = now.timeIntervalSince1970
         let direction = selection.direction == .north ? 0 : 1
@@ -210,7 +211,7 @@ enum AlertsFeed {
 
     // The feed is GTFS-realtime written as JSON, with the MTA's "mercury" additions.
     private struct Feed: Decodable { let entity: [Lenient<Entity>] }
-    /// Nil where it can't be read, so one entity the MTA gets wrong doesn't lose the rest.
+    /// Nil where it can't be read, so one entity or station the MTA gets wrong doesn't lose the rest.
     private struct Lenient<Value: Decodable>: Decodable {
         let value: Value?
 
@@ -258,6 +259,6 @@ enum AlertsFeed {
     private struct Mercury: Decodable {
         let alert_type: String?
         let human_readable_active_period: Translated?
-        let affected_stations: [Informed]?
+        let affected_stations: [Lenient<Informed>]?
     }
 }

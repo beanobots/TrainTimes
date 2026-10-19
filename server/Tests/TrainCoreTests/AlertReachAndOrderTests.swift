@@ -130,6 +130,27 @@ private func mtaAlertEntries(_ entities: [[String: Any]]) throws -> [AlertsFeed.
         #expect(alerts.first?.header == "R trains are delayed.")
         #expect(alerts.dropFirst().allSatisfy { $0.header.isEmpty })
     }
+
+    @Test func badAffectedStationKeepsTheAlert() throws {
+        var skip = mtaAlertEntity("skip", type: "Planned - Stops Skipped", header: "Manhattan-bound [R] skips Prospect Av",
+                                  informed: [("R", "R34", 0)])
+        var alert = try #require(skip["alert"] as? [String: Any])
+        // One station with its direction written as a string, one as it should be
+        let affected: [[String: Any]] = [
+            ["agency_id": "MTASBWY", "route_id": "R", "stop_id": "R44", "direction_id": "0"],
+            ["agency_id": "MTASBWY", "route_id": "R", "stop_id": "R45", "direction_id": 0],
+        ]
+        let mercury: [String: Any] = ["alert_type": "Planned - Stops Skipped", "affected_stations": affected]
+        alert["transit_realtime.mercury_alert"] = mercury
+        skip["alert"] = alert
+
+        let entries = try mtaAlertEntries([skip])
+        #expect(AlertsFeed.alerts(for: prospect, in: entries, now: now).map(\.id) == ["skip"])
+        let bayRidge = Selection(stationID: "R45", routes: ["R"], direction: .north)
+        #expect(AlertsFeed.alerts(for: bayRidge, in: entries, now: now).map(\.id) == ["skip"])
+        let eightySixth = Selection(stationID: "R44", routes: ["R"], direction: .north)
+        #expect(AlertsFeed.alerts(for: eightySixth, in: entries, now: now).isEmpty)
+    }
 }
 
 /// `AlertBrief(header:)` with the direction words of real headlines, and the Staten Island Railway.
