@@ -68,7 +68,7 @@ struct RegistrationRequest: Decodable, Sendable {
     /// Seconds since 2001, as `JSONEncoder` writes a `Date` by default.
     var started: Date?
     /// `AppSettings.alertKinds`, as the app encodes it: `[0, 1, 2, 3]`.
-    var alertKinds: Set<ServiceAlert.Kind>?
+    var alertKinds: ServiceAlert.KnownKinds?
 }
 
 /// What a poll did to a registration, saved in one transaction per poll.
@@ -273,7 +273,7 @@ actor Store {
                 unreadable.append(token)
                 continue
             }
-            let alertKinds = row[6].blob.flatMap { try? decoder.decode(Set<ServiceAlert.Kind>.self, from: $0) }
+            let alertKinds = row[6].blob.flatMap { try? decoder.decode(ServiceAlert.KnownKinds.self, from: $0).kinds }
             let lastState = row[8].blob.flatMap { try? decoder.decode(ContentState.self, from: $0) }
             var lost: [String] = []
             if alertKinds == nil, row[6].blob != nil { lost.append("alert kinds") }
@@ -333,7 +333,7 @@ actor Store {
             selection = try container.decode(Selection.self, forKey: .selection)
             trip = try container.decode(String.self, forKey: .trip)
             started = try container.decode(Date.self, forKey: .started)
-            alertKinds = try? container.decodeIfPresent(Set<ServiceAlert.Kind>.self, forKey: .alertKinds)
+            alertKinds = try? container.decodeIfPresent(ServiceAlert.KnownKinds.self, forKey: .alertKinds)?.kinds
             revision = try container.decode(UUID.self, forKey: .revision)
             lastState = try? container.decodeIfPresent(ContentState.self, forKey: .lastState)
             lastPush = try container.decodeIfPresent(Date.self, forKey: .lastPush)

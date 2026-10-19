@@ -29,9 +29,10 @@ struct LineStyle: Hashable, Sendable {
 }
 
 enum Lines {
-    /// The express versions of a line are their own routes in the feeds.
+    /// The express versions of a line are their own routes in the feeds, and
+    /// the alerts write the Staten Island Railway "[SIR]".
     static func normalized(_ route: String) -> String {
-        ["5X": "5", "6X": "6", "7X": "7", "FX": "F"][route] ?? route
+        ["5X": "5", "6X": "6", "7X": "7", "FX": "F", "SIR": "SI"][route] ?? route
     }
 
     /// The real-time feeds whose trains can stop on `routes`' tracks: their own,
@@ -73,22 +74,6 @@ enum Lines {
     static func rank(_ route: String) -> Int {
         filterRoutes.firstIndex(of: LineStyle.of(route).label == "S" ? "GS" : route) ?? filterRoutes.count
     }
-
-    /// The trunk lines and the lines that run on them, in the MTA's order:
-    /// "Broadway" for the N Q R W.
-    static let trunks: [(name: String, routes: [String])] = [
-        ("Broadway-7 Av", ["1", "2", "3"]),
-        ("Lexington Av", ["4", "5", "6"]),
-        ("Flushing", ["7"]),
-        ("8 Av", ["A", "C", "E"]),
-        ("6 Av", ["B", "D", "F", "M"]),
-        ("Crosstown", ["G"]),
-        ("Nassau St", ["J", "Z"]),
-        ("Canarsie", ["L"]),
-        ("Broadway", ["N", "Q", "R", "W"]),
-        ("Shuttles", ["GS", "FS", "H"]),
-        ("Staten Island Railway", ["SI"]),
-    ]
 
     /// What a line is called on its own: its bullet's letter, or a shuttle's
     /// name, since the three share the S.

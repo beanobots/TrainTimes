@@ -108,7 +108,7 @@ import Testing
         // Kept, to be pushed afresh
         let partly = try #require(await reloaded.registration(for: token(1)))
         #expect(partly.lastState == nil)
-        #expect(partly.alertKinds == nil)
+        #expect(partly.alertKinds == [.delays])
         #expect(partly.lastPush == now)
         #expect(partly.selection == prospect)
         // Dropped, from the database too
@@ -137,7 +137,7 @@ import Testing
         #expect(await store.count == 1)
         let migrated = try #require(await store.registration(for: sampleToken))
         #expect(migrated.selection == prospect)
-        #expect(migrated.alertKinds == nil)
+        #expect(migrated.alertKinds == [.delays])
         #expect(migrated.lastState == nil)
         #expect(migrated.lastPush == now)
         #expect(!FileManager.default.fileExists(atPath: file.path))

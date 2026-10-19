@@ -2,11 +2,23 @@ import Foundation
 
 /// A service alert from the MTA: delays, planned work, skipped stops, station notices.
 struct ServiceAlert: Identifiable, Hashable, Sendable {
-    /// How much it matters to someone waiting for a train, most first.
+    /// Ordered by how much it matters to someone waiting for a train, most
+    /// first. The numbers are how Settings saves a choice of kinds, and how the
+    /// app sends it to the server, so each kind keeps its own.
     enum Kind: Int, Codable, Comparable, CaseIterable, Sendable {
-        case delays, suspended, serviceChange, notice
+        case delays = 0, suspended = 1, serviceChange = 2, notice = 3
 
-        static func < (a: Kind, b: Kind) -> Bool { a.rawValue < b.rawValue }
+        /// No trains at your station before slow ones, then changes, then notices.
+        private var priority: Int {
+            switch self {
+            case .suspended: 0
+            case .delays: 1
+            case .serviceChange: 2
+            case .notice: 3
+            }
+        }
+
+        static func < (a: Kind, b: Kind) -> Bool { a.priority < b.priority }
 
         /// A word or two for the widget.
         var label: String {
@@ -22,10 +34,21 @@ struct ServiceAlert: Identifiable, Hashable, Sendable {
         var settingsLabel: String {
             switch self {
             case .delays: "Delays"
-            case .suspended: "Suspensions"
-            case .serviceChange: "Service changes and planned work"
+            case .suspended: "Suspensions, planned or not"
+            case .serviceChange: "Service changes and other planned work"
             case .notice: "Station notices and extra service"
             }
+        }
+    }
+
+    /// A choice of kinds as Settings saves it and the app sends it to the
+    /// server, their numbers: `[0, 1, 2, 3]`. A number this build doesn't know,
+    /// a kind added since, is left out rather than losing the rest.
+    struct KnownKinds: Decodable, Sendable {
+        let kinds: Set<Kind>
+
+        init(from decoder: Decoder) throws {
+            kinds = Set(try [Int](from: decoder).compactMap(Kind.init(rawValue:)))
         }
     }
 
@@ -65,9 +88,11 @@ struct AlertBrief: Codable, Hashable, Sendable {
         guard !routes.isEmpty else { return nil }
         self.routes = routes
 
+        // A place before "-bound" doesn't start with a word like the "Some" of
+        // "Some Manhattan-bound", and "Downtown Brooklyn" is a place, not a way
         if header.localizedCaseInsensitiveContains("both directions") {
             direction = "Both directions"
-        } else if let match = header.firstMatch(of: #/\b(?:[A-Z0-9][\w./]*(?:[ -][A-Z0-9][\w./]*)*-bound|[Nn]orthbound|[Ss]outhbound|[Uu]ptown|[Dd]owntown)\b/#) {
+        } else if let match = header.firstMatch(of: #/\b(?:(?!(?:Some|Most|All|Many|Several|Few|No|The)\b)[A-Z0-9][\w./]*(?:[ -][A-Z0-9][\w./]*)*-bound|[Nn]orthbound|[Ss]outhbound|[Uu]ptown|[Dd]owntown(?! Brooklyn))\b/#) {
             let words = String(match.0)
             direction = words.prefix(1).uppercased() + words.dropFirst()
         } else {
@@ -86,6 +111,9 @@ enum AlertsFeed {
         fileprivate let id: String
         fileprivate let periods: [Period]
         fileprivate let informed: [Informed]
+        /// Where else riders are affected: stations before skipped stops or a
+        /// suspension, whose trains won't get as far.
+        fileprivate let affected: [Informed]
         fileprivate let type: String
         fileprivate let header: String
         fileprivate let details: String
@@ -104,12 +132,13 @@ enum AlertsFeed {
     static func entries(in data: Data, now: Date = Date()) throws -> [Entry] {
         let feed = try JSONDecoder().decode(Feed.self, from: data)
         let time = now.timeIntervalSince1970
-        return feed.entity.compactMap { entity in
+        return feed.entity.compactMap(\.value).compactMap { entity in
             guard let alert = entity.alert else { return nil }
             let entry = Entry(
                 id: entity.id,
                 periods: alert.active_period ?? [],
                 informed: alert.informed_entity ?? [],
+                affected: alert.mercury?.affected_stations ?? [],
                 type: alert.mercury?.alert_type ?? "",
                 header: alert.header_text?.english ?? "",
                 details: alert.description_text?.english ?? "",
@@ -120,21 +149,25 @@ enum AlertsFeed {
     }
 
     /// The alerts in effect at `now` that affect `selection`'s lines at their
-    /// platforms and direction, most important first.
+    /// platforms and direction, most important first: those about there, and
+    /// those whose trains from there won't get as far as usual.
     static func alerts(for selection: Selection, in entries: [Entry], now: Date = Date()) -> [ServiceAlert] {
         let time = now.timeIntervalSince1970
         let direction = selection.direction == .north ? 0 : 1
         // An alert names a platform by its id, or by its id plus N or S
         let stops = Set(selection.platforms.map(\.id) + selection.stopIDs)
+        func matches(_ informed: Informed) -> Bool {
+            guard let route = informed.route_id, selection.routes.contains(Lines.normalized(route)) else { return false }
+            if let stop = informed.stop_id, !stops.contains(stop) { return false }
+            if let informedDirection = informed.direction_id, informedDirection != direction { return false }
+            return true
+        }
         let alerts: [ServiceAlert] = entries.compactMap { entry in
-            let applies = entry.informed.contains { informed in
-                guard let route = informed.route_id, selection.routes.contains(Lines.normalized(route)) else { return false }
-                if let stop = informed.stop_id, !stops.contains(stop) { return false }
-                if let informedDirection = informed.direction_id, informedDirection != direction { return false }
-                return true
-            }
-            guard applies, entry.isActive(from: time, to: time) else { return nil }
-            let kind = kind(of: entry.type)
+            let isHere = entry.informed.contains(where: matches)
+            guard isHere || entry.affected.contains(where: matches), entry.isActive(from: time, to: time) else { return nil }
+            var kind = kind(of: entry.type)
+            // Suspended further along, trains still run from here
+            if !isHere, kind == .suspended { kind = .serviceChange }
             return ServiceAlert(
                 id: entry.id,
                 kind: kind,
@@ -176,7 +209,15 @@ enum AlertsFeed {
     }
 
     // The feed is GTFS-realtime written as JSON, with the MTA's "mercury" additions.
-    private struct Feed: Decodable { let entity: [Entity] }
+    private struct Feed: Decodable { let entity: [Lenient<Entity>] }
+    /// Nil where it can't be read, so one entity the MTA gets wrong doesn't lose the rest.
+    private struct Lenient<Value: Decodable>: Decodable {
+        let value: Value?
+
+        init(from decoder: Decoder) throws {
+            value = try? Value(from: decoder)
+        }
+    }
     private struct Entity: Decodable {
         let id: String
         let alert: Alert?
@@ -204,15 +245,19 @@ enum AlertsFeed {
         let direction_id: Int?
     }
     private struct Translated: Decodable {
-        let translation: [Translation]
-        var english: String? { translation.first { $0.language == "en" }?.text ?? translation.first?.text }
+        let translation: [Translation]?
+        var english: String? {
+            let translations = translation ?? []
+            return translations.first { $0.language == "en" }?.text ?? translations.first?.text
+        }
     }
     private struct Translation: Decodable {
-        let text: String
+        let text: String?
         let language: String?
     }
     private struct Mercury: Decodable {
         let alert_type: String?
         let human_readable_active_period: Translated?
+        let affected_stations: [Informed]?
     }
 }

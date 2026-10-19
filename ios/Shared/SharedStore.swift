@@ -333,7 +333,7 @@ struct AppSettings: Codable, Hashable, Sendable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let defaults = AppSettings()
-        alertKinds = try container.decodeIfPresent(Set<ServiceAlert.Kind>.self, forKey: .alertKinds) ?? defaults.alertKinds
+        alertKinds = try container.decodeIfPresent(ServiceAlert.KnownKinds.self, forKey: .alertKinds)?.kinds ?? defaults.alertKinds
         stepFree = try container.decodeIfPresent(Bool.self, forKey: .stepFree) ?? defaults.stepFree
         largerWidgetText = try container.decodeIfPresent(Bool.self, forKey: .largerWidgetText) ?? defaults.largerWidgetText
         marksLiveTimes = try container.decodeIfPresent(Bool.self, forKey: .marksLiveTimes) ?? defaults.marksLiveTimes
