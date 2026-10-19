@@ -34,6 +34,12 @@ struct TrainLiveActivity: Widget {
                                 .foregroundStyle(shownState(context).isLive ? Color.liveGreen : .white)
                         }
                         .padding(.horizontal, 8)
+                        if let notice = shownState(context).notice {
+                            noticeLabel(notice)
+                                .lineLimit(1)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 8)
+                        }
                         HStack(spacing: 8) {
                             RefreshButton(route: trainRoute(context), fills: true)
                             WalkButton(intent: StopCountdownIntent(), route: trainRoute(context), running: true, fills: true)
@@ -43,13 +49,19 @@ struct TrainLiveActivity: Widget {
                     }
                 }
             } compactLeading: {
-                LineBullet(route: trainRoute(context), size: 20)
+                // The countdown beside it has no room for its mark
+                HStack(spacing: 2) {
+                    LineBullet(route: trainRoute(context), size: 20)
+                    statusMark(context, size: 10)
+                        .foregroundStyle(shownState(context).isLive ? Color.liveGreen : .white)
+                }
             } compactTrailing: {
                 countdown(context)
                     .monospacedDigit()
                     .multilineTextAlignment(.trailing)
                     .frame(maxWidth: 52)
                     .foregroundStyle(shownState(context).isLive ? Color.liveGreen : .white)
+                    .accessibilityValue(status(context))
             } minimal: {
                 LineBullet(route: trainRoute(context), size: 20)
             }
@@ -70,31 +82,31 @@ private struct CountdownBanner: View {
                     Text(context.attributes.heading).font(.caption).foregroundStyle(Color.boardGray)
                 }
                 .lineLimit(1)
+                .accessibilityElement(children: .combine)
                 Spacer()
                 buttons(context)
+                    // Read after the countdown, not before it
+                    .accessibilityElement(children: .contain)
+                    .accessibilitySortPriority(-1)
             }
             // The mark goes first: the countdown takes all the width it's given
             HStack(spacing: 6) {
-                if marksLive(context) {
-                    LiveMark(size: 18)
-                } else if marksScheduled(context) {
-                    ScheduledMark(size: 18)
-                }
+                statusMark(context, size: 18)
                 countdown(context)
                     .font(.system(size: 40, weight: .bold, design: .rounded))
                     .monospacedDigit()
                     .multilineTextAlignment(.leading)
             }
             .foregroundStyle(shownState(context).isLive ? Color.liveGreen : .white)
+            .accessibilityElement(children: .combine)
+            .accessibilityValue(status(context))
             Text(summary(context))
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(Color.boardGray)
                 .lineLimit(1)
             HStack {
                 if let notice = shownState(context).notice {
-                    Label(notice, systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.orange)
+                    noticeLabel(notice)
                 }
                 Spacer()
                 // Stale once its train is due; with a next train it's moved on to that
@@ -106,26 +118,7 @@ private struct CountdownBanner: View {
             }
         }
         .padding(16)
-    }
-}
-
-extension TrainActivityAttributes.ContentState {
-    /// Once the train has gone, the first of the following trains still to
-    /// come, as though it were the one counted down to; or, with none, as it
-    /// is. The countdown is out of date as its train is due, and iOS redraws
-    /// it then, so it moves on without the app. Only once, though: nothing
-    /// redraws it again until the app updates it. A following train's trip
-    /// and where it ends aren't known; it's taken to be live if this one was.
-    func movedOn(at now: Date) -> Self {
-        guard train <= now, let index = following.firstIndex(where: { $0 > now }) else { return self }
-        var state = self
-        state.train = following[index]
-        state.trip = ""
-        state.terminal = nil
-        if let routes = followingRoutes, index < routes.count { state.route = routes[index] }
-        state.following = Array(following.dropFirst(index + 1))
-        state.followingRoutes = followingRoutes.map { Array($0.dropFirst(index + 1)) }
-        return state
+        .accessibilityElement(children: .contain)
     }
 }
 
@@ -157,11 +150,7 @@ private func markedCountdown(_ context: ActivityViewContext<TrainActivityAttribu
     let remaining = shownState(context).train.timeIntervalSinceNow
     let placeholder = remaining >= 3600 ? "0:00:00" : remaining >= 600 ? "00:00" : "0:00"
     return HStack(spacing: 4) {
-        if marksLive(context) {
-            LiveMark(size: markSize)
-        } else if marksScheduled(context) {
-            ScheduledMark(size: markSize)
-        }
+        statusMark(context, size: markSize)
         Text(placeholder)
             .hidden()
             .overlay(alignment: .trailing) {
@@ -170,6 +159,32 @@ private func markedCountdown(_ context: ActivityViewContext<TrainActivityAttribu
             .font(.system(size: size, weight: .bold, design: .rounded))
             .monospacedDigit()
     }
+    .accessibilityElement(children: .combine)
+    .accessibilityValue(status(context))
+}
+
+/// The live or scheduled mark, as Settings or the phone asks. VoiceOver has
+/// the countdown's `status` instead, marked or not.
+@ViewBuilder
+private func statusMark(_ context: ActivityViewContext<TrainActivityAttributes>, size: CGFloat) -> some View {
+    if marksLive(context) {
+        LiveMark(size: size).accessibilityHidden(true)
+    } else if marksScheduled(context) {
+        ScheduledMark(size: size).accessibilityHidden(true)
+    }
+}
+
+/// "Live" or "Scheduled", which the countdown otherwise shows by its colour alone.
+private func status(_ context: ActivityViewContext<TrainActivityAttributes>) -> String {
+    shownState(context).isLive ? "Live" : "Scheduled"
+}
+
+/// What's in the way, or that there are no trains.
+private func noticeLabel(_ notice: String) -> some View {
+    Label(notice, systemImage: "exclamationmark.triangle.fill")
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(.orange)
+        .accessibilityLabel("Alert: \(notice)")
 }
 
 /// Whether the countdown's train is live and Settings › Mark live times, or the

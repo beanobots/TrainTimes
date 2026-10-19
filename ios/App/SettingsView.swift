@@ -11,10 +11,13 @@ final class SettingsStore {
             guard settings != oldValue else { return }
             SharedStore.saveSettings(settings)
             WidgetCenter.shared.reloadAllTimelines()
-            // The countdown's alert, and its live and scheduled marks, only change as it's updated
-            if settings.alertKinds != oldValue.alertKinds || settings.marksLiveTimes != oldValue.marksLiveTimes
-                || settings.marksScheduledTimes != oldValue.marksScheduledTimes {
+            // The countdown's alert changes only with new times; its live and
+            // scheduled marks are redrawn at once, without waiting on the network
+            if settings.alertKinds != oldValue.alertKinds {
                 Task { await TrainActivityController.refresh() }
+            } else if settings.marksLiveTimes != oldValue.marksLiveTimes
+                        || settings.marksScheduledTimes != oldValue.marksScheduledTimes {
+                Task { await TrainActivityController.redraw() }
             }
         }
     }

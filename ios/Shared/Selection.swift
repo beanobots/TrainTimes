@@ -59,6 +59,15 @@ struct Selection: Codable, Hashable, Sendable {
     /// "R", or "N/R" with more than one line chosen.
     var linesLabel: String { routes.map { LineStyle.of($0).label }.joined(separator: "/") }
 
+    /// Its station, direction and lines: which train this is, whatever the
+    /// walking time. Also its `StopEntity` id.
+    var trainID: String { Self.trainID(stationID: stationID, direction: direction, routes: routes) }
+
+    /// "R34:N:R": station, direction, line; "R31:N:N,R" for more than one line.
+    static func trainID(stationID: String, direction: Direction, routes: [String]) -> String {
+        "\(stationID):\(direction.rawValue):\(routes.joined(separator: ","))"
+    }
+
     /// When to set off to reach the platform as `train` arrives.
     func leaveTime(for train: Arrival) -> Date {
         train.time.addingTimeInterval(-TimeInterval(walkMinutes * 60))

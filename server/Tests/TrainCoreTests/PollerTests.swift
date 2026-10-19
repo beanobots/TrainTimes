@@ -62,7 +62,8 @@ func testRegistration(token: String = sampleToken, owner: String = "key", starte
         #expect(first.environment == .production)
         // Follows the trip the app registered
         #expect(first.state.trip == "b")
-        #expect(first.staleDate == first.state.train.addingTimeInterval(120))
+        // Out of date as its train is due, as the app makes it
+        #expect(first.staleDate == first.state.train)
         #expect(await store.registration(for: sampleToken)?.lastState == first.state)
 
         await poller.pass(at: now.addingTimeInterval(30))
@@ -72,6 +73,45 @@ func testRegistration(token: String = sampleToken, owner: String = "key", starte
         first = try #require(pusher.pushes.last)
         #expect(pusher.pushes.count == 2)
         #expect(first.priority == 5)
+    }
+
+    @Test func movesOnToTheNextTrainWithoutTakingOffTheWalkAgain() async throws {
+        let store = try Store(directory: nil)
+        var registration = testRegistration()
+        registration.selection.walkMinutes = 5
+        _ = try await store.upsert(registration, maxTotal: 10, maxPerOwner: 5)
+        let pusher = FakePusher()
+        // The feed drops each train once it's due
+        let poller = Poller(store: store, pusher: pusher, interval: 30) { selections, time in
+            var board = fixtureBoard()
+            board.trains.removeAll { $0.time <= time }
+            return Dictionary(selections.map { ($0, board) }, uniquingKeysWith: { a, _ in a })
+        }
+        await poller.pass(at: now)
+        #expect(pusher.pushes.last?.state.trip == "b")
+        // b has gone; c, 2 minutes away, is too soon to walk to from home, but you set off when it started
+        await poller.pass(at: now.addingTimeInterval(7 * 60))
+        #expect(pusher.pushes.count == 2)
+        #expect(pusher.pushes.last?.state.trip == "c")
+    }
+
+    @Test func noTrainsKeepsTheLastTrainAndNamesTheAlert() async throws {
+        let store = try Store(directory: nil)
+        try await registered(store)
+        let pusher = FakePusher()
+        let poller = Poller(store: store, pusher: pusher, interval: 30) { selections, time in
+            var board = fixtureBoard()
+            if time > now { board.trains = [] }
+            return Dictionary(selections.map { ($0, board) }, uniquingKeysWith: { a, _ in a })
+        }
+        await poller.pass(at: now)
+        let first = try #require(pusher.pushes.last)
+        await poller.pass(at: now.addingTimeInterval(30))
+        let second = try #require(pusher.pushes.last)
+        #expect(pusher.pushes.count == 2)
+        #expect(second.state.train == first.state.train)
+        #expect(second.state.following.isEmpty)
+        #expect(second.state.notice == "Service change")
     }
 
     @Test func keepsTheLastStateWithoutFeeds() async throws {

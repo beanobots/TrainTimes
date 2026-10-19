@@ -4,25 +4,13 @@ import Foundation
 import WidgetKit
 
 /// A countdown to one train on the Lock Screen and in the Dynamic Island.
+///
+/// iOS keeps these encoded while the countdown runs, across updates of the
+/// app, so like `ContentState` they must keep decoding what older versions
+/// wrote: a property added here has to be optional.
 struct TrainActivityAttributes: ActivityAttributes {
-    struct ContentState: Codable, Hashable {
-        /// When the train reaches the platform.
-        var train: Date
-        /// Its trip in the feed, so a refresh follows the same train.
-        var trip: String
-        var isLive: Bool
-        var terminal: String?
-        /// The next couple of trains after it.
-        var following: [Date]
-        /// "Delays", "Elevator out", when there's something to know.
-        var notice: String?
-        var updated: Date
-        /// Its line, which can be another one running on yours; nil from countdowns
-        /// started before trains of other lines were shown.
-        var route: String? = nil
-        /// The lines of `following`.
-        var followingRoutes: [String]? = nil
-    }
+    /// Shared with the push server, which sends it too.
+    typealias ContentState = CountdownState
 
     var selection: Selection
     var stationName: String

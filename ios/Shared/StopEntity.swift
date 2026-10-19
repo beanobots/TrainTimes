@@ -7,7 +7,7 @@ struct StopEntity: AppEntity {
     static let typeDisplayRepresentation: TypeDisplayRepresentation = "Train"
     static let defaultQuery = StopQuery()
 
-    /// "R34:N:R": station, direction, line; "R31:N:N,R" for more than one line.
+    /// A `Selection.trainID`: "R34:N:R", or "R31:N:N,R" for more than one line.
     let id: String
     let stationID: String
     let direction: Direction
@@ -17,7 +17,7 @@ struct StopEntity: AppEntity {
         self.stationID = stationID
         self.direction = direction
         self.routes = routes
-        id = "\(stationID):\(direction.rawValue):\(routes.joined(separator: ","))"
+        id = Selection.trainID(stationID: stationID, direction: direction, routes: routes)
     }
 
     init?(id: String) {
@@ -66,10 +66,6 @@ struct StopEntity: AppEntity {
 }
 
 extension Selection {
-    /// Its station, direction and lines, as a `StopEntity` id: which train this is,
-    /// whatever the walking time.
-    var trainID: String { StopEntity(stationID: stationID, direction: direction, routes: routes).id }
-
     /// Its train and which alerts it mentions: whether its widgets' alert is
     /// open is kept by this, so a widget that leaves an alert out doesn't close
     /// it on another that mentions it.

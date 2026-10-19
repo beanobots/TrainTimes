@@ -122,13 +122,14 @@ final class Poller: Service {
                     trainsWithoutFeeds.insert(registration.selection.trainID)
                     continue
                 }
+                // As the app refreshes it (Shared/Countdown.swift)
                 let state: ContentState
-                if let new = ActivityState.state(for: registration.selection, board: board, now: now,
-                                                 following: registration.lastState?.trip ?? registration.trip,
-                                                 settings: registration.settings) {
+                if let last = registration.lastState {
+                    state = last.refreshed(for: registration.selection, board: board, settings: registration.settings,
+                                           now: now)
+                } else if let new = ContentState(for: registration.selection, board: board, settings: registration.settings,
+                                                 now: now, following: registration.trip, after: nil) {
                     state = new
-                } else if let last = registration.lastState {
-                    state = ActivityState.noTrains(from: last, now: now)
                 } else {
                     // Nothing pushed yet, and nothing to push: the app's own state stands
                     continue

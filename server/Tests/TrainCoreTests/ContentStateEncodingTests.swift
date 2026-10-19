@@ -5,7 +5,7 @@ import Testing
 /// ActivityKit decodes content-state with a default JSONDecoder: dates are
 /// seconds since 2001-01-01 (`.deferredToDate`), keys are the property names.
 @Suite struct ContentStateEncodingTests {
-    // 2026-05-07 21:46:40 UTC, as seconds since 2001 and since 1970
+    // 2026-05-09 06:13:20 UTC, as seconds since 2001 and since 1970
     let train = Date(timeIntervalSinceReferenceDate: 800_000_000)
     let since1970 = 800_000_000 + 978_307_200
 
@@ -48,19 +48,67 @@ import Testing
         #expect(Set(json.keys) == ["train", "trip", "isLive", "following", "updated"])
     }
 
-    /// What the app's own `TrainActivityAttributes.ContentState` decodes from,
-    /// written by hand: this must keep decoding, and encode back the same.
+    /// Decodes `json` as ActivityKit does, and encodes it back.
+    func roundTrip(_ json: String) throws -> (decoded: ContentState, reencoded: NSDictionary?, original: NSDictionary?) {
+        let decoded = try JSONDecoder().decode(ContentState.self, from: Data(json.utf8))
+        let reencoded = try JSONSerialization.jsonObject(with: ContentState.encoder().encode(decoded)) as? NSDictionary
+        let original = try JSONSerialization.jsonObject(with: Data(json.utf8)) as? NSDictionary
+        return (decoded, reencoded, original)
+    }
+
+    /// What the app's `TrainActivityAttributes.ContentState`, this same type,
+    /// decodes from, written by hand: this must keep decoding, and encode back
+    /// the same.
     @Test func roundTripsThePinnedFormat() throws {
         let pinned = """
             {"train":800000000,"trip":"091200_R..N","isLive":true,"terminal":"Forest Hills",\
             "following":[800000300,800000600.5],"notice":"Delays","updated":799999760,\
             "route":"R","followingRoutes":["R","N"]}
             """
-        let decoded = try JSONDecoder().decode(ContentState.self, from: Data(pinned.utf8))
+        let (decoded, reencoded, original) = try roundTrip(pinned)
         #expect(decoded == full)
-        let reencoded = try JSONSerialization.jsonObject(with: ContentState.encoder().encode(decoded)) as? NSDictionary
-        let original = try JSONSerialization.jsonObject(with: Data(pinned.utf8)) as? NSDictionary
         #expect(reencoded == original)
+    }
+
+    /// As the app posted it before trains of other lines were shown: iOS can
+    /// still be keeping a countdown started then, and the server one it pushed.
+    @Test func roundTripsWhatOlderVersionsWrote() throws {
+        let old = """
+            {"train":800000000,"trip":"091200_R..N","isLive":true,"terminal":"Forest Hills",\
+            "following":[800000300,800000600.5],"notice":"Delays","updated":799999760}
+            """
+        let (decoded, reencoded, original) = try roundTrip(old)
+        var expected = full
+        expected.route = nil
+        expected.followingRoutes = nil
+        #expect(decoded == expected)
+        #expect(reencoded == original)
+    }
+
+    /// As the app posts it now, with Settings' marks.
+    @Test func roundTripsTheMarks() throws {
+        let new = """
+            {"train":800000000,"trip":"091200_R..N","isLive":true,"terminal":"Forest Hills",\
+            "following":[800000300,800000600.5],"notice":"Delays","updated":799999760,\
+            "route":"R","followingRoutes":["R","N"],"marksLiveTimes":true,"marksScheduledTimes":false}
+            """
+        let (decoded, reencoded, original) = try roundTrip(new)
+        var expected = full
+        expected.marksLiveTimes = true
+        expected.marksScheduledTimes = false
+        #expect(decoded == expected)
+        #expect(reencoded == original)
+    }
+
+    /// A later version of the app, or of the server, can add an optional
+    /// property; this one still decodes what that sends.
+    @Test func decodesWhatALaterVersionAdds() throws {
+        let later = """
+            {"train":800000000,"trip":"091200_R..N","isLive":true,"terminal":"Forest Hills",\
+            "following":[800000300,800000600.5],"notice":"Delays","updated":799999760,\
+            "route":"R","followingRoutes":["R","N"],"leaves":800000090}
+            """
+        #expect(try JSONDecoder().decode(ContentState.self, from: Data(later.utf8)) == full)
     }
 
     @Test func pushPayloadHasUnixTimesOutsideAndActivityKitTimesInside() throws {
@@ -71,7 +119,8 @@ import Testing
         let aps = try #require(json["aps"] as? [String: Any])
         #expect(aps["event"] as? String == "update")
         #expect(aps["timestamp"] as? Int == since1970 - 240)
-        #expect(aps["stale-date"] as? Int == since1970 + 120)
+        // As the train is due, as the app has it
+        #expect(aps["stale-date"] as? Int == since1970)
         #expect(aps["dismissal-date"] == nil)
         let contentState = try #require(aps["content-state"] as? [String: Any])
         #expect(contentState["train"] as? Double == 800_000_000)

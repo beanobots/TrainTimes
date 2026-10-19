@@ -19,8 +19,8 @@ enum TrainActivityController {
         }
     }
 
-    /// iOS ends a Live Activity after 8 hours.
-    private static let lifetime: TimeInterval = 8 * 60 * 60
+    /// How old the times a widget saved can be for a countdown to start from them.
+    private static let savedBoardAge: TimeInterval = 5 * 60
 
     /// Countdowns still running: not ones that have ended or been swiped away.
     private static var running: [Activity<TrainActivityAttributes>] {
@@ -37,10 +37,10 @@ enum TrainActivityController {
         running.first { $0.attributes.selection.trainID == selection.trainID }?.content.state.train
     }
 
-    /// The last of `start`, `toggle`, `refresh` and `endAll` asked for. They
-    /// run one at a time: each waits on the network or on iOS, and two at once
-    /// (a double tap) could leave two countdowns running, or have a toggle
-    /// start one rather than stop it.
+    /// The last of `start`, `toggle`, `refresh`, `redraw` and `endAll` asked
+    /// for. They run one at a time: each waits on the network or on iOS, and
+    /// two at once (a double tap) could leave two countdowns running, or have
+    /// a toggle start one rather than stop it.
     @MainActor private static var last: Task<Void, Never>?
 
     /// Runs `body` once everything asked for before it has finished.
@@ -65,26 +65,33 @@ enum TrainActivityController {
     /// `widgetID` is the widget whose walk button asked for it, if one did.
     ///
     /// It starts as soon as it has a train to count down to: from the times a
-    /// widget last saved for this train, or else from the chosen lines' own
-    /// feed alone. Then it fetches everything, the alert and rerouted trains
-    /// too, and updates the countdown with them.
+    /// widget saved for this train in the last few minutes, or else from the
+    /// chosen lines' own feed alone. Then it fetches everything, the alert and
+    /// rerouted trains too, and updates the countdown with them.
     private static func startNow(for selection: Selection, widgetID: String? = nil) async throws -> Date {
         guard ActivityAuthorizationInfo().areActivitiesEnabled else { throw Problem.notAllowed }
         let now = Date.now
         var fullBoard: Board?
-        var state: TrainActivityAttributes.ContentState?
-        if let saved = SharedStore.loadBoard(for: selection) {
-            state = Self.state(for: selection, trains: saved.trains, notice: saved.notice?.label, now: now, following: nil)
+        var fromOwnLines = false
+        var state: CountdownState?
+        if let saved = SharedStore.loadBoard(for: selection), now.timeIntervalSince(saved.fetched) < savedBoardAge {
+            state = CountdownState(for: selection, trains: saved.trains, notice: saved.notice?.label, now: now,
+                                   following: nil, after: nil)
+            // Updated when they were
+            state?.updated = saved.fetched
         }
         if state == nil, let quick = try? await TrainService.board(for: selection, includingAlerts: false,
                                                                     includingOtherLines: false, now: now) {
-            state = Self.state(for: selection, board: quick, now: now, following: nil)
+            state = CountdownState(for: selection, board: quick, settings: SharedStore.loadSettings(), now: now,
+                                   following: nil, after: nil)
+            fromOwnLines = state != nil
         }
         if state == nil {
             // None on the chosen lines' own feed, or it failed: maybe a rerouted train
             let board = try await fetchAll(for: selection)
             fullBoard = board
-            state = Self.state(for: selection, board: board, now: .now, following: nil)
+            state = CountdownState(for: selection, board: board, settings: SharedStore.loadSettings(), now: .now,
+                                   following: nil, after: nil)
         }
         guard let state else { throw Problem.noTrains }
         let attributes = TrainActivityAttributes(
@@ -96,12 +103,19 @@ enum TrainActivityController {
         // the old countdown, and what the widgets show, stay as they were
         let activity = try Activity.request(attributes: attributes, content: content(state))
         await endActivities(except: activity.id)
-        tellWidgets(SharedStore.Countdown(trainID: selection.trainID, ends: now.addingTimeInterval(lifetime),
+        tellWidgets(SharedStore.Countdown(trainID: selection.trainID, ends: now.addingTimeInterval(CountdownState.lifetime),
                                           widgetID: widgetID), tapped: widgetID)
-        guard fullBoard == nil else { return state.train }
-        // It's up; now the alert and any rerouted trains, following the same train
-        guard let board = try? await fetchAll(for: selection),
-              let full = Self.state(for: selection, board: board, now: .now, following: state.trip) else { return state.train }
+        // It's up; now the alert and any rerouted trains, for the same train
+        guard fullBoard == nil, let board = try? await fetchAll(for: selection) else { return state.train }
+        let settings = SharedStore.loadSettings()
+        let fetched = Date.now
+        let same = CountdownState(for: selection, board: board, settings: settings, now: fetched,
+                                  following: state.trip, after: state.train)
+        // Unless the chosen lines' own feed missed a sooner one, of another line running on yours
+        let sooner = fromOwnLines
+            ? CountdownState(for: selection, board: board, settings: settings, now: fetched, following: nil, after: nil)
+            : nil
+        guard let full = [same, sooner].compactMap({ $0 }).min(by: { $0.train < $1.train }) else { return state.train }
         await activity.update(content(full))
         return full.train
     }
@@ -141,18 +155,31 @@ enum TrainActivityController {
         for activity in running {
             let selection = activity.attributes.selection
             let now = Date.now
-            guard let board = try? await TrainService.board(for: selection, includingOutages: selection.elevatorAlerts, now: now) else { continue }
-            SharedStore.saveBoard(board, for: selection, fetched: .now)
-            if let state = state(for: selection, board: board, now: now, following: activity.content.state.trip) {
-                await activity.update(content(state))
-            } else {
-                var state = activity.content.state
-                state.following = []
-                state.notice = "No trains predicted"
-                state.updated = now
-                await activity.update(content(state))
+            guard let board = try? await TrainService.board(for: selection, includingOutages: selection.elevatorAlerts, now: now) else {
+                // Its times stay as they were, but not its marks, should Settings have changed them
+                await redraw(activity)
+                continue
             }
+            SharedStore.saveBoard(board, for: selection, fetched: .now)
+            let state = activity.content.state.refreshed(for: selection, board: board, settings: SharedStore.loadSettings(),
+                                                         now: now)
+            await activity.update(content(state))
         }
+    }
+
+    /// Redraws every running countdown with Settings' marks for live and
+    /// scheduled times, keeping its times.
+    static func redraw() async {
+        _ = try? await inTurn {
+            for activity in running { await redraw(activity) }
+        }
+    }
+
+    /// Posts `activity`'s state again if Settings' marks have changed since.
+    private static func redraw(_ activity: Activity<TrainActivityAttributes>) async {
+        let marked = content(activity.content.state)
+        guard marked.state != activity.content.state else { return }
+        await activity.update(marked)
     }
 
     static func endAll() async {
@@ -186,42 +213,14 @@ enum TrainActivityController {
     }
 
     /// Out of date as the train is due, so iOS redraws the countdown then, and
-    /// it moves on to the next train it has; see `ContentState.movedOn(at:)`.
-    private static func content(_ state: TrainActivityAttributes.ContentState) -> ActivityContent<TrainActivityAttributes.ContentState> {
-        ActivityContent(state: state, staleDate: state.train)
-    }
-
-    /// The tracked trip if it's still coming; when starting, the first train you
-    /// can catch; once the tracked train has gone, the next one you can catch.
-    private static func state(for selection: Selection, board: Board, now: Date, following trip: String?) -> TrainActivityAttributes.ContentState? {
-        state(for: selection, trains: board.trains, notice: board.notice(for: selection, settings: SharedStore.loadSettings())?.label,
-              now: now, following: trip)
-    }
-
-    /// `notice` is the label of the alert to mention, if any.
-    private static func state(for selection: Selection, trains: [Arrival], notice: String?, now: Date,
-                              following trip: String?) -> TrainActivityAttributes.ContentState? {
-        let upcoming = trains.filter { $0.time > now }
-        let catchable = selection.catchable(upcoming, now: now).first
-        let target: Arrival?
-        // A trip without an id can't be told from another one without
-        if let trip, !trip.isEmpty {
-            target = upcoming.first { $0.trip == trip } ?? catchable
-        } else {
-            target = catchable
-        }
-        guard let target else { return nil }
-        let following = upcoming.filter { $0.time > target.time }.prefix(2)
-        return TrainActivityAttributes.ContentState(
-            train: target.time,
-            trip: target.trip,
-            isLive: target.isLive,
-            terminal: target.terminal,
-            following: following.map(\.time),
-            notice: notice,
-            updated: now,
-            route: target.route,
-            followingRoutes: following.map(\.route)
-        )
+    /// it moves on to the next train it has; see `CountdownState.movedOn(at:)`.
+    /// It carries Settings' marks for live and scheduled times, so that
+    /// changing them redraws it.
+    private static func content(_ state: CountdownState) -> ActivityContent<CountdownState> {
+        var state = state
+        let settings = SharedStore.loadSettings()
+        state.marksLiveTimes = settings.marksLiveTimes
+        state.marksScheduledTimes = settings.marksScheduledTimes
+        return ActivityContent(state: state, staleDate: state.staleDate)
     }
 }
