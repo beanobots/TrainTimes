@@ -30,11 +30,30 @@ import Testing
     @Test func dailyLimitResetsAtMidnightUTC() async {
         let limiter = DailyLimiter(limit: 2)
         let day = Date(timeIntervalSince1970: 86400 * 20000 + 100)
-        #expect(await limiter.take("ip", now: day))
-        #expect(await limiter.take("ip", now: day))
-        #expect(await !limiter.take("ip", now: day.addingTimeInterval(3600)))
-        #expect(await limiter.take("other", now: day))
-        #expect(await limiter.take("ip", now: day.addingTimeInterval(86400)))
+        // Asking uses up nothing; recording does
+        #expect(await limiter.allows("ip", now: day))
+        #expect(await limiter.allows("ip", now: day))
+        await limiter.record("ip", now: day)
+        #expect(await limiter.allows("ip", now: day))
+        await limiter.record("ip", now: day)
+        #expect(await !limiter.allows("ip", now: day.addingTimeInterval(3600)))
+        #expect(await limiter.allows("other", now: day))
+        #expect(await limiter.allows("ip", now: day.addingTimeInterval(86400)))
+        #expect(await limiter.tracked == 0)
+        // Until the next midnight UTC
+        #expect(DailyLimiter.secondsUntilReset(now: day) == 86300)
+        #expect(DailyLimiter.secondsUntilReset(now: day.addingTimeInterval(86299.5)) == 1)
+        #expect(DailyLimiter.secondsUntilReset(now: day.addingTimeInterval(-100)) == 86400)
+    }
+
+    @Test func dailyLimitRefusesNewClientsWhenTrackingTooMany() async {
+        let limiter = DailyLimiter(limit: 2, maxTracked: 3)
+        for client in ["a", "b", "c"] { await limiter.record(client, now: now) }
+        #expect(await !limiter.allows("d", now: now))
+        // Those it knows keep their share
+        #expect(await limiter.allows("a", now: now))
+        // And a new day starts afresh
+        #expect(await limiter.allows("d", now: now.addingTimeInterval(86400)))
     }
 
     @Test func challengesAreSingleUseExpireAndAreCapped() async throws {
@@ -70,6 +89,27 @@ import Testing
         _ = await store.issue(for: "c", now: now.addingTimeInterval(700))
         #expect(await store.outstanding == 1)
         #expect(await store.clientCount == 1)
+    }
+
+    @Test func usedChallengesDontPileUp() async throws {
+        let store = ChallengeStore(limit: 10, perClient: 10)
+        // Each used as soon as it's issued, all within their 5 minutes
+        for i in 0..<10_000 {
+            let at = now.addingTimeInterval(Double(i) / 100)
+            let challenge = try #require(await store.issue(for: "a", now: at).value)
+            #expect(await store.consume(challenge, now: at))
+        }
+        #expect(await store.outstanding == 0)
+        #expect(await store.queued <= 2 * 1024 + 1)
+        // Those still outstanding are kept, and still expire
+        let kept = try #require(await store.issue(for: "a", now: now.addingTimeInterval(100)).value)
+        for i in 0..<3000 {
+            let at = now.addingTimeInterval(100 + Double(i) / 100)
+            let challenge = try #require(await store.issue(for: "b", now: at).value)
+            #expect(await store.consume(challenge, now: at))
+        }
+        #expect(await store.queued <= 2 * 1024 + 1)
+        #expect(await store.consume(kept, now: now.addingTimeInterval(200)))
     }
 
     @Test func trustsCFConnectingIPOnlyFromLoopback() throws {

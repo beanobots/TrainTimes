@@ -1,4 +1,4 @@
-// swift-tools-version:6.0
+// swift-tools-version:6.2
 import PackageDescription
 
 let package = Package(
@@ -14,7 +14,7 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-crypto.git", "3.0.0"..<"5.0.0"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.5.0"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
-        .package(url: "https://github.com/apple/swift-certificates.git", from: "1.0.0"),
+        .package(url: "https://github.com/apple/swift-certificates.git", from: "1.15.0"),
         .package(url: "https://github.com/apple/swift-asn1.git", from: "1.0.0"),
         .package(url: "https://github.com/apple/swift-http-types.git", from: "1.0.0"),
     ],
@@ -27,7 +27,7 @@ let package = Package(
         ),
         // The app's own feed code (Shared/, symlinked from ../ios/Shared), and
         // the server's logic, which needs its internal types. SQLite is the
-        // system's libsqlite3 (`import SQLite3`).
+        // system's libsqlite3 (`import SQLite3`), a module only macOS's SDK has.
         .target(
             name: "TrainCore",
             dependencies: [
@@ -53,6 +53,7 @@ let package = Package(
             dependencies: [
                 "TrainCore",
                 .product(name: "HummingbirdTesting", package: "hummingbird"),
+                .product(name: "APNSCore", package: "APNSwift"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "X509", package: "swift-certificates"),
                 .product(name: "SwiftASN1", package: "swift-asn1"),

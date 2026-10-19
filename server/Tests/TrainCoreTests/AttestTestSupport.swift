@@ -78,14 +78,15 @@ struct TestAuthority {
     func attestation(appID: String, challenge: [UInt8], deviceKey: P256.Signing.PrivateKey,
                      environment: AttestEnvironment = .production, counter: UInt32 = 0,
                      credentialID: [UInt8]? = nil, nonceChallenge: [UInt8]? = nil,
-                     signer: P256.Signing.PrivateKey? = nil, extraCertificates: [Certificate] = []) throws -> [UInt8] {
+                     signer: P256.Signing.PrivateKey? = nil, extraCertificates: [Certificate] = [],
+                     flags: UInt8 = 0x40, aaguid: [UInt8]? = nil) throws -> [UInt8] {
         let keyID = Self.keyID(of: deviceKey)
         let credential = credentialID ?? keyID
         // Built a piece at a time: as one `+` chain it's too much for the type checker
         var authData: [UInt8] = Array(SHA256.hash(data: Data(appID.utf8)))
-        authData.append(0x40)
+        authData.append(flags)
         authData += withUnsafeBytes(of: counter.bigEndian) { Array($0) }
-        authData += environment.aaguid
+        authData += aaguid ?? environment.aaguid
         authData += [UInt8(credential.count >> 8), UInt8(credential.count & 0xff)]
         authData += credential
         authData.append(0xa0) // a COSE key, which isn't looked at

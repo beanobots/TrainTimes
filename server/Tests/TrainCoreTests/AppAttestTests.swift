@@ -133,6 +133,11 @@ import Testing
             (try authority.attestation(appID: appID, challenge: challenge, deviceKey: device, credentialID: [UInt8](repeating: 7, count: 32)), .keyIDMismatch),
             (try authority.attestation(appID: appID, challenge: challenge, deviceKey: device, nonceChallenge: Array("old".utf8)), .nonceMismatch),
             (try authority.attestation(appID: appID, challenge: challenge, deviceKey: device, signer: P256.Signing.PrivateKey()), .untrustedChain),
+            // Certified by the chain, yet not what App Attest makes
+            (try authority.attestation(appID: appID, challenge: challenge, deviceKey: device, aaguid: Array("appattestfuture!".utf8)),
+             .malformed("aaguid")),
+            (try authority.attestation(appID: appID, challenge: challenge, deviceKey: device, flags: 0x00),
+             .malformed("no attested credential data")),
         ]
         for (attestation, problem) in cases {
             await #expect(throws: problem) {
@@ -162,6 +167,56 @@ import Testing
                                                         extraCertificates: extra)
             await #expect(throws: AppAttest.Problem.malformed("attestation object")) {
                 try await verifier(authority).verifyAttestation(attestation, keyID: keyID(device), challenge: challenge, now: .now)
+            }
+        }
+    }
+
+    @Test func authenticatorDataRefusesWhatsMalformed() throws {
+        let rpIDHash = [UInt8](repeating: 1, count: 32)
+        let aaguid = AttestEnvironment.production.aaguid
+        // rpIdHash, flags, a counter of 7, then the rest
+        func data(flags: UInt8, _ rest: [UInt8]) -> [UInt8] {
+            var bytes = rpIDHash
+            bytes += [flags, 0, 0, 0, 7]
+            return bytes + rest
+        }
+        let cases: [([UInt8], String)] = [
+            (Array(data(flags: 0x40, []).dropLast()), "authenticator data too short"),
+            (data(flags: 0x00, aaguid + [0, 0]), "no attested credential data"),
+            (data(flags: 0x40, aaguid + [0]), "attested credential data too short"),
+            (data(flags: 0x40, aaguid + [0xff, 0xff, 1, 2, 3]), "credential id truncated"),
+        ]
+        for (bytes, problem) in cases {
+            #expect(throws: AppAttest.Problem.malformed(problem)) { try AuthenticatorData(bytes, withCredential: true) }
+        }
+        let parsed = try AuthenticatorData(data(flags: 0x40, aaguid + [0, 3, 9, 8, 7, 0xa0]), withCredential: true)
+        #expect(parsed.rpIDHash == rpIDHash)
+        #expect(parsed.counter == 7)
+        #expect(parsed.aaguid == aaguid)
+        #expect(parsed.credentialID == [9, 8, 7])
+        // An assertion's stops after the counter, though Apple's set the AT flag
+        let assertion = try AuthenticatorData(data(flags: 0x40, []), withCredential: false)
+        #expect(assertion.counter == 7)
+        #expect(assertion.credentialID == nil)
+        #expect(throws: AppAttest.Problem.malformed("authenticator data too short")) {
+            try AuthenticatorData(Array(data(flags: 0x40, []).dropLast()), withCredential: false)
+        }
+    }
+
+    @Test func assertionsRefuseWhatsMalformed() throws {
+        let device = P256.Signing.PrivateKey()
+        let key = AttestKey(id: keyID(device), publicKey: device.publicKey.x963Representation, counter: 0,
+                            environment: .production, created: .now, lastUsed: .now)
+        let verifier = AppAttest(appID: appID, environments: [.production])
+        let cases: [([UInt8], String)] = [
+            ([0xff], "assertion CBOR"),
+            (CBORValue.map([("signature", .bytes([1]))]).encoded, "assertion object"),
+            (CBORValue.map([("signature", .bytes([1])), ("authenticatorData", .bytes([UInt8](repeating: 0, count: 36)))]).encoded,
+             "authenticator data too short"),
+        ]
+        for (assertion, problem) in cases {
+            #expect(throws: AppAttest.Problem.malformed(problem)) {
+                try verifier.verifyAssertion(assertion, clientData: Array("clientData".utf8), key: key)
             }
         }
     }

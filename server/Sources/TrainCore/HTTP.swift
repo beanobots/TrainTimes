@@ -21,7 +21,8 @@ struct AppContext: RequestContext, RemoteAddressRequestContext {
     /// A registration is a few hundred bytes; an attestation about 7 KB in base64.
     static let bodyLimit = 4 * 1024
     static let attestBodyLimit = 16 * 1024
-    var maxUploadSize: Int { Self.attestBodyLimit }
+    /// For a body read without a limit of its own: every route gives one.
+    var maxUploadSize: Int { Self.bodyLimit }
 }
 
 extension HTTPField.Name {
@@ -74,7 +75,7 @@ enum ClientData {
     /// the challenge, the method ("POST"), the path ("/activities"), and the
     /// lowercase hex SHA256 of the exact body bytes (of nothing, for DELETE).
     static func make(challenge: String, method: String, path: String, body: some Sequence<UInt8>) -> [UInt8] {
-        let bodyHash = SHA256.hash(data: Array(body)).map { String(format: "%02x", $0) }.joined()
+        let bodyHash = SHA256.hash(data: Array(body)).hex
         return Array([challenge, method, path, bodyHash].joined(separator: "\n").utf8)
     }
 }
@@ -85,6 +86,7 @@ struct HTTPServices: Sendable {
     var challenges: ChallengeStore
     var limiter: RateLimiter
     var keyCreation: DailyLimiter
+    var refusals: RefusalLog
     var auth: AuthMode
     var attest: AppAttest
     var limits: Limits
@@ -96,6 +98,7 @@ struct HTTPServices: Sendable {
         challenges = ChallengeStore(limit: limits.maxChallenges, perClient: limits.challengesPerIP)
         limiter = RateLimiter(perMinute: limits.requestsPerMinute, burst: limits.requestBurst)
         keyCreation = DailyLimiter(limit: limits.keysPerIPPerDay)
+        refusals = RefusalLog()
         let environments: Set<AttestEnvironment>
         if case .attest(let allowed) = auth { environments = allowed } else { environments = [] }
         attest = AppAttest(appID: appID, environments: environments, roots: roots)
@@ -125,10 +128,10 @@ enum HTTPRoutes {
                 case .challenge(let issued):
                     challenge = issued
                 case .clientFull(let retryAfter):
-                    log("challenges: \(services.limits.challengesPerIP) outstanding", context)
+                    await log("challenges: \(services.limits.challengesPerIP) outstanding", context, services)
                     return Response(status: .tooManyRequests, headers: [.retryAfter: String(retryAfter)])
                 case .full:
-                    Log.error("challenges: \(services.limits.maxChallenges) outstanding, refusing more")
+                    await services.refusals.error("challenges: \(services.limits.maxChallenges) outstanding, refusing more")
                     throw HTTPError(.serviceUnavailable)
                 }
                 let json = #"{"challenge":"\#(challenge)","expiresIn":\#(Int(ChallengeStore.lifetime))}"#
@@ -145,22 +148,25 @@ enum HTTPRoutes {
                     throw HTTPError(.badRequest)
                 }
                 guard await services.challenges.consume(attest.challenge) else {
-                    return refuse("attest: challenge unknown or expired", context)
+                    return await refuse("attest: challenge unknown or expired", context, services)
                 }
-                guard await services.keyCreation.take(context.clientIP) else {
-                    Log.info("attest: \(Redact.id(context.clientIP)) is over \(services.limits.keysPerIPPerDay) keys today")
-                    throw HTTPError(.tooManyRequests)
+                // Only keys made count, so attestations that fail don't use up the address's day
+                guard await services.keyCreation.allows(context.clientIP) else {
+                    await log("attest: no more keys today", context, services)
+                    return Response(status: .tooManyRequests,
+                                    headers: [.retryAfter: String(DailyLimiter.secondsUntilReset(now: .now))])
                 }
                 let key: AttestKey
                 do {
                     key = try await services.attest.verifyAttestation(
                         Array(attestation), keyID: attest.keyID, challenge: Array(attest.challenge.utf8), now: .now)
                 } catch {
-                    return refuse("attest: \(error)", context)
+                    return await refuse("attest: \(error)", context, services)
                 }
                 guard try await services.store.addKey(key) else {
                     throw HTTPError(.conflict)
                 }
+                await services.keyCreation.record(context.clientIP)
                 Log.info("attest: new key \(Redact.id(key.id)) (\(key.environment.rawValue)) from \(Redact.id(context.clientIP))")
                 return Response(status: .noContent)
             }
@@ -203,7 +209,7 @@ enum HTTPRoutes {
             switch try await services.store.upsert(entry, maxTotal: services.limits.maxRegistrations,
                                                    maxPerOwner: services.limits.maxRegistrationsPerKey) {
             case .full:
-                Log.error("register: MAX_REGISTRATIONS (\(services.limits.maxRegistrations)) reached")
+                await services.refusals.error("register: MAX_REGISTRATIONS (\(services.limits.maxRegistrations)) reached")
                 throw HTTPError(.serviceUnavailable)
             case .ownedByOther:
                 throw HTTPError(.forbidden)
@@ -243,7 +249,7 @@ enum HTTPRoutes {
         switch services.auth {
         case .secret(let secret):
             guard BearerAuth(secret: secret).isAuthorized(request.headers[.authorization]) else {
-                Log.info("auth: wrong or no API_SECRET from \(Redact.id(context.clientIP))")
+                await log("auth: wrong or no API_SECRET", context, services)
                 return nil
             }
             return Owner.secret
@@ -252,16 +258,21 @@ enum HTTPRoutes {
                   let assertionText = request.headers[.attestAssertion], assertionText.utf8.count <= 4096,
                   let assertion = Data(base64Encoded: assertionText),
                   let challenge = request.headers[.attestChallenge], challenge.utf8.count <= 128 else {
-                log("auth: missing or malformed X-Attest headers", context)
+                await log("auth: missing or malformed X-Attest headers", context, services)
                 return nil
             }
             guard await services.challenges.consume(challenge) else {
-                log("auth: challenge unknown or expired", context)
+                await log("auth: challenge unknown or expired", context, services)
                 return nil
             }
             let keyID = Data(keyIDBytes).base64EncodedString()
             guard let key = try await services.store.key(id: keyID) else {
-                log("auth: unknown key \(Redact.id(keyID))", context)
+                await log("auth: unknown key \(Redact.id(keyID))", context, services)
+                return nil
+            }
+            // Not a key attested while ATTEST_ENVIRONMENT allowed more than it does now
+            guard services.attest.environments.contains(key.environment) else {
+                await log("auth: key \(Redact.id(keyID)) is \(key.environment.rawValue), which isn't allowed", context, services)
                 return nil
             }
             let clientData = ClientData.make(challenge: challenge, method: request.method.rawValue,
@@ -270,24 +281,25 @@ enum HTTPRoutes {
             do {
                 counter = try services.attest.verifyAssertion(Array(assertion), clientData: clientData, key: key)
             } catch {
-                log("auth: key \(Redact.id(keyID)): \(error)", context)
+                await log("auth: key \(Redact.id(keyID)): \(error)", context, services)
                 return nil
             }
             // Atomically above the stored counter, so one assertion can't be used twice
             guard try await services.store.advanceCounter(keyID: keyID, to: counter, now: .now) else {
-                log("auth: key \(Redact.id(keyID)): counter not above the last", context)
+                await log("auth: key \(Redact.id(keyID)): counter not above the last", context, services)
                 return nil
             }
             return keyID
         }
     }
 
-    private static func log(_ message: String, _ context: AppContext) {
-        Log.info("\(message) from \(Redact.id(context.clientIP))")
+    /// A refused request's line, with who sent it.
+    private static func log(_ message: String, _ context: AppContext, _ services: HTTPServices) async {
+        await services.refusals.info("\(message) from \(Redact.id(context.clientIP))")
     }
 
-    private static func refuse(_ message: String, _ context: AppContext) -> Response {
-        log(message, context)
+    private static func refuse(_ message: String, _ context: AppContext, _ services: HTTPServices) async -> Response {
+        await log(message, context, services)
         return Response(status: .unauthorized)
     }
 }

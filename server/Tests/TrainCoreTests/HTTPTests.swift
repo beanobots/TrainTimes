@@ -16,13 +16,14 @@ func testLimits() -> Limits {
     return limits
 }
 
-func registrationBody(token: String = sampleToken, started: Date? = nil) throws -> [UInt8] {
+func registrationBody(token: String = sampleToken, started: Date? = nil, selection: Selection = prospect,
+                      trip: String = "091200_R..N") throws -> [UInt8] {
     var json: [String: Any] = [
         "token": token.uppercased(),
         "environment": "sandbox",
         // As the app's JSONEncoder writes a Selection
-        "selection": try JSONSerialization.jsonObject(with: JSONEncoder().encode(prospect)),
-        "trip": "091200_R..N",
+        "selection": try JSONSerialization.jsonObject(with: JSONEncoder().encode(selection)),
+        "trip": trip,
         "alertKinds": [0, 1],
     ]
     if let started { json["started"] = started.timeIntervalSinceReferenceDate }
@@ -44,12 +45,26 @@ func text(_ response: TestResponse) -> String {
     }
 
     @Test func healthNeedsNoAuthAndSaysOnlyOk() async throws {
-        try await withApp { (client, _) async throws in
+        let services = HTTPServices(store: try Store(directory: nil), auth: .secret(secret), appID: testAppID,
+                                    limits: testLimits())
+        let config = try Config(environment: [
+            "APNS_KEY_PATH": "/k.p8", "APNS_KEY_ID": "K", "APNS_TEAM_ID": "T", "DATA_DIR": "/d",
+            "ATTEST_MODE": "off", "API_SECRET": secret,
+        ])
+        #expect(ServerMain.configuration(for: config).serverName == nil)
+        // Live, with the server's own configuration: only a running server adds a Server header
+        let app = Application(router: HTTPRoutes.router(services), configuration: ServerMain.configuration(for: config))
+        try await app.test(.live) { client in
             try await client.execute(uri: "/health", method: .get) { response in
                 #expect(response.status == .ok)
                 #expect(text(response) == "ok")
                 #expect(response.headers[.server] == nil)
             }
+        }
+        // As it would with a name
+        let named = Application(router: HTTPRoutes.router(services), configuration: .init(serverName: "TrainTimes"))
+        try await named.test(.live) { client in
+            try await client.execute(uri: "/health", method: .get) { #expect($0.headers[.server] == "TrainTimes") }
         }
     }
 
@@ -90,7 +105,7 @@ func text(_ response: TestResponse) -> String {
     }
 
     @Test func registersAndDeletes() async throws {
-        let started = now
+        let started = Date.now - 60
         try await withApp { (client, store) async throws in
             try await client.execute(uri: "/activities", method: .post, headers: bearer,
                                      body: ByteBuffer(bytes: try registrationBody(started: started))) { response in
@@ -102,6 +117,7 @@ func text(_ response: TestResponse) -> String {
             #expect(saved.trip == "091200_R..N")
             #expect(saved.environment == .sandbox)
             #expect(saved.alertKinds == [.delays, .suspended])
+            #expect(abs(saved.started.timeIntervalSince(started)) < 0.001)
 
             // Again: an upsert, not a second one
             try await client.execute(uri: "/activities", method: .post, headers: bearer,
@@ -138,6 +154,57 @@ func text(_ response: TestResponse) -> String {
                 #expect(response.status == .badRequest)
             }
             #expect(await store.count == 0)
+        }
+    }
+
+    @Test func rejectsStationsAndLinesThatDontExist() async throws {
+        let trip = "091200_R..N"
+        let bad: [(Selection, String)] = [
+            (Selection(stationID: "XXX", routes: ["R"], direction: .north), trip),
+            // Prospect Av has only the R
+            (Selection(stationID: "R34", routes: ["Q"], direction: .north), trip),
+            (Selection(stationID: "R34", routes: ["R", "Q"], direction: .north), trip),
+            (Selection(stationID: "R34", routes: [], direction: .north), trip),
+            (Selection(stationID: "R34", routes: ["R"], direction: .north, walkMinutes: -1), trip),
+            (Selection(stationID: "R34", routes: ["R"], direction: .north, walkMinutes: 181), trip),
+            (prospect, String(repeating: "x", count: 257)),
+        ]
+        try await withApp { (client, store) async throws in
+            for (selection, trip) in bad {
+                let body = try registrationBody(selection: selection, trip: trip)
+                try await client.execute(uri: "/activities", method: .post, headers: bearer, body: ByteBuffer(bytes: body)) { response in
+                    #expect(response.status == .badRequest)
+                }
+            }
+            #expect(await store.count == 0)
+            // Right at the limits
+            let longest = try registrationBody(selection: Selection(stationID: "R34", routes: ["R"], direction: .north, walkMinutes: 180),
+                                               trip: String(repeating: "x", count: 256))
+            try await client.execute(uri: "/activities", method: .post, headers: bearer, body: ByteBuffer(bytes: longest)) { response in
+                #expect(response.status == .noContent)
+            }
+        }
+    }
+
+    @Test func keepsStartedWithinWhatIOSAllows() async throws {
+        try await withApp { (client, store) async throws in
+            func saved(started: Date?) async throws -> Date {
+                try await client.execute(uri: "/activities", method: .post, headers: bearer,
+                                         body: ByteBuffer(bytes: try registrationBody(started: started))) { response in
+                    #expect(response.status == .noContent)
+                }
+                return try #require(await store.registration(for: sampleToken)).started
+            }
+            let before = Date.now
+            // None: now
+            var started = try await saved(started: nil)
+            #expect(started >= before && started <= Date.now)
+            // Longer ago than iOS keeps a Live Activity going: as long ago as it does
+            started = try await saved(started: before - 9 * 3600)
+            #expect(started >= before - ActivityState.lifetime && started <= Date.now - ActivityState.lifetime)
+            // In the future: now
+            started = try await saved(started: before + 3600)
+            #expect(started >= before && started <= Date.now)
         }
     }
 
@@ -186,14 +253,20 @@ final class TestDevice: @unchecked Sendable {
         }
     }
 
-    static func attest(_ device: TestDevice, _ client: any TestClientProtocol, _ authority: TestAuthority,
-                       challenge: String? = nil) async throws -> HTTPResponse.Status {
-        let challenge = if let challenge { challenge } else { try await Self.challenge(client) }
-        let attestation = try authority.attestation(appID: testAppID, challenge: Array(challenge.utf8), deviceKey: device.key)
-        let body = try JSONSerialization.data(withJSONObject: [
+    static func attestBody(_ device: TestDevice, _ authority: TestAuthority, challenge: String,
+                           environment: AttestEnvironment = .production) throws -> ByteBuffer {
+        let attestation = try authority.attestation(appID: testAppID, challenge: Array(challenge.utf8), deviceKey: device.key,
+                                                    environment: environment)
+        return ByteBuffer(bytes: try JSONSerialization.data(withJSONObject: [
             "keyID": device.keyID, "attestation": Data(attestation).base64EncodedString(), "challenge": challenge,
-        ])
-        return try await client.execute(uri: "/attest", method: .post, body: ByteBuffer(bytes: body)) { $0.status }
+        ]))
+    }
+
+    static func attest(_ device: TestDevice, _ client: any TestClientProtocol, _ authority: TestAuthority,
+                       challenge: String? = nil, environment: AttestEnvironment = .production) async throws -> HTTPResponse.Status {
+        let challenge = if let challenge { challenge } else { try await Self.challenge(client) }
+        let body = try attestBody(device, authority, challenge: challenge, environment: environment)
+        return try await client.execute(uri: "/attest", method: .post, body: body) { $0.status }
     }
 
     static func register(_ device: TestDevice, _ client: any TestClientProtocol, token: String = sampleToken,
@@ -311,10 +384,56 @@ final class TestDevice: @unchecked Sendable {
         var limits = testLimits()
         limits.keysPerIPPerDay = 2
         try await withApp(limits: limits) { (client, store, authority) async throws in
-            for expected: HTTPResponse.Status in [.noContent, .noContent, .tooManyRequests] {
-                #expect(try await Self.attest(TestDevice(), client, authority) == expected)
+            // Attestations that fail, and a key attested again, use up none of the address's day
+            let device = TestDevice()
+            for _ in 0..<3 {
+                #expect(try await Self.attest(device, client, authority, environment: .development) == .unauthorized)
+            }
+            #expect(try await Self.attest(device, client, authority) == .noContent)
+            #expect(try await Self.attest(device, client, authority) == .conflict)
+            #expect(try await Self.attest(TestDevice(), client, authority) == .noContent)
+            let over = try Self.attestBody(TestDevice(), authority, challenge: try await Self.challenge(client))
+            try await client.execute(uri: "/attest", method: .post, body: over) { response in
+                #expect(response.status == .tooManyRequests)
+                // Until midnight UTC
+                let retryAfter = try #require(response.headers[.retryAfter].flatMap { Int($0) })
+                #expect((1...86400).contains(retryAfter))
             }
             #expect(try await store.keyCount() == 2)
+        }
+    }
+
+    @Test func refusesKeysFromAnEnvironmentNoLongerAllowed() async throws {
+        let store = try Store(directory: nil)
+        let authority = try TestAuthority()
+        func app(_ environments: Set<AttestEnvironment>) -> some ApplicationProtocol {
+            Application(router: HTTPRoutes.router(HTTPServices(store: store, auth: .attest(environments), appID: testAppID,
+                                                               limits: testLimits(), roots: [authority.root])))
+        }
+        let development = TestDevice(), production = TestDevice()
+        let other = String(format: "%064x", 7)
+        try await app([.development, .production]).test(.router) { client async throws in
+            #expect(try await Self.attest(development, client, authority, environment: .development) == .noContent)
+            #expect(try await Self.attest(production, client, authority) == .noContent)
+            #expect(try await Self.register(development, client) == .noContent)
+        }
+        // ATTEST_ENVIRONMENT=production since
+        try await app([.production]).test(.router) { client async throws in
+            #expect(try await Self.delete(development, client) == .unauthorized)
+            #expect(try await Self.register(development, client, token: other) == .unauthorized)
+            #expect(try await Self.register(production, client, token: other) == .noContent)
+        }
+        #expect(await store.registration(for: sampleToken)?.owner == development.keyID)
+        #expect(await store.registration(for: other)?.owner == production.keyID)
+    }
+
+    @Test func limitsAttestationBodies() async throws {
+        try await withApp { (client, _, _) async throws in
+            let huge = ByteBuffer(string: String(repeating: " ", count: AppContext.attestBodyLimit + 1))
+            try await client.execute(uri: "/attest", method: .post, body: huge) { #expect($0.status == .contentTooLarge) }
+            // Up to the limit it's read, then refused as malformed
+            let largest = ByteBuffer(string: String(repeating: " ", count: AppContext.attestBodyLimit))
+            try await client.execute(uri: "/attest", method: .post, body: largest) { #expect($0.status == .badRequest) }
         }
     }
 
@@ -368,6 +487,20 @@ final class TestDevice: @unchecked Sendable {
                 #expect(response.headers[.retryAfter] == "60")
             }
             try await client.execute(uri: "/nothing", method: .get) { #expect($0.status == .tooManyRequests) }
+        }
+    }
+
+    @Test func rateLimitsEachClientBehindCloudflared() async throws {
+        var limits = testLimits()
+        limits.requestsPerMinute = 1
+        limits.requestBurst = 1
+        // Live, so requests come from loopback, as cloudflared's do, and CF-Connecting-IP counts
+        try await withApp(limits: limits, setup: .live) { (client, _, _) async throws in
+            try await client.execute(uri: "/health", method: .get) { #expect($0.status == .ok) }
+            let behind: HTTPFields = [.cfConnectingIP: "203.0.113.9"]
+            try await client.execute(uri: "/health", method: .get, headers: behind) { #expect($0.status == .ok) }
+            try await client.execute(uri: "/health", method: .get, headers: behind) { #expect($0.status == .tooManyRequests) }
+            try await client.execute(uri: "/health", method: .get) { #expect($0.status == .tooManyRequests) }
         }
     }
 

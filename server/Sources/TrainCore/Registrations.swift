@@ -161,19 +161,16 @@ actor Store {
     /// oldest ones: the app counts down to one train at a time, and one it
     /// couldn't unregister mustn't stop it registering the next.
     func upsert(_ registration: Registration, maxTotal: Int, maxPerOwner: Int) throws -> UpsertResult {
-        if let existing = registrations[registration.token] {
-            guard existing.owner == registration.owner else { return .ownedByOther }
-        } else if registrations.count >= maxTotal {
-            return .full
-        }
+        let existing = registrations[registration.token]
+        if let existing, existing.owner != registration.owner { return .ownedByOther }
         let others = (tokensByOwner[registration.owner] ?? []).subtracting([registration.token])
             .compactMap { registrations[$0] }
             .sorted { $0.started < $1.started }
         let evicted = others.prefix(max(0, others.count - (maxPerOwner - 1))).map(\.token)
+        // Full only if it adds one: replacing a token, or dropping one of the owner's to make room, doesn't
+        if existing == nil, registrations.count - evicted.count >= maxTotal { return .full }
         try db.transaction {
-            for token in evicted {
-                try db.query("DELETE FROM registrations WHERE token = ?", [.text(token)])
-            }
+            try Self.delete(evicted, from: db)
             try write(registration)
         }
         for token in evicted { unindex(token) }
@@ -187,7 +184,7 @@ actor Store {
     func remove(_ token: String, owner: String) throws -> RemoveResult {
         guard let existing = registrations[token] else { return .notFound }
         guard existing.owner == owner else { return .notOwner }
-        try db.query("DELETE FROM registrations WHERE token = ?", [.text(token)])
+        try Self.delete([token], from: db)
         unindex(token)
         return .removed
     }
@@ -220,12 +217,18 @@ actor Store {
                     .text(registration.trip), .text(registration.token),
                 ])
             }
-            for token in dropped {
-                try db.query("DELETE FROM registrations WHERE token = ?", [.text(token)])
-            }
+            try Self.delete(dropped, from: db)
         }
         for registration in changed { registrations[registration.token] = registration }
         for token in dropped { unindex(token) }
+    }
+
+    /// Deletes the tokens' rows, and only those: the caller unindexes them
+    /// once that's committed.
+    private static func delete(_ tokens: [String], from db: SQLite) throws {
+        for token in tokens {
+            try db.query("DELETE FROM registrations WHERE token = ?", [.text(token)])
+        }
     }
 
     private func write(_ registration: Registration) throws {
@@ -285,11 +288,7 @@ actor Store {
             ))
         }
         if !unreadable.isEmpty {
-            try db.transaction {
-                for token in unreadable {
-                    try db.query("DELETE FROM registrations WHERE token = ?", [.text(token)])
-                }
-            }
+            try db.transaction { try delete(unreadable, from: db) }
             for token in unreadable {
                 Log.error("drop \(Registration.prefix(of: token)): couldn't read it from \(fileName)")
             }

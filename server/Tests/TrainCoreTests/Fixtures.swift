@@ -13,7 +13,7 @@ func arrival(_ minutes: Double, trip: String, route: String = "R", isLive: Bool 
             isLive: isLive, trip: trip)
 }
 
-/// Five trains, one already gone, with a delay alert and an elevator out.
+/// Five trains, one already gone, with a service-change alert and an elevator out.
 func fixtureBoard() -> Board {
     Board(
         trains: [

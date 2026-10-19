@@ -42,22 +42,46 @@ actor RateLimiter {
 }
 
 /// Counts per client per UTC day, such as attest keys made from one address.
+/// Only what's recorded counts, so a request that fails uses up nothing.
 actor DailyLimiter {
     private let limit: Int
+    private let maxTracked: Int
     private var day: Int = -1
     private var counts: [String: Int] = [:]
 
-    init(limit: Int) { self.limit = limit }
+    init(limit: Int, maxTracked: Int = 200_000) {
+        self.limit = limit
+        self.maxTracked = maxTracked
+    }
 
-    func take(_ client: String, now: Date = .now) -> Bool {
+    /// Whether `client` is under the limit today. A client with none yet is
+    /// refused too once `maxTracked` others have some (a flood of addresses).
+    func allows(_ client: String, now: Date = .now) -> Bool {
+        startDay(now)
+        if let count = counts[client] { return count < limit }
+        return limit > 0 && counts.count < maxTracked
+    }
+
+    /// Counts one more for `client` today.
+    func record(_ client: String, now: Date = .now) {
+        startDay(now)
+        counts[client, default: 0] += 1
+    }
+
+    var tracked: Int { counts.count }
+
+    /// Whole seconds until the counts start again, at midnight UTC.
+    static func secondsUntilReset(now: Date) -> Int {
+        let seconds = 86400 - now.timeIntervalSince1970.truncatingRemainder(dividingBy: 86400)
+        return max(1, Int(seconds.rounded(.up)))
+    }
+
+    private func startDay(_ now: Date) {
         let today = Int(now.timeIntervalSince1970 / 86400)
         if today != day {
             day = today
             counts.removeAll()
         }
-        guard counts[client, default: 0] < limit else { return false }
-        counts[client, default: 0] += 1
-        return true
     }
 }
 
@@ -120,6 +144,9 @@ actor ChallengeStore {
     /// How many clients have challenges outstanding.
     var clientCount: Int { clients.count }
 
+    /// How many challenges are queued, used ones included.
+    var queued: Int { queue.count - head }
+
     private func release(_ entry: (client: String, expires: Date)) {
         guard var mine = clients[entry.client], let index = mine.firstIndex(of: entry.expires) else { return }
         mine.remove(at: index)
@@ -131,7 +158,12 @@ actor ChallengeStore {
             if let entry = expiries.removeValue(forKey: queue[head].challenge) { release(entry) }
             head += 1
         }
-        if head > 1024, head * 2 > queue.count {
+        // Used challenges stay queued until they'd have expired: once they're
+        // most of it, only the outstanding ones are kept
+        if queue.count - head > 2 * max(expiries.count, 1024) {
+            queue = queue[head...].filter { expiries[$0.challenge] != nil }
+            head = 0
+        } else if head > 1024, head * 2 > queue.count {
             queue.removeFirst(head)
             head = 0
         }
@@ -182,6 +214,11 @@ enum Redact {
 
     static func id(_ value: String) -> String {
         let mac = HMAC<SHA256>.authenticationCode(for: Data(value.utf8), using: key)
-        return "#" + mac.prefix(5).map { String(format: "%02x", $0) }.joined()
+        return "#" + mac.prefix(5).hex
     }
+}
+
+extension Sequence<UInt8> {
+    /// Lowercase hex, two digits a byte.
+    var hex: String { map { String(format: "%02x", $0) }.joined() }
 }

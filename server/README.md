@@ -60,11 +60,12 @@ only for rate limits, and logs it only as a keyed hash.
 | `MAX_REGISTRATIONS` | `100000` | in all |
 | `MAX_REGISTRATIONS_PER_KEY` | `5` | live countdowns per attest key; registering one more drops that key's oldest |
 | `RATE_LIMIT_PER_MINUTE` | `30` | per client address, on every route |
-| `RATE_LIMIT_BURST` | same as per minute | |
+| `RATE_LIMIT_BURST` | same as per minute | the deploy plist leaves it out, so it follows `RATE_LIMIT_PER_MINUTE` |
 | `MAX_CHALLENGES` | `10000` | outstanding challenges, in all |
 | `MAX_CHALLENGES_PER_IP` | `10` | outstanding challenges per client address |
-| `MAX_KEYS_PER_IP_PER_DAY` | `10` | attestations per client address per UTC day |
+| `MAX_KEYS_PER_IP_PER_DAY` | `10` | keys attested per client address per UTC day; attestations that fail don't count |
 | `LOG_PUSHES` | `0` | `1` logs every push; otherwise each pass logs its totals |
+| `LOG_FILE` | | the plist's `StandardOutPath`: once newsyslog has rotated it, the server writes to the new file within a minute |
 
 The limits per client address count an IPv6 address by its /64, since a host
 is commonly given a whole /64.
@@ -105,7 +106,7 @@ A client with `MAX_CHALLENGES_PER_IP` outstanding gets `429`, with
 | `400` | malformed |
 | `401` | challenge unknown, expired or used, or the attestation didn't verify |
 | `409` | this key is already attested |
-| `429` | over `MAX_KEYS_PER_IP_PER_DAY` |
+| `429` | over `MAX_KEYS_PER_IP_PER_DAY`, with `Retry-After` the seconds until midnight UTC |
 
 ### `POST /activities`: register or replace a countdown
 
@@ -150,9 +151,9 @@ POST
 |---|---|
 | `204` | saved |
 | `400` | malformed, or a station or line that doesn't exist |
-| `401` | not signed, signed for something else, an old counter, or a used challenge |
+| `401` | not signed, signed for something else, an old counter, a used challenge, or a key attested in an environment `ATTEST_ENVIRONMENT` no longer allows |
 | `403` | the token belongs to another key |
-| `503` | `MAX_REGISTRATIONS` reached |
+| `503` | `MAX_REGISTRATIONS` reached (a key at `MAX_REGISTRATIONS_PER_KEY` still registers, dropping its oldest) |
 
 ### `DELETE /activities/<token>`: stop pushing to a countdown
 
@@ -218,12 +219,20 @@ restart.
 
 ## Install, operate, update
 
+It builds on macOS 14 or later with Swift 6.2 or later (Xcode 26), which the
+dependencies need. It builds only on macOS, whose SDK has the `SQLite3` module
+it uses for the system's libsqlite3.
+
     sudo ./deploy/install.sh
 
 The first run does the setup, then stops before starting the daemon:
 
-1. It creates the user and installs into `/usr/local/traintimes`.
-2. It puts the plist in `/Library/LaunchDaemons`.
+1. It creates the user and installs into `/usr/local/traintimes`. That and
+   the program are root's; only `data/`, `server.log` and the .p8 key are
+   `traintimes`'s, and the script never recurses into or follows them.
+2. It has newsyslog rotate `server.log`
+   (`/etc/newsyslog.d/com.traintimes.server.conf`).
+3. It puts the plist in `/Library/LaunchDaemons`.
 
 You then:
 
@@ -233,11 +242,15 @@ You then:
 3. Run the script again to start the daemon.
 
 A plist from before App Attest still works, with the defaults above. Delete
-its `API_SECRET`.
+its `API_SECRET`. The script keeps an installed plist, so one from before log
+rotation needs `LOG_FILE` added (the script reminds you). Delete its
+`RATE_LIMIT_BURST` too, so the burst follows the rate.
 
 - **Logs:** `sudo tail -f /usr/local/traintimes/server.log`. It has one line
-  per pass with its totals, and a line for each registration, drop, refused
-  request and error.
+  per pass with its totals, and a line for each registration, drop and error.
+  Refused requests get at most 20 lines a minute, then a count of the rest.
+  newsyslog rotates the log once it's over 10 MB, keeping 7 old ones
+  (`server.log.0` is the newest).
 - **Backup:** `traintimes.sqlite` is in WAL mode. Copy it with SQLite's online
   backup, which is safe while the server runs:
 

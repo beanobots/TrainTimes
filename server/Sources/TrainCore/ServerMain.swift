@@ -1,6 +1,7 @@
 import Foundation
 import Hummingbird
 import Logging
+import ServiceLifecycle
 
 public enum ServerMain {
     static let usage = """
@@ -57,11 +58,12 @@ public enum ServerMain {
 
         var logger = Logger(label: "TrainTimesServer")
         logger.logLevel = .warning
+        var background: [any Service] = [poller]
+        if let logFile = config.logFile { background.append(LogReopener(path: logFile)) }
         let app = Application(
             router: HTTPRoutes.router(services),
-            // No Server header
-            configuration: .init(address: .hostname(config.host, port: config.port), serverName: nil),
-            services: [poller],
+            configuration: configuration(for: config),
+            services: background,
             onServerRunning: { channel in
                 Log.info("listening on \(channel.localAddress?.description ?? "\(config.host):\(config.port)")")
             },
@@ -77,6 +79,11 @@ public enum ServerMain {
         }
         await pusher.shutdown()
         Log.info("stop")
+    }
+
+    /// HOST and PORT, and no Server header.
+    static func configuration(for config: Config) -> ApplicationConfiguration {
+        .init(address: .hostname(config.host, port: config.port), serverName: nil)
     }
 
     private static func sendTest(options: [String], environment: [String: String]) async throws -> Int32 {
