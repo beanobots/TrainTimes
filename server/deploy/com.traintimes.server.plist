@@ -62,6 +62,8 @@
         <string>30</string>
         <key>MAX_CHALLENGES</key>
         <string>10000</string>
+        <key>MAX_CHALLENGES_PER_IP</key>
+        <string>10</string>
         <key>MAX_KEYS_PER_IP_PER_DAY</key>
         <string>10</string>
         <!-- 1 to log every push, not just each pass's totals -->
