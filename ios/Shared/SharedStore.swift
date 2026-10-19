@@ -70,6 +70,10 @@ enum SharedStore {
         func isShown(onWidget widgetID: String, for trainID: String) -> Bool {
             trainID == self.trainID && (self.widgetID == nil || self.widgetID == widgetID)
         }
+
+        private enum CodingKeys: String, CodingKey {
+            case trainID, ends, widgetID
+        }
     }
 
     static func loadCountdown() -> Countdown? {
@@ -121,6 +125,30 @@ enum SharedStore {
         }
     }
 
+    /// Forgets the maps and alerts opened on widgets that are gone, so a new
+    /// one set up the same way doesn't start out showing them. `widgetIDs` are
+    /// the `TrainEntry.widgetID`s of those still out there. Entries saved
+    /// before they were kept by widget go too, as no widget can find them.
+    static func forgetToggles(keeping widgetIDs: Set<String>) {
+        for file in [mapFile, alertFile] {
+            guard let file else { continue }
+            changing(file) {
+                let entries = trains(in: file)
+                let kept = entries.filter { entry in widgetIDs.contains { entry.hasPrefix("\($0) ") } }
+                if kept.count < entries.count { write(kept, to: file) }
+            }
+        }
+    }
+
+    /// Deletes what earlier versions saved and this one doesn't read:
+    /// refreshed.json and toggled.json, which taps.json replaced.
+    static func removeOldFiles() {
+        guard let container else { return }
+        for name in ["refreshed.json", "toggled.json"] {
+            try? FileManager.default.removeItem(at: container.appendingPathComponent(name))
+        }
+    }
+
     private static func toggle(_ trainID: String, in file: URL?) {
         guard let file else { return }
         changing(file) {
@@ -160,6 +188,10 @@ enum SharedStore {
         var toggled: Date?
 
         var latest: Date? { [refreshed, toggled].compactMap { $0 }.max() }
+
+        private enum CodingKeys: String, CodingKey {
+            case refreshed, toggled
+        }
     }
 
     /// A `TrainEntry.widgetID`'s taps.
@@ -290,12 +322,11 @@ enum SharedStore {
     }
 
     /// Copies saved widgets that can't be read to widgets.json.bad, so they
-    /// aren't lost for good when a change in the app saves over them.
+    /// aren't lost for good when a change in the app saves over them. Where
+    /// the file itself can't be read, any copy kept before stays.
     static func keepUnreadableWidgets() {
-        guard let widgetsFile else { return }
-        let copy = widgetsFile.appendingPathExtension("bad")
-        try? FileManager.default.removeItem(at: copy)
-        try? FileManager.default.copyItem(at: widgetsFile, to: copy)
+        guard let widgetsFile, let data = try? Data(contentsOf: widgetsFile) else { return }
+        try? data.write(to: widgetsFile.appendingPathExtension("bad"), options: .atomic)
     }
 
     /// Also leaves the default's train as the app's choice, which Siri, the
@@ -304,6 +335,28 @@ enum SharedStore {
         save(saved.defaultWidget.selection)
         guard let widgetsFile, let data = try? JSONEncoder().encode(saved) else { return }
         try? data.write(to: widgetsFile, options: .atomic)
+    }
+}
+
+// Their decoders are written out, as Codable's own gives a field's default no
+// say: a field added later would keep any saved before it from being read at
+// all. Read a new one with decodeIfPresent and its default. They're in
+// extensions so the memberwise initializers stay.
+
+extension SharedStore.Countdown {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        trainID = try container.decode(String.self, forKey: .trainID)
+        ends = try container.decode(Date.self, forKey: .ends)
+        widgetID = try container.decodeIfPresent(String.self, forKey: .widgetID)
+    }
+}
+
+extension SharedStore.Taps {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        refreshed = try container.decodeIfPresent(Date.self, forKey: .refreshed)
+        toggled = try container.decodeIfPresent(Date.self, forKey: .toggled)
     }
 }
 

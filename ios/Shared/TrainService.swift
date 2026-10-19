@@ -175,12 +175,13 @@ enum TrainService {
     /// Live tab's lists and the push server's countdowns. One whose own lines'
     /// feeds didn't come, or are out of date, is left out. Without
     /// `includingOtherLines`, only the lines' own feeds are fetched, which is
-    /// enough where only each line's own trains are shown.
-    static func trains(for selections: [Selection], includingOtherLines: Bool = true,
+    /// enough where only each line's own trains are shown; `ownLinesOnly` are
+    /// the `Selection.trainID`s of any others that need just those.
+    static func trains(for selections: [Selection], includingOtherLines: Bool = true, ownLinesOnly: Set<String> = [],
                        now: Date = Date()) async -> [String: [Arrival]] {
         // Each train once: the push server has thousands of countdowns, many for the same one
         let unique = Array(Dictionary(selections.map { ($0.trainID, $0) }, uniquingKeysWith: { first, _ in first }).values)
-        let feeds = unique.map { feedURLs(for: $0, includingOtherLines: includingOtherLines) }
+        let feeds = unique.map { feedURLs(for: $0, includingOtherLines: includingOtherLines, ownLinesOnly: ownLinesOnly) }
         let urls = Set(feeds.flatMap { $0.own + $0.others })
         let stops = Set(unique.flatMap(\.stopIDs))
         let fetched = await withTaskGroup(of: (URL, Data?).self) { group in
@@ -194,19 +195,20 @@ enum TrainService {
             return all
         }
         let arrivals = Self.arrivals(at: stops, in: fetched, now: now)
-        return trains(for: unique, in: arrivals, includingOtherLines: includingOtherLines, now: now)
+        return trains(for: unique, in: arrivals, includingOtherLines: includingOtherLines, ownLinesOnly: ownLinesOnly,
+                      now: now)
     }
 
-    /// `trains(for:includingOtherLines:now:)` once the feeds are read: `feeds`
-    /// has each one's arrivals at the selections' stops, and none for one that
-    /// didn't come or couldn't be read. They're indexed by stop, so each
-    /// selection looks only at its own: linear in the number of selections.
+    /// `trains(for:includingOtherLines:ownLinesOnly:now:)` once the feeds are
+    /// read: `feeds` has each one's arrivals at the selections' stops, and none
+    /// for one that didn't come or couldn't be read. They're indexed by stop, so
+    /// each selection looks only at its own: linear in the number of selections.
     static func trains(for selections: [Selection], in feeds: [URL: [Arrival]], includingOtherLines: Bool = true,
-                       now: Date) -> [String: [Arrival]] {
+                       ownLinesOnly: Set<String> = [], now: Date) -> [String: [Arrival]] {
         let byStop = feeds.mapValues { Dictionary(grouping: $0, by: \.stop) }
         var trains: [String: [Arrival]] = [:]
         for selection in selections {
-            let urls = feedURLs(for: selection, includingOtherLines: includingOtherLines)
+            let urls = feedURLs(for: selection, includingOtherLines: includingOtherLines, ownLinesOnly: ownLinesOnly)
             guard urls.own.allSatisfy({ byStop[$0] != nil }) else { continue }
             let stopIDs = selection.stopIDs
             let arrivals = (urls.own + urls.others).flatMap { url in stopIDs.flatMap { byStop[url]?[$0] ?? [] } }
@@ -250,10 +252,11 @@ enum TrainService {
     }
 
     /// The feeds `selection`'s trains can be in; without `includingOtherLines`,
-    /// only its own lines'.
-    private static func feedURLs(for selection: Selection, includingOtherLines: Bool) -> (own: [URL], others: [URL]) {
+    /// or when it's one of `ownLinesOnly`, only its own lines'.
+    static func feedURLs(for selection: Selection, includingOtherLines: Bool,
+                         ownLinesOnly: Set<String> = []) -> (own: [URL], others: [URL]) {
         let all = Lines.feedURLs(sharingTracksWith: selection.routes)
-        return includingOtherLines ? all : (own: all.own, others: [])
+        return includingOtherLines && !ownLinesOnly.contains(selection.trainID) ? all : (own: all.own, others: [])
     }
 
     private static let feeds = InFlight<Data>()

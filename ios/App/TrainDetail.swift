@@ -1,3 +1,4 @@
+import CoreLocation
 import MapKit
 import SwiftUI
 
@@ -7,6 +8,7 @@ struct TrainDetail: View {
     @Environment(FavoritesStore.self) private var favorites
     @Environment(SettingsStore.self) private var settings
     @Environment(\.accessibilityDifferentiateWithoutColor) private var withoutColor
+    @Environment(\.openURL) private var openURL
     @State private var selection: Selection
     @State private var board: Board?
     @State private var loadState = LoadState.loading
@@ -151,7 +153,7 @@ struct TrainDetail: View {
             } else if loadState == .loading && trains.isEmpty {
                 ProgressView()
             } else if trains.isEmpty {
-                if board?.trains.contains(where: { $0.time > now }) == true {
+                if board?.trains.contains(where: { $0.leaves > now }) == true {
                     Text("No \(selection.linesLabel) trains you can reach in time").foregroundStyle(.secondary)
                 } else {
                     Text("No \(selection.linesLabel) trains predicted").foregroundStyle(.secondary)
@@ -286,7 +288,12 @@ struct TrainDetail: View {
             StationMap(station: station, route: selection.firstRoute)
                 .frame(height: 240)
                 .listRowInsets(EdgeInsets())
-            Link(destination: URL(string: "https://maps.apple.com/?daddr=\(station.lat),\(station.lon)&dirflg=w")!) {
+            Button {
+                let place = walkingDestination(station)
+                if let url = URL(string: "https://maps.apple.com/?daddr=\(place.latitude),\(place.longitude)&dirflg=w") {
+                    openURL(url)
+                }
+            } label: {
                 Label("Walking directions in Maps", systemImage: "figure.walk")
             }
         } header: {
@@ -298,6 +305,26 @@ struct TrainDetail: View {
                 Text("Dots are entrances; blue ones have an elevator. Hollow dots are exit only.")
             }
         }
+    }
+
+    /// Where walking directions go: the way in to this train's platforms
+    /// nearest you, or without a recent fix on you, nearest the middle of the
+    /// station; in step-free mode, one with an elevator where there is one.
+    /// The middle of the station where the MTA lists no way in.
+    private func walkingDestination(_ station: Station) -> CLLocationCoordinate2D {
+        let platforms = selection.platforms.isEmpty ? station.platforms : selection.platforms
+        let ways = platforms.flatMap(\.entrances).filter { $0.exitOnly != true }
+        let elevators = ways.filter(\.isElevator)
+        let candidates = settings.settings.stepFree && !elevators.isEmpty ? elevators : ways
+        let middle = CLLocation(latitude: station.lat, longitude: station.lon)
+        // Where you were a while ago says little about which side you'll come from
+        let here = CLLocationManager().location.flatMap { Date.now.timeIntervalSince($0.timestamp) < 10 * 60 ? $0 : nil }
+        let from = here ?? middle
+        let nearest = candidates.min { a, b in
+            from.distance(from: CLLocation(latitude: a.lat, longitude: a.lon))
+                < from.distance(from: CLLocation(latitude: b.lat, longitude: b.lon))
+        }
+        return nearest.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) } ?? middle.coordinate
     }
 
     /// Times already shown stay up while new ones load, and if they don't come,
@@ -388,24 +415,34 @@ private struct AlertRow: View {
     let alert: ServiceAlert
 
     var body: some View {
-        DisclosureGroup {
-            VStack(alignment: .leading, spacing: 8) {
-                if let period = alert.period {
-                    Label(period, systemImage: "calendar")
+        // Folded away only where there's more to read
+        if alert.period == nil && alert.details.isEmpty {
+            summary
+        } else {
+            DisclosureGroup {
+                VStack(alignment: .leading, spacing: 8) {
+                    if let period = alert.period {
+                        Label(period, systemImage: "calendar")
+                    }
+                    if !alert.details.isEmpty {
+                        Text(alert.details)
+                    }
                 }
-                if !alert.details.isEmpty {
-                    Text(alert.details)
-                }
+                .font(.subheadline)
+                .padding(.vertical, 4)
+            } label: {
+                summary
             }
-            .font(.subheadline)
-            .padding(.vertical, 4)
-        } label: {
-            VStack(alignment: .leading, spacing: 4) {
-                Label(alert.kind.label, systemImage: alert.kind.symbol)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(alert.kind.tint)
-                Text(alert.header)
-            }
+        }
+    }
+
+    /// Its kind and headline.
+    private var summary: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label(alert.kind.label, systemImage: alert.kind.symbol)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(alert.kind.tint)
+            Text(alert.header)
         }
     }
 }
@@ -421,11 +458,15 @@ private struct OutageRow: View {
     private var when: String {
         let start = outage.start?.formatted(date: .abbreviated, time: .shortened)
         let end = outage.estimatedReturn?.formatted(date: .abbreviated, time: .shortened)
+        // The MTA can leave either date blank
         switch (outage.isPlanned, start, end) {
         case (true, let start?, let end?): return "\(start) to \(end)"
+        case (true, let start?, nil): return "From \(start)"
+        case (true, nil, let end?): return "Until \(end)"
         case (false, let start?, let end?): return "Since \(start). Back \(end) (estimate)"
         case (false, let start?, nil): return "Since \(start)"
-        default: return ""
+        case (false, nil, let end?): return "Back \(end) (estimate)"
+        case (_, nil, nil): return ""
         }
     }
 
@@ -484,22 +525,27 @@ private struct EntranceMark: View {
     let entrance: Station.Entrance
 
     var body: some View {
-        if entrance.isElevator {
-            Image(systemName: "figure.roll")
-                .font(.caption2.bold())
-                .foregroundStyle(.white)
-                .padding(4)
-                .background(Circle().fill(Color.blue))
-        } else if entrance.exitOnly == true {
-            Circle()
-                .fill(Color.white)
-                .frame(width: 10, height: 10)
-                .overlay(Circle().stroke(Color.black.opacity(0.7), lineWidth: 2))
-        } else {
-            Circle()
-                .fill(Color.black.opacity(0.75))
-                .frame(width: 10, height: 10)
-                .overlay(Circle().stroke(Color.white, lineWidth: 2))
+        Group {
+            if entrance.isElevator {
+                Image(systemName: "figure.roll")
+                    .font(.caption2.bold())
+                    .foregroundStyle(.white)
+                    .padding(4)
+                    .background(Circle().fill(Color.blue))
+            } else if entrance.exitOnly == true {
+                Circle()
+                    .fill(Color.white)
+                    .frame(width: 10, height: 10)
+                    .overlay(Circle().stroke(Color.black.opacity(0.7), lineWidth: 2))
+            } else {
+                Circle()
+                    .fill(Color.black.opacity(0.75))
+                    .frame(width: 10, height: 10)
+                    .overlay(Circle().stroke(Color.white, lineWidth: 2))
+            }
         }
+        // What its colour and fill say
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(entrance.isElevator ? "Elevator entrance" : entrance.exitOnly == true ? "Exit only" : "Entrance")
     }
 }

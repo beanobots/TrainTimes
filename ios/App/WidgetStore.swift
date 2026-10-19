@@ -31,6 +31,7 @@ final class WidgetStore {
         }
         self.stored = stored
         saved = stored.validated()
+        SharedStore.removeOldFiles()
     }
 
     var defaultWidget: SavedWidget { saved.defaultWidget }
@@ -44,17 +45,6 @@ final class WidgetStore {
         change { $0.move(fromOffsets: source, toOffset: destination) }
     }
 
-    /// The default widget's train, for the Live tab to show and change.
-    var defaultSelection: Binding<Selection> {
-        Binding {
-            self.defaultWidget.selection
-        } set: { selection in
-            var widget = self.defaultWidget
-            widget.selection = selection
-            self.update(widget)
-        }
-    }
-
     /// One saved widget to edit, by id, so deleting it doesn't leave a binding
     /// to something gone.
     func binding(for id: UUID) -> Binding<SavedWidget>? {
@@ -66,7 +56,8 @@ final class WidgetStore {
         }
     }
 
-    /// Asks iOS which saved widget each widget out there shows.
+    /// Asks iOS which saved widget each widget out there shows, and forgets
+    /// the maps and alerts opened on any that are gone.
     func countPlaced() async {
         // The async version is iOS 18 and later
         let result = await withCheckedContinuation { continuation in
@@ -74,10 +65,12 @@ final class WidgetStore {
         }
         guard let infos = try? result.get() else { return }
         var counts: [UUID: Int] = [:]
+        var widgetIDs = Set<String>()
         for info in infos where info.kind == "RTrainWidget" || info.kind == "TransfersWidget" {
             // One set up before saved widgets, with its own train, shows none of them
             let shown: SavedWidget?
             let intent = info.widgetConfigurationIntent(of: TrainWidgetIntent.self)
+            widgetIDs.insert(Self.widgetID(kind: info.kind, family: info.family, configuration: intent ?? TrainWidgetIntent()))
             if info.kind == "TransfersWidget" {
                 shown = (intent ?? TrainWidgetIntent()).transfersWidget(in: saved)
             } else if let intent {
@@ -89,6 +82,16 @@ final class WidgetStore {
             counts[widget.id, default: 0] += 1
         }
         placed = counts
+        SharedStore.forgetToggles(keeping: widgetIDs)
+    }
+
+    /// A widget's `TrainEntry.widgetID`, made as its timeline provider in
+    /// RTrainWidget.swift makes it: its kind, its size and what its Edit menu has.
+    private static func widgetID(kind: String, family: WidgetFamily, configuration: TrainWidgetIntent) -> String {
+        let chosen = configuration.widget.map { "widget \($0.id)" }
+            ?? [configuration.station?.id, configuration.line?.id, configuration.direction?.id, configuration.stop?.id]
+                .map { $0 ?? "-" }.joined(separator: ",")
+        return "\(kind) \(family) \(chosen)"
     }
 
     /// `body` changes the widgets as shown and, if that changes anything, as

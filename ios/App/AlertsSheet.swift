@@ -108,6 +108,8 @@ private struct AlertDetail: View {
             }
         }
         .padding(.vertical, 4)
+        // Read as one, not a piece at a time
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -133,5 +135,6 @@ private struct ElevatorDetail: View {
             }
         }
         .padding(.vertical, 4)
+        .accessibilityElement(children: .combine)
     }
 }

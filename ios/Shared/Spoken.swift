@@ -5,7 +5,10 @@ enum Spoken {
     /// e.g. "The next R to Manhattan at Prospect Av is in 4 minutes, at 8:12 AM. The one after is at 8:22 AM."
     /// `trains` are the ones you can still catch, soonest first; any of another
     /// line running on yours are named by their own: "… is at 8:22 AM, on the N."
-    static func nextTrain(selection: Selection, trains: [Arrival], notice: String?, now: Date) -> String {
+    /// `unreachable` says whether others still to come are left out of them,
+    /// as you can't reach them in time.
+    static func nextTrain(selection: Selection, trains: [Arrival], unreachable: Bool = false, notice: Notice?,
+                          now: Date) -> String {
         let lines = either(selection.routes.map { LineStyle.of($0).label })
         let station = selection.station?.name ?? "your station"
         var sentence: String
@@ -26,14 +29,40 @@ enum Spoken {
                 sentence = "The next \(train) at \(station) is \(when)."
                 if !after.isEmpty { sentence += " The one after is at \(after)." }
             }
+        } else if unreachable {
+            sentence = "There are \(trainsPlural(line: lines, heading: selection.heading)) predicted at \(station), but none you can reach in time."
         } else {
             sentence = "There are no \(trainsPlural(line: lines, heading: selection.heading)) predicted at \(station) right now."
         }
         if let notice {
-            // Only its first letter, so line letters and names inside it keep their capitals
-            sentence += " Heads up: \(notice.prefix(1).lowercased() + notice.dropFirst())."
+            sentence += " Heads up: \(headsUp(notice))"
         }
         return sentence
+    }
+
+    /// An alert's headline, "R trains are running with delays in both
+    /// directions.", or what's out: "elevator out."
+    static func headsUp(_ notice: Notice) -> String {
+        let text: String
+        switch notice.kind {
+        case .elevator:
+            // Only its first letter, so line letters and names inside it keep their capitals
+            text = notice.label.prefix(1).lowercased() + notice.label.dropFirst()
+        case .alert(let kind):
+            let headline = notice.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !headline.isEmpty {
+                text = headline
+            } else {
+                switch kind {
+                case .delays: text = "there are delays"
+                case .suspended: text = "service is suspended"
+                case .serviceChange: text = "there's a service change"
+                case .notice: text = "there's a notice from the MTA"
+                }
+            }
+        }
+        if let last = text.last, ".!?".contains(last) { return text }
+        return text + "."
     }
 
     /// "R", "N or R", "D, N or R".

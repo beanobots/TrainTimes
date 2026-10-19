@@ -15,27 +15,35 @@ final class FavoritesStore {
     }
 
     private static let key = "favorites"
+    /// Saved favorites some of which couldn't be read, as they were, so the
+    /// next change, which saves over them, doesn't lose them for good.
+    private static let unreadableKey = "favorites.unreadable"
 
     /// The first time, the default widget's train, so the list doesn't start empty.
     init() {
-        if let data = UserDefaults.standard.data(forKey: Self.key),
-           let saved = try? JSONDecoder().decode([Selection].self, from: data) {
-            // A station gone from the list, or one that's lost every chosen line, is
-            // left out rather than falling back to Prospect Av
-            var seen = Set<String>()
-            favorites = saved
-                .filter { selection in
-                    selection.station.map { $0.routes.contains(where: selection.routes.contains) } ?? false
-                }
-                .map { $0.validated() }
-                .filter { seen.insert($0.trainID).inserted }
-        } else {
+        guard let data = UserDefaults.standard.data(forKey: Self.key) else {
             favorites = [SharedStore.loadWidgets().defaultWidget.selection]
             // didSet doesn't run in init, and this mustn't change with the default widget
             if let data = try? JSONEncoder().encode(favorites) {
                 UserDefaults.standard.set(data, forKey: Self.key)
             }
+            return
         }
+        // Each on its own, so one that can't be read doesn't take the rest with it
+        let read = try? JSONDecoder().decode([SavedFavorite].self, from: data)
+        let saved = read?.compactMap(\.selection) ?? []
+        if saved.count != read?.count {
+            UserDefaults.standard.set(data, forKey: Self.unreadableKey)
+        }
+        // A station gone from the list, or one that's lost every chosen line, is
+        // left out rather than falling back to Prospect Av
+        var seen = Set<String>()
+        favorites = saved
+            .filter { selection in
+                selection.station.map { $0.routes.contains(where: selection.routes.contains) } ?? false
+            }
+            .map { $0.validated() }
+            .filter { seen.insert($0.trainID).inserted }
     }
 
     func contains(_ selection: Selection) -> Bool {
@@ -78,5 +86,14 @@ final class FavoritesStore {
 
     func move(fromOffsets source: IndexSet, toOffset destination: Int) {
         favorites.move(fromOffsets: source, toOffset: destination)
+    }
+}
+
+/// A saved favorite, or nil where it can't be read.
+private struct SavedFavorite: Decodable {
+    let selection: Selection?
+
+    init(from decoder: Decoder) throws {
+        selection = try? Selection(from: decoder)
     }
 }

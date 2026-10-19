@@ -63,11 +63,14 @@ struct LiveView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var location = NearbyLocation()
     @State private var path = NavigationPath()
+    /// How many trains the widgets have opened, so each gets a page of its own.
+    @State private var openings = 0
     /// Each train's next arrivals, by `Selection.trainID`, as last fetched.
     @State private var trains: [String: [Arrival]] = [:]
     /// The `Selection.trainID`s whose trains couldn't be fetched the last time.
     @State private var failed: Set<String> = []
-    @State private var loadState = LoadState.loading
+    /// Whether any of the last load's trains couldn't be fetched.
+    @State private var loadFailed = false
     /// Moves along every few seconds so the minutes count down.
     @State private var now = Date.now
     /// Adding a favorite starts by choosing its train.
@@ -81,8 +84,6 @@ struct LiveView: View {
     @State private var nearby: [Nearby.Result] = []
     /// Shared with the Edit button; while editing, favorites leave out their times.
     @State private var editMode = EditMode.inactive
-
-    private enum LoadState { case loading, loaded, failed }
 
     /// Where Nearby goes by: the pin, or else you.
     private var here: CLLocation? { pin ?? location.location }
@@ -146,9 +147,10 @@ struct LiveView: View {
             .navigationDestination(for: Selection.self) { selection in
                 // A nearby train that's a favorite too opens with its walking time
                 TrainDetail(selection: favorites.favorite(matching: selection) ?? selection)
-                    // Its own page for each train: one opened from the widget in
-                    // place of another would otherwise keep the other's state
-                    .id(selection.trainID)
+                    // Its own page for each train, and each time a widget opens
+                    // one: opened in place of another, or of itself switched to
+                    // another train, it would otherwise keep that one's state
+                    .id("\(selection.trainID) \(openings)")
             }
             .navigationDestination(for: StationPage.self) { page in
                 StationLive(station: page.station, routes: page.routes, marksLive: marksLive, marksScheduled: marksScheduled) { path.append($0) }
@@ -199,6 +201,7 @@ struct LiveView: View {
                 self.opening = nil
                 switch opening {
                 case .train(let selection):
+                    openings += 1
                     path = NavigationPath([selection])
                 case .station(let page):
                     path = NavigationPath([page])
@@ -251,7 +254,7 @@ struct LiveView: View {
 
     private var favoritesSection: some View {
         Section {
-            if loadState == .failed {
+            if loadFailed {
                 Label("Couldn't reach the MTA. Pull down to try again.", systemImage: "wifi.exclamationmark")
                     .foregroundStyle(.secondary)
             }
@@ -371,11 +374,20 @@ struct LiveView: View {
         }
     }
 
+    /// New times for every train in both lists. Until a train's first come,
+    /// its row shows a dash.
     private func load() async {
         let selections = everyTrain
-        guard !selections.isEmpty else { return }
-        if trains.isEmpty { loadState = .loading }
-        let fetched = await TrainService.trains(for: selections)
+        // With nothing to fetch, nothing failed
+        guard !selections.isEmpty else {
+            failed = []
+            loadFailed = false
+            return
+        }
+        // Nearby rows show only each line's own trains, which are all in its
+        // own feeds; a favorite shows those of other lines running on it too
+        let nearbyOnly = Set(selections.map(\.trainID)).subtracting(favorites.favorites.map(\.trainID))
+        let fetched = await TrainService.trains(for: selections, ownLinesOnly: nearbyOnly)
         // A newer list cancels this load; that isn't a failure
         guard !Task.isCancelled else { return }
         // A train left out couldn't be fetched: its old times go, rather than
@@ -385,7 +397,7 @@ struct LiveView: View {
         for trainID in missing { trains[trainID] = nil }
         failed = failed.subtracting(fetched.keys).union(missing)
         now = .now
-        loadState = missing.isEmpty ? .loaded : .failed
+        loadFailed = !missing.isEmpty
     }
 }
 
@@ -506,7 +518,8 @@ private struct StationLive: View {
     }
 
     private func load() async {
-        let fetched = await TrainService.trains(for: selections)
+        // Each line's own trains are all in its own feeds
+        let fetched = await TrainService.trains(for: selections, includingOtherLines: false)
         guard !Task.isCancelled else { return }
         // One left out couldn't be fetched: its old times go, rather than
         // count down as if they were new
@@ -739,14 +752,16 @@ private struct Minutes: View {
         }
     }
 
-    /// As VoiceOver reads them: "Now, 1 minute, 7 minutes".
+    /// As VoiceOver reads them: "Now, 1 minute, 7 minutes by the timetable".
+    /// A timetable time says so, as its colour does on screen.
     static func spoken(_ trains: [Arrival]?, failed: Bool = false, now: Date) -> String {
         guard !failed else { return "Couldn't load" }
         guard let trains else { return "Loading" }
         guard !trains.isEmpty else { return "No trains" }
         return trains.prefix(3).map { train in
             let minutes = Int(train.time.timeIntervalSince(now) / 60)
-            return minutes < 1 ? "Now" : minutes == 1 ? "1 minute" : "\(minutes) minutes"
+            let time = minutes < 1 ? "Now" : minutes == 1 ? "1 minute" : "\(minutes) minutes"
+            return train.isLive ? time : "\(time) by the timetable"
         }
         .joined(separator: ", ")
     }

@@ -17,8 +17,10 @@ struct NextTrainIntent: AppIntent {
             return .result(dialog: "I couldn't reach the MTA. Try again in a moment.", view: NextTrainSnippet(selection: selection, trains: []))
         }
         let trains = selection.catchable(board.trains, now: now)
-        let notice = board.notice(for: selection, settings: SharedStore.loadSettings())?.label
-        let sentence = Spoken.nextTrain(selection: selection, trains: trains, notice: notice, now: now)
+        let notice = board.notice(for: selection, settings: SharedStore.loadSettings())
+        // The board's trains are all still to come, so any not caught are too soon to reach
+        let sentence = Spoken.nextTrain(selection: selection, trains: trains, unreachable: trains.count < board.trains.count,
+                                        notice: notice, now: now)
         return .result(dialog: "\(sentence)", view: NextTrainSnippet(selection: selection, trains: Array(trains.prefix(3))))
     }
 }

@@ -67,6 +67,27 @@ import Testing
         #expect(ownOnly[prospect.trainID]?.map(\.trip) == ["r1", "r2"])
     }
 
+    @Test func onesThatShowOnlyTheirOwnLinesTrainsNeedOnlyTheirOwnFeeds() {
+        let all = TrainService.feedURLs(for: prospect, includingOtherLines: true)
+        #expect(all.own == [nqrw])
+        #expect(all.others.contains(bdfm))
+        let ownOnly = TrainService.feedURLs(for: prospect, includingOtherLines: true, ownLinesOnly: [prospect.trainID])
+        #expect(ownOnly.own == [nqrw])
+        #expect(ownOnly.others.isEmpty)
+        // Others still get the other lines' feeds
+        #expect(TrainService.feedURLs(for: fourthAv, includingOtherLines: true, ownLinesOnly: [prospect.trainID]).others
+                == TrainService.feedURLs(for: fourthAv, includingOtherLines: true).others)
+
+        let feeds: [URL: [Arrival]] = [
+            nqrw: [train(2, trip: "r1", at: "R34N"), train(4, trip: "r1", at: "R33N")],
+            // A D running local on the R
+            bdfm: [train(5, trip: "d1", at: "R34N", route: "D"), train(7, trip: "d1", at: "R33N", route: "D")],
+        ]
+        let trains = TrainService.trains(for: [prospect, fourthAv], in: feeds, ownLinesOnly: [fourthAv.trainID], now: now)
+        #expect(trains[prospect.trainID]?.map(\.trip) == ["r1", "d1"])
+        #expect(trains[fourthAv.trainID]?.map(\.trip) == ["r1"])
+    }
+
     @Test func oneWhoseOwnFeedDidntComeIsLeftOut() {
         let trains = TrainService.trains(for: [prospect], in: [bdfm: [train(5, trip: "d1", at: "R34N", route: "D")]],
                                          now: now)

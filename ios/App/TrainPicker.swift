@@ -146,6 +146,7 @@ private struct StationStep: View {
                     } label: {
                         StationRow(station: station, isSelected: station.id == chosenID, marksStepFree: settings.settings.stepFree)
                     }
+                    .accessibilityAddTraits(station.id == chosenID ? .isSelected : [])
                 }
             } header: {
                 Text(filter.map { "Stations on the \($0)" } ?? "\(matches.count) stations")
@@ -208,6 +209,7 @@ private struct StationStep: View {
                             StationRow(station: result.station, isSelected: result.station.id == chosenID,
                                        marksStepFree: settings.settings.stepFree, distance: result.distance)
                         }
+                        .accessibilityAddTraits(result.station.id == chosenID ? .isSelected : [])
                     }
                 } header: {
                     Text(filter.map { "Near you on the \($0)" } ?? "Near you")
@@ -225,6 +227,9 @@ private struct StationRow: View {
     var marksStepFree = false
     /// "0.3 mi", in the stations near you.
     var distance: String? = nil
+    /// The bullets grow with the text beside them, up to where nine still fit
+    /// on the narrowest iPhone.
+    @ScaledMetric(relativeTo: .caption) private var bulletSize: CGFloat = 16
 
     /// "No step-free access", or "Step-free on some platforms", if either.
     private var stepFreeNote: String? {
@@ -240,7 +245,7 @@ private struct StationRow: View {
                 Text(station.name).foregroundStyle(.primary)
                 HStack(spacing: 4) {
                     ForEach(station.routes, id: \.self) { route in
-                        LineBullet(route: route, size: 16)
+                        LineBullet(route: route, size: min(bulletSize, 24))
                     }
                     Text(station.borough).font(.caption).foregroundStyle(.secondary)
                 }
@@ -255,7 +260,10 @@ private struct StationRow: View {
                 Text(distance).font(.subheadline).foregroundStyle(.secondary)
             }
             if isSelected {
-                Image(systemName: "checkmark").foregroundStyle(Color.accentColor)
+                // VoiceOver says it's selected instead
+                Image(systemName: "checkmark")
+                    .foregroundStyle(Color.accentColor)
+                    .accessibilityHidden(true)
             }
         }
         .contentShape(Rectangle())
@@ -340,7 +348,11 @@ private struct LinesStep: View {
                 }
                 Spacer()
                 if routes.count > 1 {
-                    Button(allChosen ? "Clear" : "Select all") {
+                    let title = allChosen ? "Clear" : "Select all"
+                    // Each platform has one, so VoiceOver says whose
+                    let label = allChosen ? "Clear the \(Lines.list(routes)) platform"
+                        : "Select all on the \(Lines.list(routes)) platform"
+                    Button(title) {
                         if allChosen {
                             chosen.removeAll(where: routes.contains)
                         } else {
@@ -348,6 +360,8 @@ private struct LinesStep: View {
                         }
                     }
                     .font(.subheadline)
+                    .accessibilityLabel(label)
+                    .accessibilityInputLabels([title])
                 }
             }
             HStack(spacing: 12) {
@@ -435,20 +449,36 @@ private struct DirectionStep: View {
     let routes: [String]
     let current: Direction?
     let pick: (Direction) -> Void
+    /// The arrow's circle grows with the text beside it.
+    @ScaledMetric(relativeTo: .subheadline) private var arrowSize: CGFloat = 32
+
+    /// The ways the lines go from here. One the MTA gives no name, at the end
+    /// of the line, has no trains and is left out, as in the Live tab; where
+    /// it names neither, both.
+    private var directions: [Direction] {
+        let platforms = station.platforms(serving: routes)
+        let named = Direction.allCases.filter { direction in
+            platforms.contains { !$0.directionName(direction).isEmpty }
+        }
+        return named.isEmpty ? Direction.allCases : named
+    }
 
     var body: some View {
         List {
             Section {
-                ForEach(Direction.allCases, id: \.self) { direction in
+                ForEach(directions, id: \.self) { direction in
                     Button {
                         pick(direction)
                     } label: {
                         HStack(spacing: 12) {
                             Image(systemName: direction == .north ? "arrow.up" : "arrow.down")
                                 .font(.subheadline.weight(.bold))
+                                // No bigger than its circle
+                                .dynamicTypeSize(...DynamicTypeSize.accessibility2)
                                 .foregroundStyle(.secondary)
-                                .frame(width: 32, height: 32)
+                                .frame(width: min(arrowSize, 64), height: min(arrowSize, 64))
                                 .background(Circle().fill(Color(.systemGray5)))
+                                .accessibilityHidden(true)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(station.directionLabel(direction, routes: routes)).foregroundStyle(.primary)
                                 Text(direction == .north ? "Northbound" : "Southbound")
@@ -457,11 +487,15 @@ private struct DirectionStep: View {
                             }
                             Spacer()
                             if direction == current {
-                                Image(systemName: "checkmark").foregroundStyle(Color.accentColor)
+                                // VoiceOver says it's selected instead
+                                Image(systemName: "checkmark")
+                                    .foregroundStyle(Color.accentColor)
+                                    .accessibilityHidden(true)
                             }
                         }
                         .contentShape(Rectangle())
                     }
+                    .accessibilityAddTraits(direction == current ? .isSelected : [])
                 }
             } header: {
                 Text("\(Lines.list(routes)) at \(station.name)")
