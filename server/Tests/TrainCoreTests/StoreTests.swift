@@ -69,6 +69,73 @@ import Testing
         #expect(await again.registration(for: sampleToken) == migrated)
     }
 
+    @Test func startsDespiteRowsItCantRead() async throws {
+        let dir = try directory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        func token(_ i: Int) -> String { String(format: "%064x", i) }
+        let store = try Store(directory: dir)
+        for i in 1...3 {
+            _ = try await store.upsert(testRegistration(token: token(i)), maxTotal: 10, maxPerOwner: 5)
+        }
+        try await store.apply([.pushed(token: token(1), revision: try #require(await store.registration(for: token(1))).revision,
+                                       state: state(train: 4), at: now)])
+
+        // As a build with another field in ContentState, or an alert kind or direction fewer, might find them
+        var last = try #require(try JSONSerialization.jsonObject(with: JSONEncoder().encode(state(train: 4))) as? [String: Any])
+        last["updated"] = nil
+        let db = try SQLite(path: dir.appendingPathComponent(Store.fileName).path)
+        try db.query("UPDATE registrations SET last_state = ?, alert_kinds = ? WHERE token = ?", [
+            .blob(try JSONSerialization.data(withJSONObject: last)), .blob(Data("[0,9]".utf8)), .text(token(1)),
+        ])
+        try db.query("UPDATE registrations SET selection = ? WHERE token = ?", [
+            .blob(Data(#"{"stationID":"R34","routes":["R"],"direction":"X"}"#.utf8)), .text(token(2)),
+        ])
+
+        let reloaded = try Store(directory: dir)
+        // Kept, to be pushed afresh
+        let partly = try #require(await reloaded.registration(for: token(1)))
+        #expect(partly.lastState == nil)
+        #expect(partly.alertKinds == nil)
+        #expect(partly.lastPush == now)
+        #expect(partly.selection == prospect)
+        // Dropped, from the database too
+        #expect(await reloaded.registration(for: token(2)) == nil)
+        #expect(try db.query("SELECT token FROM registrations ORDER BY token").map { $0.first?.text } == [token(1), token(3)])
+        #expect(await reloaded.registration(for: token(3)) == (await store.registration(for: token(3))))
+        #expect(await reloaded.count == 2)
+    }
+
+    @Test func migratesTheLegacyEntriesItCanRead() async throws {
+        let dir = try directory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent(Store.legacyFileName)
+        let good: [String: Any] = [
+            "token": sampleToken, "environment": "sandbox",
+            "selection": try JSONSerialization.jsonObject(with: JSONEncoder().encode(prospect)),
+            "trip": "b", "started": now.timeIntervalSinceReferenceDate, "revision": UUID().uuidString,
+            "alertKinds": [0, 9], "lastState": ["trip": "b"], "lastPush": now.timeIntervalSinceReferenceDate,
+        ]
+        var bad = good
+        bad["token"] = String(repeating: "cd34", count: 16)
+        bad["environment"] = "staging"
+        try JSONSerialization.data(withJSONObject: [bad, good]).write(to: file)
+
+        let store = try Store(directory: dir)
+        #expect(await store.count == 1)
+        let migrated = try #require(await store.registration(for: sampleToken))
+        #expect(migrated.selection == prospect)
+        #expect(migrated.alertKinds == nil)
+        #expect(migrated.lastState == nil)
+        #expect(migrated.lastPush == now)
+        #expect(!FileManager.default.fileExists(atPath: file.path))
+
+        // A file that can't be read at all is left for someone to look at
+        try Data("[{".utf8).write(to: file)
+        let again = try Store(directory: dir)
+        #expect(await again.count == 1)
+        #expect(FileManager.default.fileExists(atPath: file.path))
+    }
+
     @Test func capsTotalsAndOwners() async throws {
         let store = try Store(directory: nil)
         func token(_ i: Int) -> String { String(format: "%064x", i) }

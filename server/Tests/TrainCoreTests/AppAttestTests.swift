@@ -153,6 +153,19 @@ import Testing
         }
     }
 
+    @Test func refusesMoreCertificatesThanApplesTwo() async throws {
+        let authority = try TestAuthority()
+        let device = P256.Signing.PrivateKey()
+        // Each chain would verify if searched: refused before it is
+        for extra in [[authority.root], Array(repeating: authority.intermediate, count: 8)] {
+            let attestation = try authority.attestation(appID: appID, challenge: challenge, deviceKey: device,
+                                                        extraCertificates: extra)
+            await #expect(throws: AppAttest.Problem.malformed("attestation object")) {
+                try await verifier(authority).verifyAttestation(attestation, keyID: keyID(device), challenge: challenge, now: .now)
+            }
+        }
+    }
+
     @Test func bothEnvironmentsWhenAsked() async throws {
         let authority = try TestAuthority()
         let device = P256.Signing.PrivateKey()

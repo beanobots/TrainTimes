@@ -9,7 +9,8 @@ import X509
 struct AppContext: RequestContext, RemoteAddressRequestContext {
     var coreContext: CoreRequestContextStorage
     let remoteAddress: SocketAddress?
-    /// Set by `RateLimit`: cloudflared's CF-Connecting-IP, or the peer's address.
+    /// Set by `RateLimit`: cloudflared's CF-Connecting-IP, or the peer's
+    /// address; an IPv6 address's /64 (see `ClientIP`).
     var clientIP = "unknown"
 
     init(source: ApplicationRequestContextSource) {
@@ -92,7 +93,7 @@ struct HTTPServices: Sendable {
         self.store = store
         self.auth = auth
         self.limits = limits
-        challenges = ChallengeStore(limit: limits.maxChallenges)
+        challenges = ChallengeStore(limit: limits.maxChallenges, perClient: limits.challengesPerIP)
         limiter = RateLimiter(perMinute: limits.requestsPerMinute, burst: limits.requestBurst)
         keyCreation = DailyLimiter(limit: limits.keysPerIPPerDay)
         let environments: Set<AttestEnvironment>
@@ -119,7 +120,14 @@ enum HTTPRoutes {
 
         if case .attest = services.auth {
             router.get("/attest/challenge") { _, context -> Response in
-                guard let challenge = await services.challenges.issue() else {
+                let challenge: String
+                switch await services.challenges.issue(for: context.clientIP) {
+                case .challenge(let issued):
+                    challenge = issued
+                case .clientFull(let retryAfter):
+                    log("challenges: \(services.limits.challengesPerIP) outstanding", context)
+                    return Response(status: .tooManyRequests, headers: [.retryAfter: String(retryAfter)])
+                case .full:
                     Log.error("challenges: \(services.limits.maxChallenges) outstanding, refusing more")
                     throw HTTPError(.serviceUnavailable)
                 }

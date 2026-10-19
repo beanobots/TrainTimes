@@ -46,8 +46,12 @@ only for rate limits, and logs it only as a keyed hash.
 | `RATE_LIMIT_PER_MINUTE` | `30` | per client address, on every route |
 | `RATE_LIMIT_BURST` | same as per minute | |
 | `MAX_CHALLENGES` | `10000` | outstanding challenges, in all |
+| `MAX_CHALLENGES_PER_IP` | `10` | outstanding challenges per client address |
 | `MAX_KEYS_PER_IP_PER_DAY` | `10` | attestations per client address per UTC day |
 | `LOG_PUSHES` | `0` | `1` logs every push; otherwise each pass logs its totals |
+
+The limits per client address count an IPv6 address by its /64, since a host
+is commonly given a whole /64.
 
 ## API
 
@@ -64,7 +68,9 @@ since 2001-01-01.
 
 `200` with `{"challenge":"<43 characters, base64url>","expiresIn":300}`, and
 `Cache-Control: no-store`. Each challenge can be used once, within 5 minutes.
-The server answers `503` when `MAX_CHALLENGES` are outstanding.
+A client with `MAX_CHALLENGES_PER_IP` outstanding gets `429`, with
+`Retry-After` the seconds until the first of them expires. The server answers
+`503` when `MAX_CHALLENGES` are outstanding in all.
 
 ### `POST /attest`: once per App Attest key
 

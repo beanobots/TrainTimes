@@ -78,7 +78,7 @@ struct TestAuthority {
     func attestation(appID: String, challenge: [UInt8], deviceKey: P256.Signing.PrivateKey,
                      environment: AttestEnvironment = .production, counter: UInt32 = 0,
                      credentialID: [UInt8]? = nil, nonceChallenge: [UInt8]? = nil,
-                     signer: P256.Signing.PrivateKey? = nil) throws -> [UInt8] {
+                     signer: P256.Signing.PrivateKey? = nil, extraCertificates: [Certificate] = []) throws -> [UInt8] {
         let keyID = Self.keyID(of: deviceKey)
         let credential = credentialID ?? keyID
         // Built a piece at a time: as one `+` chain it's too much for the type checker
@@ -103,14 +103,15 @@ struct TestAuthority {
                                       value: ArraySlice(try Self.extensionValue(nonce: nonce)))
             },
             issuerPrivateKey: .init(signer ?? intermediateKey))
-        var leafDER = DER.Serializer()
-        try leafDER.serialize(leaf)
-        var intermediateDER = DER.Serializer()
-        try intermediateDER.serialize(intermediate)
+        let x5c = try ([leaf, intermediate] + extraCertificates).map { certificate -> CBORValue in
+            var der = DER.Serializer()
+            try der.serialize(certificate)
+            return .bytes(der.serializedBytes)
+        }
         return CBORValue.map([
             ("fmt", .text("apple-appattest")),
             ("attStmt", .map([
-                ("x5c", .array([.bytes(leafDER.serializedBytes), .bytes(intermediateDER.serializedBytes)])),
+                ("x5c", .array(x5c)),
                 ("receipt", .bytes([1, 2, 3])),
             ])),
             ("authData", .bytes(authData)),

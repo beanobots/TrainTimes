@@ -165,13 +165,13 @@ final class TestDevice: @unchecked Sendable {
 }
 
 @Suite struct AttestModeHTTPTests {
-    func withApp(limits: Limits = testLimits(),
+    func withApp(limits: Limits = testLimits(), setup: TestingSetup = .router,
                  _ body: @escaping @Sendable (any TestClientProtocol, Store, TestAuthority) async throws -> Void) async throws {
         let store = try Store(directory: nil)
         let authority = try TestAuthority()
         let services = HTTPServices(store: store, auth: .attest([.production]), appID: testAppID, limits: limits,
                                     roots: [authority.root])
-        try await Application(router: HTTPRoutes.router(services)).test(.router) { client in
+        try await Application(router: HTTPRoutes.router(services)).test(setup) { client in
             try await body(client, store, authority)
         }
     }
@@ -326,6 +326,30 @@ final class TestDevice: @unchecked Sendable {
             _ = try await Self.challenge(client)
             try await client.execute(uri: "/attest/challenge", method: .get) { response in
                 #expect(response.status == .serviceUnavailable)
+            }
+        }
+    }
+
+    @Test func capsEachClientsOutstandingChallenges() async throws {
+        var limits = testLimits()
+        limits.challengesPerIP = 2
+        // Live, so requests come from loopback, as cloudflared's do, and CF-Connecting-IP counts
+        try await withApp(limits: limits, setup: .live) { (client, _, _) async throws in
+            let requests: [(String, HTTPResponse.Status)] = [
+                ("2001:db8:1:2::1", .ok), ("2001:db8:1:2::2", .ok),
+                // Another address in the same /64 is the same client
+                ("2001:db8:1:2::3", .tooManyRequests),
+                ("2001:db8:1:3::1", .ok), ("203.0.113.9", .ok), ("203.0.113.9", .ok), ("203.0.113.9", .tooManyRequests),
+            ]
+            for (address, expected) in requests {
+                try await client.execute(uri: "/attest/challenge", method: .get, headers: [.cfConnectingIP: address]) { response in
+                    #expect(response.status == expected)
+                    if expected == .tooManyRequests {
+                        // When its first expires
+                        let retryAfter = try #require(response.headers[.retryAfter].flatMap { Int($0) })
+                        #expect((290...300).contains(retryAfter))
+                    }
+                }
             }
         }
     }

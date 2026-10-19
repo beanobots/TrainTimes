@@ -33,6 +33,9 @@ struct Limits: Sendable {
     var requestsPerMinute = 30.0
     var requestBurst = 30.0
     var maxChallenges = 10_000
+    /// Outstanding challenges per client: one for each request the app is
+    /// about to sign, with room for a few it gave up on.
+    var challengesPerIP = 10
     var keysPerIPPerDay = 10
     /// Attest keys unused this long are forgotten.
     var keyRetention: TimeInterval = 90 * 86400
@@ -98,6 +101,8 @@ struct Config: Sendable {
         limits.requestBurst = Double(try Self.integer("RATE_LIMIT_BURST", in: env, default: Int(limits.requestsPerMinute),
                                                       range: 1...100_000))
         limits.maxChallenges = try Self.integer("MAX_CHALLENGES", in: env, default: limits.maxChallenges, range: 1...10_000_000)
+        limits.challengesPerIP = try Self.integer("MAX_CHALLENGES_PER_IP", in: env, default: limits.challengesPerIP,
+                                                  range: 1...100_000)
         limits.keysPerIPPerDay = try Self.integer("MAX_KEYS_PER_IP_PER_DAY", in: env, default: limits.keysPerIPPerDay,
                                                   range: 1...100_000)
         self.limits = limits

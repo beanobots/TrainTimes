@@ -113,8 +113,10 @@ struct AppAttest: Sendable {
         guard let keyIDBytes = Self.keyIDBytes(keyID) else { throw Problem.malformed("key id") }
         let object: CBOR
         do { object = try CBOR.decode(attestation) } catch { throw Problem.malformed("attestation CBOR") }
+        // x5c is the credential certificate and Apple's intermediate, as Apple
+        // sends it: the chain search's cost grows factorially with more
         guard object["fmt"]?.text == "apple-appattest",
-              let x5c = object["attStmt"]?["x5c"]?.array, x5c.count >= 2,
+              let x5c = object["attStmt"]?["x5c"]?.array, x5c.count == 2,
               let authDataBytes = object["authData"]?.bytes else {
             throw Problem.malformed("attestation object")
         }
