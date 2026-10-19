@@ -58,7 +58,7 @@ private struct ChangeStationStep: View {
             Section {
                 if let stations {
                     if stations.isEmpty {
-                        Text("No \(Lines.list(selection.routes)) trains are running \(selection.heading) to list the stops.")
+                        Text("No \(Spoken.trainsPlural(line: Lines.list(selection.routes), heading: selection.heading)) are running to list the stops.")
                             .foregroundStyle(.secondary)
                     }
                     ForEach(stations) { station in
@@ -69,7 +69,6 @@ private struct ChangeStationStep: View {
                             ChangeStationRow(station: station, across: lines.across, others: lines.others,
                                              isExpress: isExpress(lines.across), isSelected: station.id == chosenID)
                         }
-                        .disabled(lines.across.isEmpty && lines.others.isEmpty)
                     }
                 } else if failed {
                     Button {
@@ -86,7 +85,7 @@ private struct ChangeStationStep: View {
             } header: {
                 Text("Next stops")
             } footer: {
-                Text("Stops after \(stationName) on the \(Lines.list(selection.routes)) \(selection.heading), with the lines you can change to at each.")
+                Text("Stops after \(stationName) on the \(Spoken.describe(line: Lines.list(selection.routes), heading: selection.heading)), with the lines you can change to at each.")
             }
         }
         .navigationBarTitleDisplayMode(.inline)
@@ -108,7 +107,11 @@ private struct ChangeStationStep: View {
     private func load() async {
         failed = false
         do {
-            stations = try await TrainService.stations(after: selection)
+            // Just the stations with another line to change to
+            stations = try await TrainService.stations(after: selection).filter { station in
+                let lines = changeLines(at: station, from: selection)
+                return !lines.across.isEmpty || !lines.others.isEmpty
+            }
         } catch {
             failed = true
         }
@@ -127,15 +130,12 @@ private struct ChangeStationRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(station.name)
                     .fontWeight(isSelected ? .semibold : .regular)
-                    .foregroundStyle(across.isEmpty && others.isEmpty ? Color.secondary : Color.primary)
+                    .foregroundStyle(Color.primary)
                 if !across.isEmpty {
                     lines(across, note: isExpress ? "Express, across the platform" : "Across the platform", prominent: true)
                 }
                 if !others.isEmpty {
                     lines(others, note: across.isEmpty ? "Another platform" : "Other platforms", prominent: false)
-                }
-                if across.isEmpty && others.isEmpty {
-                    Text("No other lines").font(.caption).foregroundStyle(.secondary)
                 }
             }
             Spacer()

@@ -5,11 +5,14 @@ import UIKit
 /// `LineBullets` draws them.
 enum BulletImage {
     private static let cache = NSCache<NSString, NSData>()
+    private static let side: CGFloat = 60
+    private static let scale: CGFloat = 3
+    /// How many pixels across the picture is, to draw it at another size.
+    static let pixelSide = side * scale
 
     static func data(for routes: [String]) -> Data? {
         let key = routes.joined(separator: ",") as NSString
         if let cached = cache.object(forKey: key) { return cached as Data }
-        let side: CGFloat = 60
         let gap: CGFloat = 3
         let count = routes.count
         let columns = count == 1 ? 1 : count <= 4 ? 2 : 3
@@ -17,7 +20,7 @@ enum BulletImage {
         let across = CGFloat(max(columns, rows))
         let size = (side - gap * (across - 1)) / across
         let format = UIGraphicsImageRendererFormat()
-        format.scale = 3
+        format.scale = scale
         format.opaque = false
         let image = UIGraphicsImageRenderer(size: CGSize(width: side, height: side), format: format).image { _ in
             let top = (side - CGFloat(rows) * size - CGFloat(rows - 1) * gap) / 2

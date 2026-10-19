@@ -44,13 +44,19 @@ struct AppTabs: View {
         }
         // A widget's "More ›": the alerts of its train, which can be other than
         // the default's. Here so it opens whichever tab is showing. And the
-        // Nearby widget: one of its trains, or the stations near you.
+        // Nearby widget: one of its trains, a station, or the stations near you.
+        // And the Transfers widget: its train and the one it changes to.
         .onOpenURL { url in
             if let selection = Selection(alertsURL: url) {
                 let train = AlertsSheet.Train(selection: selection)
                 afterSheets { alertsTrain = train }
             } else if let selection = Selection(trainURL: url) {
                 afterSheets { showInLive(.train(selection)) }
+            } else if let transfer = Selection.transfer(from: url) {
+                let page = TransferPage(selection: transfer.selection, change: transfer.change)
+                afterSheets { showInLive(.transfer(page)) }
+            } else if let opened = Nearby.station(from: url) {
+                afterSheets { showInLive(.station(StationPage(station: opened.station, first: opened.first))) }
             } else if url == Nearby.allowURL {
                 afterSheets { showInLive(.allowLocation) }
             } else if url == Nearby.url {

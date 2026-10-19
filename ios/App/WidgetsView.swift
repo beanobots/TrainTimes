@@ -105,7 +105,7 @@ private struct WidgetRow: View {
     let placed: Int
 
     /// The station under a name of its own; under the station's name, which
-    /// way. Then any change: "R to Manhattan, then D or N".
+    /// way. Then any change: "R Manhattan, then D or N".
     private var subtitle: String {
         let selection = widget.selection
         let base = widget.title == selection.station?.name
@@ -220,60 +220,20 @@ private struct AddWidget: View {
 }
 
 /// What adding and editing a widget have in common: its name, its train, any
-/// change of trains, and which alerts it mentions.
+/// change of trains, any commuting hours, and which alerts it mentions.
 private struct WidgetFields: View {
     @Binding var widget: SavedWidget
-    @State private var choosingTrain = false
-    @State private var choosingChange = false
 
     private var station: Station? { widget.selection.station }
 
-    private var quickMinutes: Binding<Int> {
-        Binding {
-            widget.change?.quickMinutes ?? Change.defaultQuickMinutes
-        } set: {
-            widget.change?.quickMinutes = $0
-        }
-    }
-
-    private var walkMinutes: Binding<Int> {
-        Binding {
-            widget.change?.walkMinutes ?? Change.defaultWalkMinutes
-        } set: {
-            widget.change?.walkMinutes = $0
-        }
-    }
-
     var body: some View {
-        Section {
-            Button {
-                choosingTrain = true
-            } label: {
-                TrainRow(selection: widget.selection)
-            }
-            .buttonStyle(.plain)
-            .accessibilityHint("Choose another station, line or direction")
-        }
-        .sheet(isPresented: $choosingTrain) {
-            TrainPicker(selection: $widget.selection)
-        }
-        // Another line or direction goes on another way, which the change
-        // isn't on; another station on the same way keeps it
-        .onChange(of: widget.selection) { old, new in
-            if old.routes != new.routes || old.direction != new.direction {
-                widget.change = nil
-            } else {
-                widget.change = widget.change?.validated(for: new)
-            }
-        }
-        changeSection
+        TripSections(selection: $widget.selection, change: $widget.change)
+        CommuteSection(widget: $widget)
         Section("Name") {
             TextField(station?.name ?? "Name", text: $widget.name)
         }
         Section {
-            Stepper(value: $widget.selection.walkMinutes, in: 0...60) {
-                Text(widget.selection.walkMinutes == 0 ? "Walk to the station: not set" : "Walk to the station: \(widget.selection.walkMinutes) min")
-            }
+            WalkStepper(minutes: $widget.selection.walkMinutes)
         } header: {
             Text("Getting there")
         } footer: {
@@ -290,20 +250,96 @@ private struct WidgetFields: View {
     }
 }
 
-extension WidgetFields {
+/// The walk to the station, in minutes.
+private struct WalkStepper: View {
+    @Binding var minutes: Int
+
+    var body: some View {
+        Stepper(value: $minutes, in: 0...60) {
+            Text(minutes == 0 ? "Walk to the station: not set" : "Walk to the station: \(minutes) min")
+        }
+    }
+}
+
+/// A train, tapped to choose another, and any change of trains on the way:
+/// a widget's own, or its commuting hours'.
+private struct TripSections: View {
+    @Binding var selection: Selection
+    @Binding var change: Change?
+    /// Over the train; none for a widget's own.
+    var trainHeader: String? = nil
+    @State private var choosingTrain = false
+    @State private var choosingChange = false
+
+    private var quickMinutes: Binding<Int> {
+        Binding {
+            change?.quickMinutes ?? Change.defaultQuickMinutes
+        } set: {
+            change?.quickMinutes = $0
+        }
+    }
+
+    private var walkMinutes: Binding<Int> {
+        Binding {
+            change?.walkMinutes ?? Change.defaultWalkMinutes
+        } set: {
+            change?.walkMinutes = $0
+        }
+    }
+
+    var body: some View {
+        Section {
+            Button {
+                choosingTrain = true
+            } label: {
+                TrainRow(selection: selection)
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint("Choose another station, line or direction")
+            // On the row, not the section: a section passes its modifiers to
+            // each row, header and footer, and the extra sheets knock this one out
+            .sheet(isPresented: $choosingTrain) {
+                TrainPicker(selection: $selection)
+            }
+            // Another line or direction goes on another way, which the change
+            // isn't on; another station on the same way keeps it
+            .onChange(of: selection) { old, new in
+                if old.routes != new.routes || old.direction != new.direction {
+                    change = nil
+                } else {
+                    change = change?.validated(for: new)
+                }
+            }
+        } header: {
+            if let trainHeader { Text(trainHeader) }
+        }
+        changeSection
+    }
+}
+
+extension TripSections {
     /// Where the train is left for another, and how short a wait the large
     /// widget highlights; or a button to add one.
     @ViewBuilder fileprivate var changeSection: some View {
-        let selection = widget.selection
         Section {
-            if let change = widget.change {
-                Button {
-                    choosingChange = true
-                } label: {
+            // One row, with or without a change, so the sheet stays on it
+            // when Done adds the change
+            Button {
+                choosingChange = true
+            } label: {
+                if let change {
                     ChangeRow(change: change, selection: selection)
+                } else {
+                    Label("Add a Change", systemImage: "arrow.triangle.swap")
+                        .foregroundStyle(.tint)
                 }
-                .buttonStyle(.plain)
-                .accessibilityHint("Choose another station or lines to change to")
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint(change == nil ? "" : "Choose another station or lines to change to")
+            .sheet(isPresented: $choosingChange) {
+                ChangePicker(selection: selection, change: $change)
+            }
+            if let change {
                 Stepper(value: quickMinutes, in: 0...15) {
                     Text("Quick change: up to \(change.quickMinutes) min")
                 }
@@ -313,27 +349,116 @@ extension WidgetFields {
                     }
                 }
                 Button("Remove Change", role: .destructive) {
-                    widget.change = nil
-                }
-            } else {
-                Button {
-                    choosingChange = true
-                } label: {
-                    Label("Add a Change", systemImage: "arrow.triangle.swap")
+                    self.change = nil
                 }
             }
         } header: {
             Text("Then change")
         } footer: {
-            if let change = widget.change, let name = change.station?.name {
+            if let change, let name = change.station?.name {
                 Text("The Transfers widget pairs each \(Lines.list(selection.routes)) with the first \(Lines.list(change.routes, joinedBy: "or")) it can catch at \(name), and highlights waits this short.")
             } else {
                 Text("Change trains on the way, say from a local to an express. The Transfers widget pairs each train with the first one it can catch there.")
             }
         }
-        .sheet(isPresented: $choosingChange) {
-            ChangePicker(selection: selection, change: $widget.change)
+    }
+}
+
+/// A widget's commuting hours: the times of day, and the days, it shows
+/// another train instead, with any change of its own, say the train home in
+/// the evening.
+private struct CommuteSection: View {
+    @Binding var widget: SavedWidget
+
+    private var isOn: Binding<Bool> {
+        Binding {
+            widget.commute != nil
+        } set: { on in
+            // Starts out as the widget's own train, with its walking time,
+            // for you to choose another
+            widget.commute = on ? CommutingHours(selection: widget.selection) : nil
         }
+    }
+
+    /// The commuting hours, while there are any; the last ones if they're
+    /// turned off while still on screen.
+    private func hours(_ commute: CommutingHours) -> Binding<CommutingHours> {
+        Binding {
+            widget.commute ?? commute
+        } set: {
+            widget.commute = $0
+        }
+    }
+
+    /// The minutes after midnight as a time of day today, for a time picker.
+    private func time(_ minutes: Binding<Int>) -> Binding<Date> {
+        Binding {
+            let value = minutes.wrappedValue
+            return Calendar.current.date(bySettingHour: value / 60, minute: value % 60, second: 0, of: .now) ?? .now
+        } set: { date in
+            let components = Calendar.current.dateComponents([.hour, .minute], from: date)
+            minutes.wrappedValue = (components.hour ?? 0) * 60 + (components.minute ?? 0)
+        }
+    }
+
+    var body: some View {
+        Section {
+            Toggle("Switch at certain times", isOn: isOn)
+            if let commute = widget.commute {
+                let hours = hours(commute)
+                DatePicker("From", selection: time(hours.start), displayedComponents: .hourAndMinute)
+                DatePicker("Until", selection: time(hours.end), displayedComponents: .hourAndMinute)
+                WeekdayPicker(weekdays: hours.weekdays)
+            }
+        } header: {
+            Text("Commuting hours")
+        } footer: {
+            if widget.commute == nil {
+                Text("Show another train at certain times, say your train home in the evening.")
+            } else {
+                Text("During these hours the widget shows the train below instead, with the alerts this one mentions.")
+            }
+        }
+        if let commute = widget.commute {
+            let hours = hours(commute)
+            TripSections(selection: hours.selection, change: hours.change, trainHeader: "During commuting hours")
+            Section {
+                WalkStepper(minutes: hours.selection.walkMinutes)
+            }
+        }
+    }
+}
+
+/// The days of the week, in the phone's order, each tapped on or off.
+private struct WeekdayPicker: View {
+    @Binding var weekdays: Set<Int>
+
+    /// `Calendar` weekdays from the first day of the week.
+    private var days: [Int] {
+        let first = Calendar.current.firstWeekday
+        return (0..<7).map { (first - 1 + $0) % 7 + 1 }
+    }
+
+    var body: some View {
+        HStack {
+            ForEach(days, id: \.self) { day in
+                let isOn = weekdays.contains(day)
+                Button {
+                    if isOn { weekdays.remove(day) } else { weekdays.insert(day) }
+                } label: {
+                    Text(Calendar.current.veryShortWeekdaySymbols[day - 1])
+                        .font(.subheadline.weight(.semibold))
+                        .frame(width: 34, height: 34)
+                        .foregroundStyle(isOn ? Color.white : Color.primary)
+                        .background(Circle().fill(isOn ? Color.accentColor : Color.secondary.opacity(0.15)))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(Calendar.current.weekdaySymbols[day - 1])
+                .accessibilityAddTraits(isOn ? .isSelected : [])
+                if day != days.last { Spacer(minLength: 0) }
+            }
+        }
+        .padding(.vertical, 2)
     }
 }
 

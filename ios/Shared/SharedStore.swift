@@ -29,8 +29,7 @@ enum SharedStore {
     private static let countdownFile = container?.appendingPathComponent("countdown.json")
     private static let mapFile = container?.appendingPathComponent("map.json")
     private static let alertFile = container?.appendingPathComponent("alert.json")
-    private static let refreshFile = container?.appendingPathComponent("refreshed.json")
-    private static let toggleFile = container?.appendingPathComponent("toggled.json")
+    private static let tapsFile = container?.appendingPathComponent("taps.json")
     private static let boardsFile = container?.appendingPathComponent("boards.json")
     private static let widgetsFile = container?.appendingPathComponent("widgets.json")
     private static let settingsFile = container?.appendingPathComponent("settings.json")
@@ -59,6 +58,15 @@ enum SharedStore {
         var trainID: String
         /// When iOS will have ended it.
         var ends: Date
+        /// The `TrainEntry.widgetID` of the widget whose walk button started
+        /// it, which alone shows it; nil when started in the app, when every
+        /// widget for the train does.
+        var widgetID: String? = nil
+
+        /// Whether it's this widget's, so its walk button stops it.
+        func isShown(onWidget widgetID: String, for trainID: String) -> Bool {
+            trainID == self.trainID && (self.widgetID == nil || self.widgetID == widgetID)
+        }
     }
 
     static func loadCountdown() -> Countdown? {
@@ -76,35 +84,36 @@ enum SharedStore {
         }
     }
 
-    /// Whether the medium widgets for this train (a `Selection.trainID`) show
-    /// where it is instead of the later trains. A widget can't keep state of its
-    /// own, so its map button leaves it here.
-    static func showsMap(for trainID: String) -> Bool {
-        trains(in: mapFile).contains(trainID)
+    /// Whether this widget (a `TrainEntry.widgetID`) shows where this train
+    /// (a `Selection.trainID`) is instead of the later trains. A widget can't
+    /// keep state of its own, so its map button leaves it here. Kept by train
+    /// too, so the other train of commuting hours starts out with its times.
+    static func showsMap(for trainID: String, in widgetID: String) -> Bool {
+        trains(in: mapFile).contains("\(widgetID) \(trainID)")
     }
 
-    static func toggleMap(for trainID: String) {
-        toggle(trainID, in: mapFile)
+    static func toggleMap(for trainID: String, in widgetID: String) {
+        toggle("\(widgetID) \(trainID)", in: mapFile)
     }
 
-    /// Whether the home screen widgets for this train, with these alerts (a
-    /// `Selection.alertID`), show their alert in full instead of the times.
-    /// Their banner leaves it here, as the map button does.
-    static func showsAlert(for alertID: String) -> Bool {
-        trains(in: alertFile).contains(alertID)
+    /// Whether this widget shows the alert of this train, with these alerts
+    /// (a `Selection.alertID`), in full instead of the times. Its banner
+    /// leaves it here, as the map button does.
+    static func showsAlert(for alertID: String, in widgetID: String) -> Bool {
+        trains(in: alertFile).contains("\(widgetID) \(alertID)")
     }
 
-    static func toggleAlert(for alertID: String) {
-        toggle(alertID, in: alertFile)
+    static func toggleAlert(for alertID: String, in widgetID: String) {
+        toggle("\(widgetID) \(alertID)", in: alertFile)
     }
 
-    /// Closes the train's alert. Unlike a toggle, two widgets doing this at
+    /// Closes the widget's alert. Unlike a toggle, two reloads doing this at
     /// once can't open it again.
-    static func closeAlert(for alertID: String) {
+    static func closeAlert(for alertID: String, in widgetID: String) {
         guard let alertFile else { return }
         changing(alertFile) {
             var trains = trains(in: alertFile)
-            guard trains.remove(alertID) != nil else { return }
+            guard trains.remove("\(widgetID) \(alertID)") != nil else { return }
             write(trains, to: alertFile)
         }
     }
@@ -138,28 +147,41 @@ enum SharedStore {
         return Set(trains)
     }
 
-    /// When ↻ was last tapped, so the widgets can light it up as their new times come in.
-    static func loadRefreshed() -> Date? {
-        guard let refreshFile, let data = try? Data(contentsOf: refreshFile) else { return nil }
-        return try? JSONDecoder().decode(Date.self, from: data)
+    /// When one widget's buttons were last tapped, so it alone redraws as
+    /// they ask: iOS reloads only the widget tapped.
+    struct Taps: Codable {
+        /// ↻, so it never redraws with times from before.
+        var refreshed: Date?
+        /// The map or walk button or the alert banner. Those change only how
+        /// the widget looks, so it redraws with the times it already has.
+        var toggled: Date?
+
+        var latest: Date? { [refreshed, toggled].compactMap { $0 }.max() }
     }
 
-    static func saveRefreshed(_ date: Date) {
-        guard let refreshFile, let data = try? JSONEncoder().encode(date) else { return }
-        try? data.write(to: refreshFile, options: .atomic)
+    /// A `TrainEntry.widgetID`'s taps.
+    static func loadTaps(for widgetID: String) -> Taps {
+        savedTaps()[widgetID] ?? Taps()
     }
 
-    /// When a map or walk button or an alert banner was last tapped. Those
-    /// change only how the widgets look, so they redraw with the times they
-    /// already have.
-    static func loadToggled() -> Date? {
-        guard let toggleFile, let data = try? Data(contentsOf: toggleFile) else { return nil }
-        return try? JSONDecoder().decode(Date.self, from: data)
+    /// Sets `tap` to now for the widget. Only the last hour's are kept: after
+    /// that, none of them changes how a widget redraws.
+    static func recordTap(_ tap: WritableKeyPath<Taps, Date?>, for widgetID: String) {
+        guard let tapsFile else { return }
+        let now = Date.now
+        changing(tapsFile) {
+            var taps = savedTaps().filter { $0.value.latest.map { now.timeIntervalSince($0) < 60 * 60 } ?? false }
+            taps[widgetID, default: Taps()][keyPath: tap] = now
+            if let data = try? JSONEncoder().encode(taps) {
+                try? data.write(to: tapsFile, options: .atomic)
+            }
+        }
     }
 
-    static func saveToggled(_ date: Date) {
-        guard let toggleFile, let data = try? JSONEncoder().encode(date) else { return }
-        try? data.write(to: toggleFile, options: .atomic)
+    private static func savedTaps() -> [String: Taps] {
+        guard let tapsFile, let data = try? Data(contentsOf: tapsFile),
+              let taps = try? JSONDecoder().decode([String: Taps].self, from: data) else { return [:] }
+        return taps
     }
 
     /// A train's times and alert as last fetched, by a widget or the countdown,
@@ -177,7 +199,8 @@ enum SharedStore {
         savedBoards()[boardKey(selection, change: change)]
     }
 
-    /// Kept for 20 minutes, twice as long as a widget waits to reload.
+    /// Kept for an hour: iOS can leave a widget that long between reloads,
+    /// showing these times, and a tap redraws it with them.
     @discardableResult
     static func saveBoard(_ board: Board, for selection: Selection, change: Change? = nil, fetched: Date) -> SavedBoard {
         let saved = SavedBoard(fetched: fetched, trains: board.trains,
@@ -186,7 +209,7 @@ enum SharedStore {
         guard let boardsFile else { return saved }
         let key = boardKey(selection, change: change)
         changing(boardsFile) {
-            var boards = savedBoards().filter { fetched.timeIntervalSince($0.value.fetched) < 20 * 60 }
+            var boards = savedBoards().filter { fetched.timeIntervalSince($0.value.fetched) < 60 * 60 }
             boards[key] = saved
             if let data = try? JSONEncoder().encode(boards) {
                 try? data.write(to: boardsFile, options: .atomic)
@@ -273,11 +296,13 @@ struct AppSettings: Codable, Hashable, Sendable {
     var largerWidgetText = false
     /// Marks live predictions with a symbol, not only in green.
     var marksLiveTimes = false
+    /// Marks timetable times with a symbol, so they stand out from live ones.
+    var marksScheduledTimes = false
 
     init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case alertKinds, stepFree, largerWidgetText, marksLiveTimes
+        case alertKinds, stepFree, largerWidgetText, marksLiveTimes, marksScheduledTimes
     }
 
     /// Settings saved before any of these existed still load, with the rest at their defaults.
@@ -288,5 +313,6 @@ struct AppSettings: Codable, Hashable, Sendable {
         stepFree = try container.decodeIfPresent(Bool.self, forKey: .stepFree) ?? defaults.stepFree
         largerWidgetText = try container.decodeIfPresent(Bool.self, forKey: .largerWidgetText) ?? defaults.largerWidgetText
         marksLiveTimes = try container.decodeIfPresent(Bool.self, forKey: .marksLiveTimes) ?? defaults.marksLiveTimes
+        marksScheduledTimes = try container.decodeIfPresent(Bool.self, forKey: .marksScheduledTimes) ?? defaults.marksScheduledTimes
     }
 }

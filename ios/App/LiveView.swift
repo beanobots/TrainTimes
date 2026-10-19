@@ -3,15 +3,44 @@ import MapKit
 import SwiftUI
 import UIKit
 
-/// What a tap on the Nearby widget opens in the Live tab.
+/// What a tap on the Nearby or Transfers widget opens in the Live tab.
 enum LiveOpening: Equatable {
     /// One of its trains.
     case train(Selection)
+    /// A station's every line, both ways.
+    case station(StationPage)
+    /// A Transfers widget's train, and the lines it changes to.
+    case transfer(TransferPage)
     /// The stations near you, found again.
     case nearby
     /// Location for the app: asked for the first time, and once it's been
     /// turned off, in Settings.
     case allowLocation
+}
+
+/// A station's every line both ways, with `first` at the top: the lines a
+/// tap on "4 more lines" on the Nearby widget was for.
+struct StationPage: Hashable {
+    let station: Station
+    var first: [String] = []
+
+    /// The station's lines, `first` first, the rest in the station's order.
+    var routes: [String] {
+        station.routes.filter(first.contains) + station.routes.filter { !first.contains($0) }
+    }
+}
+
+/// A Transfers widget's two stations: its train at yours, and the lines it
+/// changes to at the change, going the same way.
+struct TransferPage: Hashable {
+    let selection: Selection
+    let change: Change
+
+    /// The lines changed to, as a train of their own at the change.
+    var changeTrain: Selection {
+        Selection(stationID: change.stationID, routes: change.routes, direction: selection.direction,
+                  elevatorAlerts: selection.elevatorAlerts, serviceAlerts: selection.serviceAlerts)
+    }
 }
 
 /// The Live tab: the next trains of your favorites, and of every line at the
@@ -25,7 +54,7 @@ struct LiveView: View {
     @Environment(\.accessibilityDifferentiateWithoutColor) private var withoutColor
     @Environment(\.scenePhase) private var scenePhase
     @State private var location = NearbyLocation()
-    @State private var path: [Selection] = []
+    @State private var path = NavigationPath()
     /// Each train's next arrivals, by `Selection.trainID`, as last fetched.
     @State private var trains: [String: [Arrival]] = [:]
     @State private var loadState = LoadState.loading
@@ -71,6 +100,7 @@ struct LiveView: View {
     }
 
     private var marksLive: Bool { settings.marksLive(withoutColor: withoutColor) }
+    private var marksScheduled: Bool { settings.settings.marksScheduledTimes }
 
     /// Starts out at the last favorite's station, with the walking time and alerts at their defaults.
     private var newTrain: Binding<Selection> {
@@ -106,6 +136,15 @@ struct LiveView: View {
             .navigationDestination(for: Selection.self) { selection in
                 // A nearby train that's a favorite too opens with its walking time
                 TrainDetail(selection: favorites.favorite(matching: selection) ?? selection)
+                    // Its own page for each train: one opened from the widget in
+                    // place of another would otherwise keep the other's state
+                    .id(selection.trainID)
+            }
+            .navigationDestination(for: StationPage.self) { page in
+                StationLive(station: page.station, routes: page.routes, marksLive: marksLive, marksScheduled: marksScheduled) { path.append($0) }
+            }
+            .navigationDestination(for: TransferPage.self) { page in
+                TransferLive(page: page, marksLive: marksLive, marksScheduled: marksScheduled)
             }
             .toolbar {
                 if !favorites.favorites.isEmpty {
@@ -150,12 +189,16 @@ struct LiveView: View {
                 self.opening = nil
                 switch opening {
                 case .train(let selection):
-                    path = [selection]
+                    path = NavigationPath([selection])
+                case .station(let page):
+                    path = NavigationPath([page])
+                case .transfer(let page):
+                    path = NavigationPath([page])
                 case .nearby:
-                    path = []
+                    path = NavigationPath()
                     findLocation()
                 case .allowLocation:
-                    path = []
+                    path = NavigationPath()
                     if location.status == .denied || location.status == .restricted,
                        let url = URL(string: UIApplication.openSettingsURLString) {
                         UIApplication.shared.open(url)
@@ -213,6 +256,7 @@ struct LiveView: View {
                         trains: trains[selection.trainID].map { selection.catchable($0, now: now) },
                         now: now,
                         marksLive: marksLive,
+                        marksScheduled: marksScheduled,
                         showsTimes: !editMode.isEditing
                     )
                 }
@@ -308,6 +352,7 @@ struct LiveView: View {
                     },
                     now: now,
                     marksLive: marksLive,
+                    marksScheduled: marksScheduled,
                     open: { path.append($0) }
                 )
             }
@@ -334,6 +379,7 @@ private struct FavoriteRow: View {
     let trains: [Arrival]?
     let now: Date
     let marksLive: Bool
+    let marksScheduled: Bool
     /// Left out while editing, for the delete and move controls.
     let showsTimes: Bool
 
@@ -350,7 +396,7 @@ private struct FavoriteRow: View {
             }
             Spacer(minLength: 8)
             if showsTimes {
-                Minutes(trains: trains, now: now, marksLive: marksLive)
+                Minutes(trains: trains, now: now, marksLive: marksLive, marksScheduled: marksScheduled)
             }
         }
         .padding(.vertical, 2)
@@ -375,6 +421,145 @@ private struct NearbyStationRow: View {
     }
 }
 
+/// A station's every line and its next trains each way, from a tap on its
+/// name on the Nearby widget. Each direction opens on its own.
+private struct StationLive: View {
+    let station: Station
+    /// Its lines, in the order they're shown.
+    let routes: [String]
+    let marksLive: Bool
+    let marksScheduled: Bool
+    let open: (Selection) -> Void
+    /// Each train's next arrivals, by `Selection.trainID`, as last fetched.
+    @State private var trains: [String: [Arrival]] = [:]
+    @State private var failed = false
+    /// Moves along every few seconds so the minutes count down.
+    @State private var now = Date.now
+
+    private var selections: [Selection] {
+        station.routes.flatMap { route in
+            Direction.allCases.map { Selection(stationID: station.id, routes: [route], direction: $0) }
+        }
+    }
+
+    var body: some View {
+        List {
+            if failed {
+                Label("Couldn't reach the MTA. Pull down to try again.", systemImage: "wifi.exclamationmark")
+                    .foregroundStyle(.secondary)
+            }
+            Section {
+                ForEach(routes, id: \.self) { route in
+                    NearbyLineRow(
+                        station: station,
+                        route: route,
+                        trains: { selection in
+                            // Each line's own trains, not those of another line running on its tracks
+                            trains[selection.trainID]?.filter { $0.route == route && $0.time > now }
+                        },
+                        now: now,
+                        marksLive: marksLive,
+                        marksScheduled: marksScheduled,
+                        open: open
+                    )
+                }
+            } header: {
+                Text(station.borough)
+            }
+        }
+        .navigationTitle(station.name)
+        .refreshable { await load() }
+        // New times every minute
+        .task(id: station.id) {
+            while !Task.isCancelled {
+                await load()
+                try? await Task.sleep(for: .seconds(60))
+            }
+        }
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(10))
+                now = .now
+            }
+        }
+    }
+
+    private func load() async {
+        let fetched = await TrainService.trains(for: selections)
+        guard !Task.isCancelled else { return }
+        trains.merge(fetched) { $1 }
+        now = .now
+        failed = fetched.isEmpty
+    }
+}
+
+/// The two stations of a Transfers widget, from a tap on it: its train at
+/// yours, then the lines it changes to at the change. Each opens on its own.
+private struct TransferLive: View {
+    let page: TransferPage
+    let marksLive: Bool
+    let marksScheduled: Bool
+    /// Each train's next arrivals, by `Selection.trainID`, as last fetched.
+    @State private var trains: [String: [Arrival]] = [:]
+    @State private var failed = false
+    /// Moves along every few seconds so the minutes count down.
+    @State private var now = Date.now
+
+    private var selections: [Selection] { [page.selection, page.changeTrain] }
+
+    var body: some View {
+        List {
+            if failed {
+                Label("Couldn't reach the MTA. Pull down to try again.", systemImage: "wifi.exclamationmark")
+                    .foregroundStyle(.secondary)
+            }
+            Section("Your train") {
+                row(page.selection)
+            }
+            Section("Then change") {
+                row(page.changeTrain)
+            }
+        }
+        .navigationTitle("Transfer")
+        .refreshable { await load() }
+        // New times every minute
+        .task(id: selections.map(\.trainID)) {
+            while !Task.isCancelled {
+                await load()
+                try? await Task.sleep(for: .seconds(60))
+            }
+        }
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(10))
+                now = .now
+            }
+        }
+    }
+
+    /// With your walking time, your train's left out until you can catch it.
+    private func row(_ selection: Selection) -> some View {
+        NavigationLink(value: selection) {
+            FavoriteRow(
+                selection: selection,
+                trains: trains[selection.trainID].map { selection.catchable($0, now: now) },
+                now: now,
+                marksLive: marksLive,
+                marksScheduled: marksScheduled,
+                showsTimes: true
+            )
+        }
+    }
+
+    private func load() async {
+        let fetched = await TrainService.trains(for: selections)
+        guard !Task.isCancelled else { return }
+        trains.merge(fetched) { $1 }
+        now = .now
+        failed = fetched.isEmpty
+    }
+}
+
 /// One line at a station near you, and its next trains each way. Each
 /// direction opens on its own. A direction with no name, at the end of the
 /// line, has no trains to show and is left out.
@@ -385,6 +570,7 @@ private struct NearbyLineRow: View {
     let trains: (Selection) -> [Arrival]?
     let now: Date
     let marksLive: Bool
+    let marksScheduled: Bool
     let open: (Selection) -> Void
 
     private var directions: [Direction] {
@@ -411,7 +597,7 @@ private struct NearbyLineRow: View {
                                 .font(.subheadline)
                                 .lineLimit(1)
                             Spacer(minLength: 8)
-                            Minutes(trains: trains(selection), now: now, marksLive: marksLive)
+                            Minutes(trains: trains(selection), now: now, marksLive: marksLive, marksScheduled: marksScheduled)
                             Image(systemName: "chevron.right")
                                 .font(.footnote.weight(.semibold))
                                 .foregroundStyle(.tertiary)
@@ -490,23 +676,18 @@ private struct Minutes: View {
     let trains: [Arrival]?
     let now: Date
     let marksLive: Bool
+    let marksScheduled: Bool
 
     var body: some View {
         if let trains {
             if trains.isEmpty {
                 Text("No trains").font(.subheadline).foregroundStyle(.secondary)
             } else {
-                HStack(spacing: 6) {
-                    ForEach(trains.prefix(3), id: \.self) { train in
-                        HStack(spacing: 2) {
-                            if marksLive && train.isLive {
-                                LiveMark(size: 9)
-                            }
-                            Text(label(for: train))
-                        }
-                        .foregroundStyle(train.isLive ? Color.liveText : Color.primary)
-                    }
-                    Text("min").foregroundStyle(.secondary)
+                // Always on one line: as many of the next three as fit, down to one
+                ViewThatFits(in: .horizontal) {
+                    row(trains.prefix(3))
+                    row(trains.prefix(2))
+                    row(trains.prefix(1))
                 }
                 .font(.subheadline.weight(.semibold))
                 .monospacedDigit()
@@ -527,6 +708,26 @@ private struct Minutes: View {
             return minutes < 1 ? "Now" : minutes == 1 ? "1 minute" : "\(minutes) minutes"
         }
         .joined(separator: ", ")
+    }
+
+    /// The trains' minutes, each after its mark, then "min"; never wrapped.
+    private func row(_ trains: ArraySlice<Arrival>) -> some View {
+        HStack(spacing: 6) {
+            ForEach(trains, id: \.self) { train in
+                HStack(spacing: 2) {
+                    if marksLive && train.isLive {
+                        LiveMark(size: 9)
+                    } else if marksScheduled && !train.isLive {
+                        ScheduledMark(size: 9)
+                    }
+                    Text(label(for: train))
+                }
+                .foregroundStyle(train.isLive ? Color.liveText : Color.primary)
+            }
+            Text("min").foregroundStyle(.secondary)
+        }
+        .lineLimit(1)
+        .fixedSize()
     }
 
     private func label(for train: Arrival) -> String {

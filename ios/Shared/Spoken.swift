@@ -44,12 +44,18 @@ enum Spoken {
 
     /// "R to Manhattan", or "northbound R" where the MTA gives the direction no name.
     static func describe(line: String, heading: String) -> String {
-        heading.hasPrefix("to ") ? "\(line) \(heading)" : "\(heading.lowercased()) \(line)".trimmingCharacters(in: .whitespaces)
+        isNamed(heading) ? "\(line) to \(heading)" : "\(heading.lowercased()) \(line)".trimmingCharacters(in: .whitespaces)
     }
 
     /// "R trains to Manhattan", or "northbound R trains".
     static func trainsPlural(line: String, heading: String) -> String {
-        heading.hasPrefix("to ") ? "\(line) trains \(heading)" : "\(heading.lowercased()) \(line) trains".trimmingCharacters(in: .whitespaces)
+        isNamed(heading) ? "\(line) trains to \(heading)" : "\(heading.lowercased()) \(line) trains".trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Whether `heading` is a place, "Manhattan", rather than the
+    /// "Northbound" or "Southbound" given where the MTA names none.
+    private static func isNamed(_ heading: String) -> Bool {
+        !heading.isEmpty && heading != "Northbound" && heading != "Southbound"
     }
 
     static func minutes(until date: Date, from now: Date) -> Int {

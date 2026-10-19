@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Installed by install.sh as /Library/LaunchDaemons/com.traintimes.server.plist
+  (root:wheel, mode 600). Replace every XXXX, then run install.sh again to
+  start it. cloudflared on this Mac forwards https://<hostname> to
+  http://127.0.0.1:8080, so HOST stays 127.0.0.1.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.traintimes.server</string>
+
+    <key>UserName</key>
+    <string>traintimes</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/traintimes/TrainTimesServer</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/usr/local/traintimes</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>APNS_KEY_PATH</key>
+        <string>/usr/local/traintimes/AuthKey_XXXX.p8</string>
+        <key>APNS_KEY_ID</key>
+        <string>XXXX</string>
+        <key>APNS_TEAM_ID</key>
+        <string>XUU899AG4D</string>
+        <key>APNS_TOPIC</key>
+        <string>com.rtrainwidget.app.push-type.liveactivity</string>
+        <!-- on: App Attest. off (development only, e.g. the simulator) also needs
+             API_SECRET (openssl rand -hex 32) -->
+        <key>ATTEST_MODE</key>
+        <string>on</string>
+        <!-- production (TestFlight and App Store builds), development (builds
+             from Xcode), or both -->
+        <key>ATTEST_ENVIRONMENT</key>
+        <string>production</string>
+        <key>APP_ID</key>
+        <string>XUU899AG4D.com.rtrainwidget.app</string>
+        <key>DATA_DIR</key>
+        <string>/usr/local/traintimes/data</string>
+        <key>HOST</key>
+        <string>127.0.0.1</string>
+        <key>PORT</key>
+        <string>8080</string>
+        <key>POLL_SECONDS</key>
+        <string>30</string>
+        <key>PUSH_CONCURRENCY</key>
+        <string>100</string>
+        <key>MAX_REGISTRATIONS</key>
+        <string>100000</string>
+        <key>MAX_REGISTRATIONS_PER_KEY</key>
+        <string>5</string>
+        <key>RATE_LIMIT_PER_MINUTE</key>
+        <string>30</string>
+        <key>RATE_LIMIT_BURST</key>
+        <string>30</string>
+        <key>MAX_CHALLENGES</key>
+        <string>10000</string>
+        <key>MAX_KEYS_PER_IP_PER_DAY</key>
+        <string>10</string>
+        <!-- 1 to log every push, not just each pass's totals -->
+        <key>LOG_PUSHES</key>
+        <string>0</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/usr/local/traintimes/server.log</string>
+    <key>StandardErrorPath</key>
+    <string>/usr/local/traintimes/server.log</string>
+
+    <key>Umask</key>
+    <integer>63</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <!-- At most one restart every 30 s, e.g. while a setting is wrong -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+</dict>
+</plist>

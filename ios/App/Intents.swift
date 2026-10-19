@@ -46,7 +46,8 @@ struct NextTrainSnippet: View {
     @Environment(\.accessibilityDifferentiateWithoutColor) private var withoutColor
 
     var body: some View {
-        let marksLive = withoutColor || SharedStore.loadSettings().marksLiveTimes
+        let settings = SharedStore.loadSettings()
+        let marksLive = withoutColor || settings.marksLiveTimes
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 LineBullets(routes: selection.routes, size: 28)
@@ -68,6 +69,8 @@ struct NextTrainSnippet: View {
                         .foregroundStyle(train.isLive ? Color.liveText : Color.primary)
                     if marksLive && train.isLive {
                         LiveMark(size: 12).foregroundStyle(Color.liveText)
+                    } else if settings.marksScheduledTimes && !train.isLive {
+                        ScheduledMark(size: 12)
                     }
                     if selection.marksLine(of: train) {
                         LineBullet(route: train.route, size: 18)

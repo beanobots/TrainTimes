@@ -28,9 +28,11 @@ struct Board: Sendable {
         }
         notices += (includingAlerts ? alerts ?? [] : [])
             .filter { kinds.contains($0.kind) }
-            .map { Notice(kind: .alert($0.kind), label: $0.kind.label, text: $0.header, others: 0) }
+            .map { Notice(kind: .alert($0.kind), label: $0.kind.label, text: $0.header, others: 0, brief: $0.brief,
+                         markedText: $0.markedHeader) }
         guard let first = notices.first else { return nil }
-        return Notice(kind: first.kind, label: first.label, text: first.text, others: notices.count - 1)
+        return Notice(kind: first.kind, label: first.label, text: first.text, others: notices.count - 1, brief: first.brief,
+                      markedText: first.markedText)
     }
 
     /// What `selection`'s widget, countdown and Siri mention: its own choice of
@@ -53,6 +55,11 @@ struct Notice: Codable, Hashable, Sendable {
     /// The alert's headline, or what the elevator serves.
     let text: String
     let others: Int
+    /// For a delay, its lines and direction, which the banner shows in place of `text`.
+    var brief: AlertBrief? = nil
+    /// An alert's headline with its lines written "[R]", for the widget to draw
+    /// them as bullets; nil for an elevator, or one saved before there was this.
+    var markedText: String? = nil
 }
 
 enum TrainService {
@@ -60,12 +67,14 @@ enum TrainService {
     /// together. Only the chosen lines' own train feeds are required: without the
     /// other lines' feeds there are just no rerouted trains, and without alerts or
     /// outages the board has nil for them. Without `includingAlerts`, it has neither.
+    /// Without `includingOtherLines`, only the chosen lines' feeds are fetched,
+    /// which is quicker, and there are no rerouted trains.
     static func board(for selection: Selection, includingAlerts: Bool = true, includingOutages: Bool = true,
-                      now: Date = Date()) async throws -> Board {
+                      includingOtherLines: Bool = true, now: Date = Date()) async throws -> Board {
         let includingOutages = includingAlerts && includingOutages
         let feeds = Lines.feedURLs(sharingTracksWith: selection.routes)
         async let trainData = data(from: feeds.own)
-        async let otherTrainData = optionalData(from: feeds.others)
+        async let otherTrainData = optionalData(from: includingOtherLines ? feeds.others : [])
         async let alertEntries = alertEntries(if: includingAlerts)
         async let outages = outages(for: selection, if: includingOutages)
 

@@ -37,6 +37,43 @@ struct ServiceAlert: Identifiable, Hashable, Sendable {
     let details: String
     /// When it applies, in the MTA's words, e.g. "Nov 2 - 5, Mon to Thu, 9:45 PM to 11:30 PM".
     let period: String?
+    /// For delays, the headline cut to what fits a banner.
+    var brief: AlertBrief? = nil
+    /// The headline with its lines still written "[R]", to show them as bullets.
+    var markedHeader: String? = nil
+}
+
+/// A delay's headline cut short: the lines it names, and which way they're
+/// delayed. "[2][5] trains are running with delays in both directions after
+/// we addressed a signal problem near 3 Av/149 St." is 2, 5, "Both directions".
+struct AlertBrief: Codable, Hashable, Sendable {
+    /// Real-time route ids, in the order the headline names them.
+    let routes: [String]
+    /// "Both directions", "Manhattan-bound", "Uptown"; nil when the headline doesn't say.
+    let direction: String?
+
+    /// Nil when the headline names no lines, as then there's nothing to show
+    /// but its words. Wants the MTA's own text, which writes lines as "[R]".
+    init?(header: String) {
+        // The lines are those named before "train" or "trains", so not those of a "take the [N] instead"
+        let subject = header.firstRange(of: #/\btrains?\b/#.ignoresCase()).map { header[..<$0.lowerBound] } ?? header[...]
+        var routes: [String] = []
+        for match in subject.matches(of: #/\[([A-Z0-9]{1,3})\]/#) {
+            let route = Lines.normalized(String(match.1))
+            if !routes.contains(route) { routes.append(route) }
+        }
+        guard !routes.isEmpty else { return nil }
+        self.routes = routes
+
+        if header.localizedCaseInsensitiveContains("both directions") {
+            direction = "Both directions"
+        } else if let match = header.firstMatch(of: #/\b(?:[A-Z0-9][\w./]*(?:[ -][A-Z0-9][\w./]*)*-bound|[Nn]orthbound|[Ss]outhbound|[Uu]ptown|[Dd]owntown)\b/#) {
+            let words = String(match.0)
+            direction = words.prefix(1).uppercased() + words.dropFirst()
+        } else {
+            direction = nil
+        }
+    }
 }
 
 enum AlertsFeed {
@@ -97,13 +134,16 @@ enum AlertsFeed {
                 return true
             }
             guard applies, entry.isActive(from: time, to: time) else { return nil }
+            let kind = kind(of: entry.type)
             return ServiceAlert(
                 id: entry.id,
-                kind: kind(of: entry.type),
+                kind: kind,
                 type: entry.type,
                 header: readable(entry.header),
                 details: readable(entry.details),
-                period: entry.period
+                period: entry.period,
+                brief: kind == .delays ? AlertBrief(header: entry.header) : nil,
+                markedHeader: marked(entry.header)
             )
         }
         return alerts.sorted { $0.kind < $1.kind }
@@ -117,10 +157,21 @@ enum AlertsFeed {
         return .serviceChange
     }
 
-    /// The MTA writes lines as "[R]" and icons as "[airplane icon]".
+    /// The MTA writes lines as "[R]" and icons as "[airplane icon]". Lines side
+    /// by side, as in "[2][5] trains", become "2 and 5 trains", not "25 trains".
     static func readable(_ text: String) -> String {
-        text.replacingOccurrences(of: #"\[([A-Z0-9]{1,3})\]"#, with: "$1", options: .regularExpression)
+        text.replacing(#/\[[A-Z0-9]{1,3}\](?:\s*\[[A-Z0-9]{1,3}\])*/#) { run in
+            let lines = run.output.matches(of: #/\[([A-Z0-9]{1,3})\]/#).map { String($0.1) }
+            guard let last = lines.last, lines.count > 1 else { return lines.joined() }
+            return lines.dropLast().joined(separator: ", ") + " and " + last
+        }
             .replacingOccurrences(of: #"\s*\[[a-z ]+ icon\]"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// As `readable`, but with the lines left as "[R]", for drawing as bullets.
+    static func marked(_ text: String) -> String {
+        text.replacingOccurrences(of: #"\s*\[[a-z ]+ icon\]"#, with: "", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 

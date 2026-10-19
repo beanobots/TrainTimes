@@ -102,13 +102,15 @@ private struct StationStep: View {
         return Nearby.stations(near: here, among: stations)
     }
 
+    /// Every station, alphabetically, or with a line filtered by, its stations in the order it stops at them.
     private var matches: [Station] {
         let words = search.lowercased().split(separator: " ")
-        return StationDirectory.all.filter { station in
+        let stations = StationDirectory.all.filter { station in
             let onLine = filter.map { station.serves(label: $0) } ?? true
             let text = "\(station.name) \(station.borough)".lowercased()
             return onLine && words.allSatisfy { text.contains($0) }
         }
+        return filter.map { StationDirectory.inLineOrder(stations, label: $0) } ?? stations
     }
 
     var body: some View {

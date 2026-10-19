@@ -62,4 +62,31 @@ enum Nearby {
     /// Opens the app to let it have your location: it asks the first time,
     /// and once location's been turned off, opens Settings.
     static let allowURL = URL(string: "traintimes://nearby/allow")!
+
+    /// Opens the app at a station's every line both ways, from a station's
+    /// name on the Nearby widget: "traintimes://station?id=R33". With `first`,
+    /// those lines are at the top, as for "4 more lines":
+    /// "traintimes://station?id=R33&first=N,Q".
+    static func stationURL(_ station: Station, first: [String] = []) -> URL {
+        var components = URLComponents()
+        components.scheme = "traintimes"
+        components.host = "station"
+        components.queryItems = [URLQueryItem(name: "id", value: station.id)]
+        if !first.isEmpty {
+            components.queryItems?.append(URLQueryItem(name: "first", value: first.joined(separator: ",")))
+        }
+        return components.url ?? url
+    }
+
+    /// The station a `stationURL` is for, and the lines to put first, or nil
+    /// for any other link.
+    static func station(from url: URL) -> (station: Station, first: [String])? {
+        guard url.scheme == "traintimes", url.host == "station",
+              let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
+              let id = items.first(where: { $0.name == "id" })?.value,
+              let station = StationDirectory.station(id: id) else { return nil }
+        let first = items.first(where: { $0.name == "first" })?.value?
+            .split(separator: ",").map(String.init) ?? []
+        return (station, first)
+    }
 }

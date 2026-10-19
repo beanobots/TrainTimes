@@ -305,6 +305,8 @@ struct NearbyWidgetView: View {
 
     /// Whether live times get their symbol as well as their green.
     private var marksLive: Bool { withoutColor || entry.settings.marksLiveTimes }
+    /// Whether timetable times get their symbol.
+    private var marksScheduled: Bool { entry.settings.marksScheduledTimes }
 
     /// A tap anywhere but a train opens the app at the stations near you, or
     /// without location, to allow it.
@@ -378,28 +380,31 @@ struct NearbyWidgetView: View {
             Rectangle()
                 .fill(Color.boardButton)
                 .frame(height: 1)
-            HStack(spacing: 8) {
-                Text(nearby.station.name)
-                    .font(.subheadline.bold())
-                    .foregroundStyle(Color.boardText)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.85)
-                Spacer(minLength: 0)
-                HStack(spacing: 4) {
-                    Text(nearby.distance)
-                    Text("·")
-                    Image(systemName: "figure.walk")
-                    Text("\(nearby.walkMinutes) min")
+            // Its name opens the station, every line both ways
+            Link(destination: Nearby.stationURL(nearby.station)) {
+                HStack(spacing: 8) {
+                    Text(nearby.station.name)
+                        .font(.subheadline.bold())
+                        .foregroundStyle(Color.boardText)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                    Spacer(minLength: 0)
+                    HStack(spacing: 4) {
+                        Text(nearby.distance)
+                        Text("·")
+                        Image(systemName: "figure.walk")
+                        Text("\(nearby.walkMinutes) min")
+                    }
+                    .font(.footnote)
+                    .monospacedDigit()
+                    .foregroundStyle(Color.boardGray)
+                    .fixedSize()
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("\(nearby.distance), \(nearby.walkMinutes) minute walk")
                 }
-                .font(.footnote)
-                .monospacedDigit()
-                .foregroundStyle(Color.boardGray)
-                .fixedSize()
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel("\(nearby.distance), \(nearby.walkMinutes) minute walk")
+                .frame(height: 22)
+                .padding(.top, 6)
             }
-            .frame(height: 22)
-            .padding(.top, 6)
             ForEach(nearby.lines) { line in
                 if let notice = line.notice {
                     noticeRow(line, notice)
@@ -456,6 +461,8 @@ struct NearbyWidgetView: View {
                 let minutes = max(0, Int(train.time.timeIntervalSince(entry.date) / 60))
                 if marksLive && train.isLive {
                     LiveMark(size: 9).foregroundStyle(train.statusColor)
+                } else if marksScheduled && !train.isLive {
+                    ScheduledMark(size: 9).foregroundStyle(train.statusColor)
                 }
                 Text(minutes == 0 ? "Now" : "\(minutes)")
                     .font(.subheadline.weight(.semibold))
@@ -497,7 +504,18 @@ struct NearbyWidgetView: View {
     }
 
     /// The bullets of lines not running now, or of those left out for room.
+    /// It opens the station, every line both ways; lines left out for room
+    /// at the top.
     private func foldedRow(_ nearby: NearbyStation) -> some View {
+        Link(destination: Nearby.stationURL(nearby.station, first: nearby.foldedForRoom ? nearby.folded : [])) {
+            foldedLabel(nearby)
+                // The whole row, not just its bullets and words
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+        }
+    }
+
+    private func foldedLabel(_ nearby: NearbyStation) -> some View {
         HStack(spacing: 3) {
             ForEach(nearby.folded, id: \.self) { route in
                 LineBullet(route: route, size: 14)

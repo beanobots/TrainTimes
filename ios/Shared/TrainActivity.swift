@@ -32,40 +32,68 @@ struct TrainActivityAttributes: ActivityAttributes {
 // Starting and updating Live Activities is only allowed in the app itself, so
 // iOS runs these in the app; in the widget they're only there for the buttons.
 
-/// The ↻ on the widgets and the countdown: new times for both.
+/// The ↻ on the widgets and the countdown: new times for both. iOS reloads
+/// a widget tapped, after this, and no other; the countdown's redraws the
+/// widgets, which it doesn't belong to.
 struct RefreshIntent: LiveActivityIntent {
     static let title: LocalizedStringResource = "Refresh train times"
     static let isDiscoverable = false
 
+    /// The `TrainEntry.widgetID` of the widget tapped; nil on the countdown.
+    @Parameter(title: "Widget")
+    var widgetID: String?
+
+    init() {}
+
+    init(widgetID: String?) {
+        self.widgetID = widgetID
+    }
+
     func perform() async throws -> some IntentResult {
         #if APP
-        SharedStore.saveRefreshed(.now)
+        if let widgetID { SharedStore.recordTap(\.refreshed, for: widgetID) }
         await TrainActivityController.refresh()
-        WidgetCenter.shared.reloadAllTimelines()
+        if widgetID == nil { WidgetCenter.shared.reloadAllTimelines() }
         #endif
         return .result()
     }
 }
 
-/// The widgets' ↻ while no countdown is running: new times for the widgets
-/// alone. It runs in the widget, which answers sooner than the app, which iOS
-/// would first have to start.
+/// A widget's ↻ while no countdown is running: new times for that widget
+/// alone, which iOS reloads after this. It runs in the widget, which answers
+/// sooner than the app, which iOS would first have to start.
 struct RefreshWidgetsIntent: AppIntent {
     static let title: LocalizedStringResource = "Refresh the widgets"
     static let isDiscoverable = false
 
+    /// A `TrainEntry.widgetID`; empty for Trains near you, which always fetches.
+    @Parameter(title: "Widget", default: "")
+    var widgetID: String
+
+    init() {}
+
+    init(widgetID: String) {
+        self.widgetID = widgetID
+    }
+
     func perform() async throws -> some IntentResult {
-        SharedStore.saveRefreshed(.now)
-        WidgetCenter.shared.reloadAllTimelines()
+        if !widgetID.isEmpty { SharedStore.recordTap(\.refreshed, for: widgetID) }
         return .result()
     }
 }
 
-/// The medium widget's map button: shows where the next train is, or the later
-/// trains again. It runs in the widget, which reloads once it's done.
+// iOS reloads only the widget tapped, and the map and the alert are kept by
+// widget, so these leave the others as they are.
+
+/// The medium and large widgets' map button: shows where the next train is,
+/// or the later trains again.
 struct ToggleMapIntent: AppIntent {
     static let title: LocalizedStringResource = "Show where the train is"
     static let isDiscoverable = false
+
+    /// A `TrainEntry.widgetID`.
+    @Parameter(title: "Widget", default: "")
+    var widgetID: String
 
     /// A `Selection.trainID`.
     @Parameter(title: "Train")
@@ -73,22 +101,27 @@ struct ToggleMapIntent: AppIntent {
 
     init() {}
 
-    init(selection: Selection) {
+    init(selection: Selection, widgetID: String) {
+        self.widgetID = widgetID
         trainID = selection.trainID
     }
 
     func perform() async throws -> some IntentResult {
-        SharedStore.toggleMap(for: trainID)
-        SharedStore.saveToggled(.now)
+        SharedStore.toggleMap(for: trainID, in: widgetID)
+        SharedStore.recordTap(\.toggled, for: widgetID)
         return .result()
     }
 }
 
 /// A home screen widget's alert banner: shows the alert in full, or the times
-/// again. It runs in the widget, which reloads once it's done.
+/// again.
 struct ToggleAlertIntent: AppIntent {
     static let title: LocalizedStringResource = "Show the alert"
     static let isDiscoverable = false
+
+    /// A `TrainEntry.widgetID`.
+    @Parameter(title: "Widget", default: "")
+    var widgetID: String
 
     /// A `Selection.alertID`.
     @Parameter(title: "Train")
@@ -96,22 +129,27 @@ struct ToggleAlertIntent: AppIntent {
 
     init() {}
 
-    init(selection: Selection) {
+    init(selection: Selection, widgetID: String) {
+        self.widgetID = widgetID
         trainID = selection.alertID
     }
 
     func perform() async throws -> some IntentResult {
-        SharedStore.toggleAlert(for: trainID)
-        SharedStore.saveToggled(.now)
+        SharedStore.toggleAlert(for: trainID, in: widgetID)
+        SharedStore.recordTap(\.toggled, for: widgetID)
         return .result()
     }
 }
 
 /// A widget's walk button: starts the countdown to that widget's train, or
-/// stops it if it's already counting down to that train.
+/// stops it if it's that widget's.
 struct ToggleCountdownIntent: LiveActivityIntent {
     static let title: LocalizedStringResource = "I'm on my way"
     static let isDiscoverable = false
+
+    /// A `TrainEntry.widgetID`.
+    @Parameter(title: "Widget", default: "")
+    var widgetID: String
 
     /// A `Selection.trainID`.
     @Parameter(title: "Train")
@@ -130,7 +168,8 @@ struct ToggleCountdownIntent: LiveActivityIntent {
 
     init() {}
 
-    init(selection: Selection) {
+    init(selection: Selection, widgetID: String) {
+        self.widgetID = widgetID
         trainID = selection.trainID
         walkMinutes = selection.walkMinutes
         elevatorAlerts = selection.elevatorAlerts
@@ -139,12 +178,12 @@ struct ToggleCountdownIntent: LiveActivityIntent {
 
     func perform() async throws -> some IntentResult {
         #if APP
-        SharedStore.saveToggled(.now)
+        SharedStore.recordTap(\.toggled, for: widgetID)
         if var selection = StopEntity(id: trainID)?.selection(basedOn: SharedStore.load()) {
             selection.walkMinutes = walkMinutes
             selection.elevatorAlerts = elevatorAlerts
             selection.serviceAlerts = serviceAlerts
-            try await TrainActivityController.toggle(for: selection)
+            try await TrainActivityController.toggle(for: selection, widgetID: widgetID)
         }
         #endif
         return .result()

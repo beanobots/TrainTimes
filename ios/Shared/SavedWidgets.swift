@@ -9,21 +9,37 @@ struct SavedWidget: Codable, Hashable, Identifiable, Sendable {
     var selection: Selection
     /// Where to change to another train, which the large widget shows.
     var change: Change?
+    /// When widgets showing this one show another train instead.
+    var commute: CommutingHours?
 
     /// The id of the one made from the app's train before there were saved widgets.
     static let firstID = UUID(uuidString: "5D1C8A0E-0F57-4E2B-9C3A-7B1E2D4F6A01")!
 
-    init(id: UUID = UUID(), name: String = "", selection: Selection, change: Change? = nil) {
+    init(id: UUID = UUID(), name: String = "", selection: Selection, change: Change? = nil,
+         commute: CommutingHours? = nil) {
         self.id = id
         self.name = name
         self.selection = selection
         self.change = change
+        self.commute = commute
     }
 
     /// Its name, or the station's.
     var title: String {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
         return trimmed.isEmpty ? (selection.station?.name ?? "Train") : trimmed
+    }
+
+    /// What a widget showing this one shows at `date`: in its commuting hours
+    /// their train and change, mentioning the alerts this one does; otherwise itself.
+    func shown(at date: Date) -> SavedWidget {
+        guard let commute, commute.isActive(at: date) else { return self }
+        var shown = self
+        shown.selection = commute.selection
+        shown.selection.serviceAlerts = selection.serviceAlerts
+        shown.selection.elevatorAlerts = selection.elevatorAlerts
+        shown.change = commute.change
+        return shown
     }
 }
 
@@ -96,8 +112,57 @@ struct SavedWidgets: Codable, Hashable, Sendable {
             var widget = widget
             widget.selection = widget.selection.validated()
             widget.change = widget.change?.validated(for: widget.selection)
+            if var commute = widget.commute {
+                commute.selection = commute.selection.validated()
+                commute.change = commute.change?.validated(for: commute.selection)
+                widget.commute = commute
+            }
             return widget
         }
         return saved
+    }
+}
+
+/// The times of day, on the days chosen, a saved widget shows another train,
+/// say the train home in the evening. In the phone's time zone. A range that
+/// ends before it starts runs past midnight, into the next day.
+struct CommutingHours: Codable, Hashable, Sendable {
+    /// The train shown in these hours, with its walking time. Which alerts
+    /// it mentions is the saved widget's.
+    var selection: Selection
+    /// Where that train is left for another, for the Transfers widget.
+    var change: Change?
+    /// Minutes after midnight.
+    var start: Int = 7 * 60
+    var end: Int = 10 * 60
+    /// `Calendar` weekdays, 1 for Sunday; Monday to Friday to start with.
+    var weekdays: Set<Int> = [2, 3, 4, 5, 6]
+
+    /// Whether `date` is in these hours. One that starts after midnight is
+    /// in the day it started on's hours.
+    func isActive(at date: Date, calendar: Calendar = .current) -> Bool {
+        guard start != end else { return false }
+        let components = calendar.dateComponents([.weekday, .hour, .minute], from: date)
+        guard let weekday = components.weekday else { return false }
+        let minute = (components.hour ?? 0) * 60 + (components.minute ?? 0)
+        if start < end {
+            return weekdays.contains(weekday) && (start..<end).contains(minute)
+        }
+        let yesterday = weekday == 1 ? 7 : weekday - 1
+        return (weekdays.contains(weekday) && minute >= start) || (weekdays.contains(yesterday) && minute < end)
+    }
+
+    /// The next time after `date` these hours start or end; nil if they never do.
+    func nextSwitch(after date: Date, calendar: Calendar = .current) -> Date? {
+        let active = isActive(at: date, calendar: calendar)
+        let today = calendar.startOfDay(for: date)
+        // Each start and end over the next week, the soonest first
+        let candidates = (0...7).flatMap { offset -> [Date] in
+            guard let day = calendar.date(byAdding: .day, value: offset, to: today) else { return [] }
+            return [start, end].compactMap {
+                calendar.date(bySettingHour: $0 / 60, minute: $0 % 60, second: 0, of: day)
+            }
+        }
+        return candidates.filter { $0 > date }.sorted().first { isActive(at: $0, calendar: calendar) != active }
     }
 }

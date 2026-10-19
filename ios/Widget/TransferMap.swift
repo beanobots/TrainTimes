@@ -18,7 +18,7 @@ struct TransferTrack: View {
 
     static let localY: CGFloat = 28
     private var otherY: CGFloat { showsTimes ? 64 : 50 }
-    private var height: CGFloat { otherY + (showsNote ? 30 : 14) }
+    private var height: CGFloat { otherY + (showsNote ? 28 : 14) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -105,8 +105,9 @@ struct TransferTrack: View {
                         .font(.caption.italic())
                         .foregroundStyle(Color.boardGray)
                         .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                         .frame(width: width * 0.62, alignment: .leading)
-                        .position(x: width * 0.31, y: otherY + 22)
+                        .position(x: width * 0.31, y: otherY + 20)
                 }
                 Text(station)
                     .font(.caption.weight(.bold))
@@ -114,7 +115,7 @@ struct TransferTrack: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
                     .frame(width: width * 0.36, alignment: .trailing)
-                    .position(x: width * 0.82, y: otherY + 22)
+                    .position(x: width * 0.82, y: otherY + 20)
             }
         }
     }
@@ -195,7 +196,7 @@ struct TransferMapLayout {
     /// go to the change; nil without one.
     let nextRow: CGFloat?
     /// Where the train it meets is, when it's further off than the map shows:
-    /// "D at 9 Av".
+    /// "D at 9 Av", "D between 9 Av and 36 St".
     let nextNote: String?
 
     /// `maxRows` is 4 or more.
@@ -269,7 +270,8 @@ struct TransferMapLayout {
         return CGFloat(rows.count - 1) + 0.6
     }
 
-    /// "D at 36 St", "D heading for 36 St"
+    /// "D at 36 St", "D between 9 Av and 36 St"; the feed leaves out the stops
+    /// a train has passed, so often just "D heading for 36 St"
     private static func note(for train: Arrival, now: Date) -> String? {
         guard let place = train.place(now: now) else { return nil }
         switch place {
@@ -277,6 +279,8 @@ struct TransferMapLayout {
             return train.approach.first.map { "\(train.lineLabel) starting at \($0.name)" }
         case .at(let index):
             return "\(train.lineLabel) at \(train.approach[index].name)"
+        case .approaching(let index) where index > 0:
+            return "\(train.lineLabel) between \(train.approach[index - 1].name) and \(train.approach[index].name)"
         case .approaching(let index):
             return "\(train.lineLabel) heading for \(train.approach[index].name)"
         }

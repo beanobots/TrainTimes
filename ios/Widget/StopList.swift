@@ -15,32 +15,40 @@ struct StopList: View {
 
     private var spacing: CGFloat { style.isLarge ? 0 : 1 }
 
+    /// Room above the first row for a train on its way to it, which sits half a
+    /// row up, so it doesn't run into the label: half the marker and its ring.
+    private func lead(_ layout: StopLayout) -> CGFloat {
+        layout.trainRow < 0 ? style.markerSize / 2 + 2 : 0
+    }
+
     /// Each row's share of `height` under the label, never less than the style's.
-    private func rowHeight(rows: Int) -> CGFloat {
+    private func rowHeight(rows: Int, lead: CGFloat) -> CGFloat {
         guard let height, rows > 0 else { return style.rowHeight }
         let label = UIFont.preferredFont(forTextStyle: .caption2).lineHeight
-        return max(style.rowHeight, floor((height - label - spacing) / CGFloat(rows)))
+        return max(style.rowHeight, floor((height - label - spacing - lead) / CGFloat(rows)))
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: spacing) {
             if let layout = StopLayout(train: train, now: now, maxRows: maxRows) {
-                let rowHeight = rowHeight(rows: layout.rows.count)
+                let lead = lead(layout)
+                let rowHeight = rowHeight(rows: layout.rows.count, lead: lead)
                 Text(layout.label)
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(Color.boardGray)
                     .lineLimit(1)
                 ZStack(alignment: .topLeading) {
-                    StopRail(layout: layout, color: Color(hex: LineStyle.of(train.route).color), style: style, rowHeight: rowHeight)
-                        .frame(width: style.railColumn, height: CGFloat(layout.rows.count) * rowHeight)
+                    StopRail(layout: layout, color: Color(hex: LineStyle.of(train.route).color), style: style, rowHeight: rowHeight, lead: lead)
+                        .frame(width: style.railColumn, height: lead + CGFloat(layout.rows.count) * rowHeight)
                     VStack(alignment: .leading, spacing: 0) {
                         ForEach(layout.rows) { row in
                             stopRow(row, passed: CGFloat(row.id) < layout.trainRow, height: rowHeight)
                         }
                     }
+                    .padding(.top, lead)
                     TrainMarker(route: train.route, isLive: train.isLive, size: style.markerSize)
                         .offset(x: (style.railColumn - style.markerSize) / 2,
-                                y: layout.trainRow * rowHeight + (rowHeight - style.markerSize) / 2)
+                                y: lead + layout.trainRow * rowHeight + (rowHeight - style.markerSize) / 2)
                 }
             } else {
                 Text("WHERE IT IS")
@@ -162,6 +170,8 @@ private struct StopRail: View {
     let color: Color
     let style: BoardStyle
     let rowHeight: CGFloat
+    /// Room above the first row, which the line runs up through.
+    let lead: CGFloat
     @Environment(\.widgetRenderingMode) private var renderingMode
 
     var body: some View {
@@ -174,7 +184,7 @@ private struct StopRail: View {
             eraser.blendMode = .destinationOut
             let h = rowHeight
             let x = size.width / 2
-            let middle = { (row: CGFloat) in row * h + h / 2 }
+            let middle = { (row: CGFloat) in lead + row * h + h / 2 }
             let bar = { (top: CGFloat, bottom: CGFloat) in Path(CGRect(x: x - 2, y: top, width: 4, height: max(0, bottom - top))) }
             let circle = { (diameter: CGFloat, y: CGFloat) in
                 Path(ellipseIn: CGRect(x: x - diameter / 2, y: y - diameter / 2, width: diameter, height: diameter))

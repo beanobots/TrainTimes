@@ -11,8 +11,9 @@ final class SettingsStore {
             guard settings != oldValue else { return }
             SharedStore.saveSettings(settings)
             WidgetCenter.shared.reloadAllTimelines()
-            // The countdown's alert, and its live mark, only change as it's updated
-            if settings.alertKinds != oldValue.alertKinds || settings.marksLiveTimes != oldValue.marksLiveTimes {
+            // The countdown's alert, and its live and scheduled marks, only change as it's updated
+            if settings.alertKinds != oldValue.alertKinds || settings.marksLiveTimes != oldValue.marksLiveTimes
+                || settings.marksScheduledTimes != oldValue.marksScheduledTimes {
                 Task { await TrainActivityController.refresh() }
             }
         }
@@ -81,6 +82,10 @@ struct SettingsView: View {
                              : "Live predictions get \(Image(systemName: "dot.radiowaves.up.forward")) as well as their green.")
                     }
                     .disabled(withoutColor)
+                    Toggle(isOn: $store.settings.marksScheduledTimes) {
+                        Text("Mark scheduled times")
+                        Text("Timetable times get \(Image(systemName: "clock")), so they stand out from live predictions.")
+                    }
                 } header: {
                     Text("Accessibility")
                 }

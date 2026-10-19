@@ -151,7 +151,8 @@ struct TrainDetail: View {
                         train: train,
                         leave: selection.walkMinutes > 0 ? selection.leaveTime(for: train) : nil,
                         marksLine: selection.marksLine(of: train),
-                        marksLive: settings.marksLive(withoutColor: withoutColor)
+                        marksLive: settings.marksLive(withoutColor: withoutColor),
+                        marksScheduled: settings.settings.marksScheduledTimes
                     )
                 }
             }
@@ -318,6 +319,8 @@ private struct TrainRow: View {
     let marksLine: Bool
     /// Whether a live prediction gets its symbol as well as its green.
     let marksLive: Bool
+    /// Whether a timetable time gets its symbol.
+    let marksScheduled: Bool
 
     var body: some View {
         HStack(spacing: 8) {
@@ -327,6 +330,8 @@ private struct TrainRow: View {
                 .foregroundStyle(train.isLive ? Color.liveText : Color.primary)
             if marksLive && train.isLive {
                 LiveMark(size: 12).foregroundStyle(Color.liveText)
+            } else if marksScheduled && !train.isLive {
+                ScheduledMark(size: 12)
             }
             if marksLine {
                 LineBullet(route: train.route, size: 20)

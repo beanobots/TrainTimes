@@ -119,6 +119,18 @@ struct LiveMark: View {
     }
 }
 
+/// Beside a timetable time, so it stands out from a live prediction: with
+/// Settings › Mark scheduled times.
+struct ScheduledMark: View {
+    let size: CGFloat
+
+    var body: some View {
+        Image(systemName: "clock")
+            .font(.system(size: size, weight: .bold))
+            .accessibilityLabel("Scheduled")
+    }
+}
+
 extension ServiceAlert.Kind {
     var symbol: String {
         switch self {

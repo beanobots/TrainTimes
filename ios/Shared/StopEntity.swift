@@ -1,7 +1,7 @@
 import AppIntents
 import Foundation
 
-/// One or more lines at one platform, e.g. "Prospect Av: R to Manhattan": what a
+/// One or more lines at one platform, e.g. "Prospect Av: R Manhattan": what a
 /// widget's Edit menu or a shortcut is set to.
 struct StopEntity: AppEntity {
     static let typeDisplayRepresentation: TypeDisplayRepresentation = "Train"

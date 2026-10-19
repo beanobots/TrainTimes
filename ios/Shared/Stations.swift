@@ -106,9 +106,9 @@ struct Station: Hashable, Identifiable, Sendable {
         platforms.filter { $0.routes.contains(where: routes.contains) }
     }
 
-    /// Where the lines of `routes` go in `direction`: "to Manhattan", or "Northbound"
+    /// Where the lines of `routes` go in `direction`: "Manhattan", or "Northbound"
     /// where the MTA gives no name. Platforms that name it differently are all named:
-    /// "to Coney Island - Bay Ridge or Flatbush - New Lots".
+    /// "Coney Island - Bay Ridge or Flatbush - New Lots".
     func directionLabel(_ direction: Direction, routes: [String]) -> String {
         Self.directionLabel(direction, on: platforms(serving: routes))
     }
@@ -125,7 +125,7 @@ struct Station: Hashable, Identifiable, Sendable {
             names.append(name)
         }
         if names.isEmpty { return direction == .north ? "Northbound" : "Southbound" }
-        return "to " + names.joined(separator: " or ")
+        return names.joined(separator: " or ")
     }
 
     func serves(label: String) -> Bool {
@@ -149,6 +149,27 @@ enum StationDirectory {
         station.platforms.map { ($0.id, station) }
     })
     private static let platformsByID = Dictionary(uniqueKeysWithValues: platforms.map { ($0.id, $0) })
+
+    /// Each line's stops from its northern end south, by bullet label ("S" is
+    /// every shuttle; lines.json is built by tools/make_lines.py).
+    private static let lineStops: [String: [String]] = {
+        guard let url = Bundle.main.url(forResource: "lines", withExtension: "json"),
+              let data = try? Data(contentsOf: url),
+              let lines = try? JSONDecoder().decode([String: [String]].self, from: data) else { return [:] }
+        return lines
+    }()
+
+    /// `stations` in the order the line labeled `label` stops at them, north to
+    /// south, with any it has no order for after the rest as they were.
+    static func inLineOrder(_ stations: [Station], label: String) -> [Station] {
+        guard let stops = lineStops[label] else { return stations }
+        let position = Dictionary(stops.enumerated().map { ($0.element, $0.offset) }, uniquingKeysWith: min)
+        // A station joined from several platforms comes where the first of them does
+        let ranked = stations.enumerated().map { offset, station in
+            (station, station.platforms.compactMap { position[$0.id] }.min() ?? Int.max, offset)
+        }
+        return ranked.sorted { ($0.1, $0.2) < ($1.1, $1.2) }.map(\.0)
+    }
 
     static func load(from url: URL) throws -> [Platform] {
         try JSONDecoder().decode([Platform].self, from: Data(contentsOf: url))

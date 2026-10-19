@@ -96,7 +96,7 @@ struct Selection: Codable, Hashable, Sendable {
     /// Where the chosen lines' trains stop, as the feeds name it: "R31N".
     var stopIDs: [String] { platforms.map { $0.id + direction.rawValue } }
 
-    /// Where the chosen lines go: "to Manhattan".
+    /// Where the chosen lines go: "Manhattan".
     var heading: String { station?.directionLabel(direction, routes: routes) ?? "" }
 
     /// Where `train` goes from its platform, which is just one of `heading`'s names
@@ -131,6 +131,34 @@ extension Selection {
     /// Opens the app at this train's times, from a row of the Nearby widget:
     /// "traintimes://train?station=R33&lines=R&direction=N&elevators=0".
     var trainURL: URL { link(to: "train") }
+
+    /// Opens the app at the times of this train and of the lines it changes to,
+    /// from the Transfers widget: "traintimes://transfer?station=R33&lines=R&
+    /// direction=N&elevators=0&walk=4&change=R31&to=D,N". The walking time
+    /// goes along so the page leaves out the trains the widget does.
+    func transferURL(changingAt change: Change) -> URL {
+        let base = link(to: "transfer")
+        guard var components = URLComponents(url: base, resolvingAgainstBaseURL: false) else { return base }
+        components.queryItems? += [
+            URLQueryItem(name: "walk", value: String(walkMinutes)),
+            URLQueryItem(name: "change", value: change.stationID),
+            URLQueryItem(name: "to", value: change.routes.joined(separator: ",")),
+        ]
+        return components.url ?? base
+    }
+
+    /// The train and change a `transferURL` is for, or nil for any other link
+    /// or a change that's no longer on the train's way.
+    static func transfer(from url: URL) -> (selection: Selection, change: Change)? {
+        guard var selection = Selection(link: url, to: "transfer"),
+              let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems else { return nil }
+        let value = { (name: String) in items.first { $0.name == name }?.value }
+        guard let stationID = value("change"), let routes = value("to"),
+              let change = Change(stationID: stationID, routes: routes.split(separator: ",").map(String.init))
+                  .validated(for: selection) else { return nil }
+        selection.walkMinutes = value("walk").flatMap(Int.init) ?? 0
+        return (selection, change)
+    }
 
     private func link(to host: String) -> URL {
         var components = URLComponents()

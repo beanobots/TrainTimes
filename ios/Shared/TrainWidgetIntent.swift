@@ -48,11 +48,15 @@ struct TrainWidgetIntent: WidgetConfigurationIntent {
         return earlierTrain(basedOn: saved.defaultWidget.selection) == nil ? saved.defaultWidget : nil
     }
 
-    /// This widget's train, with the alerts it mentions.
-    var selection: Selection {
+    /// This widget's train at `date`, with the alerts it mentions: in its
+    /// saved widget's commuting hours, theirs. Also when the train next
+    /// switches, for the widget to reload then.
+    func selection(at date: Date) -> (Selection, switches: Date?) {
         let saved = SharedStore.loadWidgets()
-        if let widget = savedWidget(in: saved) { return widget.selection }
-        return earlierTrain(basedOn: saved.defaultWidget.selection) ?? saved.defaultWidget.selection
+        if let widget = savedWidget(in: saved) {
+            return (widget.shown(at: date).selection, widget.commute?.nextSwitch(after: date))
+        }
+        return (earlierTrain(basedOn: saved.defaultWidget.selection) ?? saved.defaultWidget.selection, nil)
     }
 
     /// The saved widget a Transfers widget shows: the one picked, or with none
@@ -85,7 +89,7 @@ struct SavedWidgetEntity: AppEntity {
     /// A `SavedWidget.id`.
     let id: String
     let title: String
-    /// "Prospect Av · R to Manhattan", then any change: ", then D or N at
+    /// "Prospect Av · R Manhattan", then any change: ", then D or N at
     /// Atlantic Av-Barclays Ctr"
     let subtitle: String
     let routes: [String]
