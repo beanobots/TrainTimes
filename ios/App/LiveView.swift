@@ -351,7 +351,7 @@ struct LiveView: View {
                     route: route,
                     trains: { selection in
                         // Each line's own trains, not those of another line running on its tracks
-                        trains[selection.trainID]?.filter { $0.route == route && $0.time > now }
+                        trains[selection.trainID]?.filter { $0.route == route && $0.leaves > now }
                     },
                     failed: { failed.contains($0.trainID) },
                     now: now,
@@ -467,7 +467,7 @@ private struct StationLive: View {
                         route: route,
                         trains: { selection in
                             // Each line's own trains, not those of another line running on its tracks
-                            trains[selection.trainID]?.filter { $0.route == route && $0.time > now }
+                            trains[selection.trainID]?.filter { $0.route == route && $0.leaves > now }
                         },
                         failed: { failed.contains($0.trainID) },
                         now: now,
@@ -581,7 +581,8 @@ private struct TransferLive: View {
 
 /// One line at a station near you, and its next trains each way. Each
 /// direction opens on its own. A direction with no name, at the end of the
-/// line, has no trains to show and is left out.
+/// line, has no trains to show and is left out; so is the way a line ends at
+/// a platform others go on from, unless some of its trains go on too.
 private struct NearbyLineRow: View {
     let station: Station
     let route: String
@@ -600,7 +601,10 @@ private struct NearbyLineRow: View {
             platforms.contains { !$0.directionName(direction).isEmpty }
         }
         // Where the MTA names neither, both, as "Northbound" and "Southbound"
-        return named.isEmpty ? Direction.allCases : named
+        return (named.isEmpty ? Direction.allCases : named).filter { direction in
+            !StationDirectory.line(route, endsAt: station, going: direction)
+                || trains(Selection(stationID: station.id, routes: [route], direction: direction))?.isEmpty == false
+        }
     }
 
     var body: some View {

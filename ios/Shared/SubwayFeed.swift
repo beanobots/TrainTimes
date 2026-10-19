@@ -75,6 +75,8 @@ enum SubwayFeed {
     /// How old a feed can be and still be gone by: the MTA makes each one anew
     /// about every 30 seconds, and this allows for one that's late and for a
     /// clock that's a little off. One older than this has stopped updating.
+    /// Its age goes by this device's clock: on one set more than this far
+    /// ahead, every feed is out of date and fails as though it hadn't come.
     static let staleAfter: TimeInterval = 3 * 60
 
     /// Decodes just enough of a GTFS-realtime feed (gtfs.org/realtime) to list,

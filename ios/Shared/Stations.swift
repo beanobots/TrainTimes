@@ -171,6 +171,16 @@ enum StationDirectory {
         return ranked.sorted { ($0.1, $0.2) < ($1.1, $1.2) }.map(\.0)
     }
 
+    /// Whether `route`'s line ends at `station` going `direction`, by day: it's
+    /// the line's first stop north, or its last south. Where other lines go on,
+    /// as the A does from the C's 168 St, the MTA still names the direction.
+    static func line(_ route: String, endsAt station: Station, going direction: Direction) -> Bool {
+        // Just the route's own stops, as the three shuttles share the S's
+        let stops = (lineStops[LineStyle.of(route).label] ?? []).filter { platformsByID[$0]?.routes.contains(route) == true }
+        guard let end = direction == .north ? stops.first : stops.last else { return false }
+        return station.platforms.contains { $0.id == end }
+    }
+
     static func load(from url: URL) throws -> [Platform] {
         try JSONDecoder().decode([Platform].self, from: Data(contentsOf: url))
     }

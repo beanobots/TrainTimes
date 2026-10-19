@@ -368,13 +368,14 @@ private struct TrainRow: View {
                 Text(terminal).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer()
+            // Stopping at 0:00: a train held at the platform is still listed after its time
             if let leave {
                 Text("leave in").font(.footnote).foregroundStyle(.secondary)
-                Text(leave, style: .timer)
+                Text(timerInterval: min(leave, Date.now)...leave, countsDown: true)
                     .font(.subheadline.weight(.semibold))
                     .monospacedDigit()
             } else {
-                Text(train.time, style: .timer)
+                Text(timerInterval: min(train.time, Date.now)...train.time, countsDown: true)
                     .font(.subheadline)
                     .monospacedDigit()
                     .foregroundStyle(.secondary)

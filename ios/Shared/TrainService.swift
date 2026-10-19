@@ -222,9 +222,9 @@ enum TrainService {
     }
 
     /// The arrivals at `stops` in the feeds of a selection's own lines, all of
-    /// which have to be read, and of the other lines, any of which can be
-    /// left out.
-    private static func arrivals(at stops: Set<String>, own: [Data], others: [Data], now: Date) throws -> [Arrival] {
+    /// which have to be read and up to date, and of the other lines, any of
+    /// which can be left out.
+    static func arrivals(at stops: Set<String>, own: [Data], others: [Data], now: Date) throws -> [Arrival] {
         var arrivals: [Arrival] = []
         for data in own {
             arrivals += try SubwayFeed.arrivals(at: stops, in: data, now: now)

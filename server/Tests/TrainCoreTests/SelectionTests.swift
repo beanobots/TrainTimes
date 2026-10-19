@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import TrainCore
 
-/// `Selection`: which trains it shows, and choices saved by older versions of the app.
+/// `Selection`: which trains it shows and can catch, and choices saved by older versions of the app.
 @Suite struct SelectionTests {
     /// A `route` train at `stop`.
     func train(_ route: String, at stop: String) -> Arrival {
@@ -30,6 +30,36 @@ import Testing
         both.routes = ["N", "R"]
         #expect(both.shows(train("N", at: "R31N")))
         #expect(!both.shows(train("D", at: "R31N")))
+    }
+
+    @Test func aTrainHeldAtThePlatformCanBeCaughtUntilItLeaves() {
+        var held = arrival(-1, trip: "held")
+        held.departure = now.addingTimeInterval(2 * 60)
+        let next = arrival(5, trip: "next")
+        #expect(prospect.catchable([arrival(-0.5, trip: "gone"), held, next], now: now) == [held, next])
+        // Its leave time is still for when it gets there
+        #expect(prospect.leaveTime(for: held) == held.time)
+        #expect(prospect.lastLeaveTime(for: held) == held.departure)
+
+        var walking = prospect
+        walking.walkMinutes = 3
+        // 3 minutes away, it's gone before you'd get there
+        #expect(walking.catchable([held, next], now: now) == [next])
+        // Due in a minute, but held until 4: there's still time
+        var soon = arrival(1, trip: "soon")
+        #expect(walking.catchable([soon], now: now).isEmpty)
+        soon.departure = now.addingTimeInterval(4 * 60)
+        #expect(walking.catchable([soon], now: now) == [soon])
+        #expect(walking.catchable([soon], now: now.addingTimeInterval(60)).isEmpty)
+    }
+
+    @Test func connectionsAreCaughtByTheirTrainAtYourStation() {
+        var held = arrival(-1, trip: "held")
+        held.departure = now.addingTimeInterval(60)
+        let connections = [arrival(-0.5, trip: "gone"), held, arrival(4, trip: "next")].map { train in
+            Connection(first: train, arrival: arrival(10, trip: train.trip), next: nil)
+        }
+        #expect(prospect.catchable(connections, now: now).map(\.first.trip) == ["held", "next"])
     }
 
     @Test func aChoiceOfOneLineSavedBeforeThereCouldBeMore() throws {

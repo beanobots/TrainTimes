@@ -200,6 +200,8 @@ struct NearbyLine: Identifiable {
                     return train
                 }
             }
+            // Left out where the line ends, though others go on from here, unless some of its trains do too
+            if StationDirectory.line(route, endsAt: station, going: direction), own?.isEmpty != false { continue }
             let shown = alerts.map { AlertsFeed.alerts(for: selection, in: $0, now: now).filter { kinds.contains($0.kind) } } ?? []
             ways[direction] = Way(selection: selection, trains: own, alerts: shown)
         }
@@ -260,9 +262,9 @@ struct NearbyDirection {
     /// The kind of its most important alert.
     let alert: ServiceAlert.Kind?
 
-    /// The next train at `date`.
+    /// The next train at `date`, or one held at the platform till after then.
     func next(at date: Date) -> Arrival? {
-        trains?.first { $0.time > date }
+        trains?.first { $0.leaves > date }
     }
 }
 

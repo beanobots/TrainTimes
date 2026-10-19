@@ -76,6 +76,23 @@ import Testing
         #expect(withoutOthers[prospect.trainID] == [])
     }
 
+    @Test func aStaleFeedOfItsOwnLinesFailsTheBoardAndAnotherLinesIsLeftOut() throws {
+        let stops = Set(prospect.stopIDs)
+        let fresh = GTFSFeed.feed([GTFSFeed.trip("R1", stops: [FeedStop("R34N", at: 3), FeedStop("G08N", arrival: 40)])])
+        // A D running local on the R, in a feed that stopped updating 4 minutes ago
+        let stale = GTFSFeed.feed(made: -4, [
+            GTFSFeed.trip("D1", route: "D", stops: [FeedStop("R34N", at: 2), FeedStop("D01N", arrival: 60)]),
+        ])
+        #expect(throws: FeedError.stale) {
+            try TrainService.arrivals(at: stops, own: [stale], others: [fresh], now: now)
+        }
+        let arrivals = try TrainService.arrivals(at: stops, own: [fresh], others: [stale], now: now)
+        #expect(arrivals.map(\.trip) == ["R1"])
+        // Three minutes earlier, it was still up to date
+        let both = try TrainService.arrivals(at: stops, own: [fresh], others: [stale], now: time(-3))
+        #expect(Set(both.map(\.trip)) == ["R1", "D1"])
+    }
+
     @Test func fromAFeed() throws {
         let feed = GTFSFeed.feed([
             GTFSFeed.trip("R1", stops: [FeedStop("R34N", at: 3), FeedStop("G08N", arrival: 40)]),

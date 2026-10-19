@@ -212,7 +212,7 @@ struct Provider: AppIntentTimelineProvider {
         // After the fetch, so the entries start when they're shown
         let now = Date.now
         let trains = selection.catchable(board.trains, now: now)
-        let connections = (board.connections ?? []).filter { selection.leaveTime(for: $0.first) > now }
+        let connections = selection.catchable(board.connections ?? [], now: now)
         let entry = { (date: Date) -> TrainEntry in
             // Where the feed said the train was soon goes out of date; after
             // a minute, the maps go by when it's due at each stop
@@ -238,8 +238,11 @@ struct Provider: AppIntentTimelineProvider {
                               notUpdatedSince: updated ? nil : board.fetched)
         }
         // With a change, the trains that get there are the ones to catch
-        let leaveTimes = (change == nil ? trains : connections.map(\.first)).prefix(10).map(selection.leaveTime(for:))
-        var dates = Set(leaveTimes)
+        let toCatch = (change == nil ? trains : connections.map(\.first)).prefix(10)
+        let leaveTimes = toCatch.map(selection.leaveTime(for:))
+        // A train held at the platform can still be caught after its leave time, until it leaves
+        let lastLeaveTimes = toCatch.map(selection.lastLeaveTime(for:))
+        var dates = Set(leaveTimes + lastLeaveTimes)
         if hasMap, let lastLeave = leaveTimes.last {
             let end = min(lastLeave, now.addingTimeInterval(60 * 60))
             var minute = now.addingTimeInterval(60)
@@ -250,7 +253,7 @@ struct Provider: AppIntentTimelineProvider {
         }
         let entries = [entry(now)] + dates.filter { $0 > now }.sorted().map(entry)
         // Without new times, it tries again soon
-        return Plan(entries: entries, fetched: updated ? board.fetched : nil, runsOut: leaveTimes.last)
+        return Plan(entries: entries, fetched: updated ? board.fetched : nil, runsOut: lastLeaveTimes.max())
     }
 
     /// The connections still to catch at `date`. Only the maps show where the
@@ -261,7 +264,7 @@ struct Provider: AppIntentTimelineProvider {
     /// when the trains are due at each stop.
     private static func shown(_ connections: [Connection], at date: Date, selection: Selection,
                               keepsStops: Bool, keepsPosition: Bool) -> [Connection] {
-        connections.filter { selection.leaveTime(for: $0.first) > date }.enumerated().map { index, connection in
+        selection.catchable(connections, now: date).enumerated().map { index, connection in
             var connection = connection
             if !keepsStops || index > 0 {
                 connection.first.approach = []
@@ -282,7 +285,7 @@ struct Provider: AppIntentTimelineProvider {
                                    now: Date) -> Bool {
         change == nil
             ? !selection.catchable(saved.trains, now: now).isEmpty
-            : saved.connections?.contains { selection.leaveTime(for: $0.first) > now } == true
+            : !selection.catchable(saved.connections ?? [], now: now).isEmpty
     }
 
     /// The trains and alert for `selection`, with `change` those of the large
@@ -1487,9 +1490,10 @@ struct TrainWidgetView: View {
     }
 
     /// Counts down to the train (or, with a walking time, to when to leave for
-    /// it) and stops at 0:00, live, without the widget reloading.
+    /// it) and stops at 0:00, live, without the widget reloading. A train held
+    /// at the platform is still shown after then, at 0:00.
     private func countdown(to train: Arrival) -> some View {
-        Text(timerInterval: entry.date...entry.selection.leaveTime(for: train), countsDown: true)
+        Text(timerInterval: entry.date...max(entry.date, entry.selection.leaveTime(for: train)), countsDown: true)
             .monospacedDigit()
             .lineLimit(1)
             .minimumScaleFactor(0.6)
@@ -1518,7 +1522,8 @@ struct TrainWidgetView: View {
                 .lineLimit(1)
                 .hidden()
                 .overlay(alignment: alignment) {
-                    Text(timerInterval: entry.date...leave, countsDown: true)
+                    // A train held at the platform is still shown after its leave time
+                    Text(timerInterval: entry.date...max(entry.date, leave), countsDown: true)
                         .monospacedDigit()
                         .lineLimit(1)
                         .multilineTextAlignment(alignment == .center ? .center : .leading)

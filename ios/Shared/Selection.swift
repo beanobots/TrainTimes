@@ -64,6 +64,12 @@ struct Selection: Codable, Hashable, Sendable {
         train.time.addingTimeInterval(-TimeInterval(walkMinutes * 60))
     }
 
+    /// The last moment to set off and still catch `train`: `leaveTime(for:)`,
+    /// or later for a train held at the platform, which leaves after it arrives.
+    func lastLeaveTime(for train: Arrival) -> Date {
+        train.leaves.addingTimeInterval(-TimeInterval(walkMinutes * 60))
+    }
+
     /// Trains of the chosen lines, and of any line that doesn't usually stop at
     /// their platform, which must be running on one of them: an N running local
     /// on the R. Lines that do usually stop there are left out unless chosen.
@@ -81,7 +87,13 @@ struct Selection: Codable, Hashable, Sendable {
 
     /// The trains you can still reach in time if you leave at or after `now`.
     func catchable(_ trains: [Arrival], now: Date) -> [Arrival] {
-        trains.filter { leaveTime(for: $0) > now }
+        trains.filter { lastLeaveTime(for: $0) > now }
+    }
+
+    /// With a change, the connections whose train at your station you can
+    /// still reach in time if you leave at or after `now`.
+    func catchable(_ connections: [Connection], now: Date) -> [Connection] {
+        connections.filter { lastLeaveTime(for: $0.first) > now }
     }
 
     /// Prospect Av, R, toward Manhattan: what the widget shows until you choose.
