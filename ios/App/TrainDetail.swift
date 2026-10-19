@@ -10,6 +10,10 @@ struct TrainDetail: View {
     @State private var selection: Selection
     @State private var board: Board?
     @State private var loadState = LoadState.loading
+    /// When the board's times were fetched.
+    @State private var timesFetched: Date?
+    /// Whether the last try for new times failed, so those shown are older.
+    @State private var refreshFailed = false
     /// When the board's alerts and elevator outages were fetched, which change
     /// far less often than the times.
     @State private var noticesFetched: Date?
@@ -102,6 +106,8 @@ struct TrainDetail: View {
             guard chosen.trainID != selection.trainID else { return }
             favorites.replace(selection, with: chosen)
             board = nil
+            noticesFetched = nil
+            refreshFailed = false
             selection = favorites.favorite(matching: chosen) ?? chosen
         }
     }
@@ -139,13 +145,23 @@ struct TrainDetail: View {
 
     private var trainsSection: some View {
         Section {
-            if loadState == .failed {
+            // Old times that have all gone say nothing of what's coming
+            if loadState == .failed || (refreshFailed && trains.isEmpty) {
                 Text("Couldn't reach the MTA").foregroundStyle(.secondary)
             } else if loadState == .loading && trains.isEmpty {
                 ProgressView()
             } else if trains.isEmpty {
-                Text("No \(selection.linesLabel) trains predicted").foregroundStyle(.secondary)
+                if board?.trains.contains(where: { $0.time > now }) == true {
+                    Text("No \(selection.linesLabel) trains you can reach in time").foregroundStyle(.secondary)
+                } else {
+                    Text("No \(selection.linesLabel) trains predicted").foregroundStyle(.secondary)
+                }
             } else {
+                if refreshFailed, let timesFetched {
+                    Label("Couldn't reach the MTA, so these times are from \(Spoken.clock(timesFetched)).",
+                          systemImage: "wifi.exclamationmark")
+                        .foregroundStyle(.secondary)
+                }
                 ForEach(trains.prefix(5), id: \.self) { train in
                     TrainRow(
                         train: train,
@@ -284,17 +300,22 @@ struct TrainDetail: View {
         }
     }
 
-    /// Times already shown stay up while new ones load, and if they don't come.
-    /// Alerts and outages come with them only when `includingNotices`, or when
-    /// the ones shown are 10 minutes old; otherwise those shown stay.
+    /// Times already shown stay up while new ones load, and if they don't come,
+    /// saying how old they are. Alerts and outages come with them only when
+    /// `includingNotices`, or when the ones shown are 10 minutes old; otherwise
+    /// those shown stay.
     private func loadBoard(includingNotices: Bool = false) async {
         if board == nil { loadState = .loading }
         now = .now
         countdownTrain = TrainActivityController.currentTrain(for: selection)
+        let trainID = selection.trainID
         let fetchesNotices = includingNotices || board == nil
             || noticesFetched.map { now.timeIntervalSince($0) >= 10 * 60 } ?? true
         do {
             var fetched = try await TrainService.board(for: selection, includingAlerts: fetchesNotices)
+            // A newer choice cancels this load, but can't stop the fetch: what
+            // it brings is the other train's
+            guard !Task.isCancelled, trainID == selection.trainID else { return }
             // Only once both have come are they good for 10 minutes; until
             // then, any shown before stay, and the next load tries again
             if fetchesNotices && fetched.alerts != nil && fetched.outages != nil {
@@ -303,10 +324,17 @@ struct TrainDetail: View {
             fetched.alerts = fetched.alerts ?? board?.alerts
             fetched.outages = fetched.outages ?? board?.outages
             board = fetched
+            timesFetched = now
+            refreshFailed = false
             loadState = .loaded
         } catch {
             // a newer choice cancels this load; that isn't a failure
-            if !Task.isCancelled && board == nil { loadState = .failed }
+            guard !Task.isCancelled, trainID == selection.trainID else { return }
+            if board == nil {
+                loadState = .failed
+            } else {
+                refreshFailed = true
+            }
         }
     }
 }

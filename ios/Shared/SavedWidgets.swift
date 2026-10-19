@@ -24,6 +24,22 @@ struct SavedWidget: Codable, Hashable, Identifiable, Sendable {
         self.commute = commute
     }
 
+    private enum CodingKeys: String, CodingKey {
+        case id, name, selection, change, commute
+    }
+
+    /// One saved without a name still loads, going by the station's. Any
+    /// property added later needs a default here too: one widget that can't
+    /// be read leaves them all unread.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(id: try container.decode(UUID.self, forKey: .id),
+                  name: try container.decodeIfPresent(String.self, forKey: .name) ?? "",
+                  selection: try container.decode(Selection.self, forKey: .selection),
+                  change: try container.decodeIfPresent(Change.self, forKey: .change),
+                  commute: try container.decodeIfPresent(CommutingHours.self, forKey: .commute))
+    }
+
     /// Its name, or the station's.
     var title: String {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
@@ -138,6 +154,10 @@ struct CommutingHours: Codable, Hashable, Sendable {
     /// `Calendar` weekdays, 1 for Sunday; Monday to Friday to start with.
     var weekdays: Set<Int> = [2, 3, 4, 5, 6]
 
+    private enum CodingKeys: String, CodingKey {
+        case selection, change, start, end, weekdays
+    }
+
     /// Whether `date` is in these hours. One that starts after midnight is
     /// in the day it started on's hours.
     func isActive(at date: Date, calendar: Calendar = .current) -> Bool {
@@ -164,5 +184,18 @@ struct CommutingHours: Codable, Hashable, Sendable {
             }
         }
         return candidates.filter { $0 > date }.sorted().first { isActive(at: $0, calendar: calendar) != active }
+    }
+}
+
+extension CommutingHours {
+    /// Hours saved without any of these still load, with them at their
+    /// defaults. Here, not in the type, so it keeps its memberwise init.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(selection: try container.decode(Selection.self, forKey: .selection),
+                  change: try container.decodeIfPresent(Change.self, forKey: .change))
+        start = try container.decodeIfPresent(Int.self, forKey: .start) ?? start
+        end = try container.decodeIfPresent(Int.self, forKey: .end) ?? end
+        weekdays = try container.decodeIfPresent(Set<Int>.self, forKey: .weekdays) ?? weekdays
     }
 }

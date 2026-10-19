@@ -39,10 +39,13 @@ enum SharedStore {
     static var isAvailable: Bool { file != nil }
 
     static func load() -> Selection {
-        guard let file,
-              let data = try? Data(contentsOf: file),
-              let saved = try? JSONDecoder().decode(Selection.self, from: data) else { return .fallback }
-        return saved.validated()
+        savedSelection()?.validated() ?? .fallback
+    }
+
+    /// The app's choice as saved, before checking it against the station list.
+    private static func savedSelection() -> Selection? {
+        guard let file, let data = try? Data(contentsOf: file) else { return nil }
+        return try? JSONDecoder().decode(Selection.self, from: data)
     }
 
     @discardableResult
@@ -263,15 +266,36 @@ enum SharedStore {
         try? data.write(to: settingsFile, options: .atomic)
     }
 
-    /// The widgets set up in the app. Before there were any, the one train
-    /// chosen in the app becomes the first, and the default. Its id is always
-    /// the same, so a widget set up before the app saves it still finds it.
+    /// The widgets set up in the app, each train checked against the station
+    /// list. Before there were any, the one train chosen in the app becomes
+    /// the first, and the default. Its id is always the same, so a widget set
+    /// up before the app saves it still finds it.
     static func loadWidgets() -> SavedWidgets {
-        guard let widgetsFile, let data = try? Data(contentsOf: widgetsFile),
-              let saved = try? JSONDecoder().decode(SavedWidgets.self, from: data) else {
-            return SavedWidgets(widgets: [SavedWidget(id: SavedWidget.firstID, selection: load())])
-        }
-        return saved.validated()
+        ((try? savedWidgets()) ?? firstWidgets).validated()
+    }
+
+    /// The widgets as saved, before checking them against the station list,
+    /// for the app to change and save again: saving what checking made of them
+    /// would turn a train at a station the list lacks into Prospect Av for
+    /// good. Nil before any are saved; throws when they can't be read.
+    static func savedWidgets() throws -> SavedWidgets? {
+        guard let widgetsFile, FileManager.default.fileExists(atPath: widgetsFile.path) else { return nil }
+        return try JSONDecoder().decode(SavedWidgets.self, from: Data(contentsOf: widgetsFile))
+    }
+
+    /// What there is before any widgets are saved: one, of the train chosen in
+    /// the app, as saved.
+    static var firstWidgets: SavedWidgets {
+        SavedWidgets(widgets: [SavedWidget(id: SavedWidget.firstID, selection: savedSelection() ?? .fallback)])
+    }
+
+    /// Copies saved widgets that can't be read to widgets.json.bad, so they
+    /// aren't lost for good when a change in the app saves over them.
+    static func keepUnreadableWidgets() {
+        guard let widgetsFile else { return }
+        let copy = widgetsFile.appendingPathExtension("bad")
+        try? FileManager.default.removeItem(at: copy)
+        try? FileManager.default.copyItem(at: widgetsFile, to: copy)
     }
 
     /// Also leaves the default's train as the app's choice, which Siri, the

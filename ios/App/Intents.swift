@@ -39,6 +39,32 @@ struct StartCountdownIntent: LiveActivityIntent {
     }
 }
 
+/// What Siri listens for, with nothing to set up. iOS needs the app's name in each phrase.
+struct TrainShortcuts: AppShortcutsProvider {
+    static var appShortcuts: [AppShortcut] {
+        AppShortcut(
+            intent: NextTrainIntent(),
+            phrases: [
+                "When's my next train in \(.applicationName)",
+                "When is my next train in \(.applicationName)",
+                "Next train in \(.applicationName)",
+                "Check \(.applicationName)",
+            ],
+            shortTitle: "Next train",
+            systemImageName: "tram.fill"
+        )
+        AppShortcut(
+            intent: StartCountdownIntent(),
+            phrases: [
+                "Start my train countdown in \(.applicationName)",
+                "I'm on my way in \(.applicationName)",
+            ],
+            shortTitle: "Count down to my train",
+            systemImageName: "timer"
+        )
+    }
+}
+
 /// The card Siri and Shortcuts show with the answer.
 struct NextTrainSnippet: View {
     let selection: Selection

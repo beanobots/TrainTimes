@@ -6,14 +6,31 @@ import WidgetKit
 /// widgets to read, and they redraw with it.
 @MainActor @Observable
 final class WidgetStore {
+    /// Each train checked against the station list, as the widgets show them.
     private(set) var saved: SavedWidgets
     /// How many widgets on the Home Screen and Lock Screen show each saved widget.
     private(set) var placed: [UUID: Int] = [:]
+    /// As saved, unchecked. A change saves these, with just what it changes,
+    /// so a train at a station the list lacks just now stays as it was chosen.
+    private var stored: SavedWidgets
 
     init() {
-        saved = SharedStore.loadWidgets()
-        // The first time, this keeps the saved widget made from the app's train
-        SharedStore.saveWidgets(saved)
+        let stored: SavedWidgets
+        do {
+            if let widgets = try SharedStore.savedWidgets() {
+                stored = widgets
+            } else {
+                // The first time, this keeps the saved widget made from the app's train
+                stored = SharedStore.firstWidgets
+                SharedStore.saveWidgets(stored)
+            }
+        } catch {
+            // Left as it is until a change saves over it, and kept aside for then
+            SharedStore.keepUnreadableWidgets()
+            stored = SharedStore.firstWidgets
+        }
+        self.stored = stored
+        saved = stored.validated()
     }
 
     var defaultWidget: SavedWidget { saved.defaultWidget }
@@ -74,11 +91,14 @@ final class WidgetStore {
         placed = counts
     }
 
+    /// `body` changes the widgets as shown and, if that changes anything, as
+    /// saved too: every widget is in both, in the same order.
     private func change(_ body: (inout SavedWidgets) -> Void) {
         let before = saved
         body(&saved)
         guard saved != before else { return }
-        SharedStore.saveWidgets(saved)
+        body(&stored)
+        SharedStore.saveWidgets(stored)
         WidgetCenter.shared.reloadAllTimelines()
     }
 }

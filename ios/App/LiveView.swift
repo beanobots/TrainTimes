@@ -57,6 +57,8 @@ struct LiveView: View {
     @State private var path = NavigationPath()
     /// Each train's next arrivals, by `Selection.trainID`, as last fetched.
     @State private var trains: [String: [Arrival]] = [:]
+    /// The `Selection.trainID`s whose trains couldn't be fetched the last time.
+    @State private var failed: Set<String> = []
     @State private var loadState = LoadState.loading
     /// Moves along every few seconds so the minutes count down.
     @State private var now = Date.now
@@ -254,6 +256,7 @@ struct LiveView: View {
                     FavoriteRow(
                         selection: selection,
                         trains: trains[selection.trainID].map { selection.catchable($0, now: now) },
+                        failed: failed.contains(selection.trainID),
                         now: now,
                         marksLive: marksLive,
                         marksScheduled: marksScheduled,
@@ -350,6 +353,7 @@ struct LiveView: View {
                         // Each line's own trains, not those of another line running on its tracks
                         trains[selection.trainID]?.filter { $0.route == route && $0.time > now }
                     },
+                    failed: { failed.contains($0.trainID) },
                     now: now,
                     marksLive: marksLive,
                     marksScheduled: marksScheduled,
@@ -366,9 +370,14 @@ struct LiveView: View {
         let fetched = await TrainService.trains(for: selections)
         // A newer list cancels this load; that isn't a failure
         guard !Task.isCancelled else { return }
+        // A train left out couldn't be fetched: its old times go, rather than
+        // count down as if they were new
+        let missing = Set(selections.map(\.trainID)).subtracting(fetched.keys)
         trains.merge(fetched) { $1 }
+        for trainID in missing { trains[trainID] = nil }
+        failed = failed.subtracting(fetched.keys).union(missing)
         now = .now
-        loadState = fetched.isEmpty ? .failed : .loaded
+        loadState = missing.isEmpty ? .loaded : .failed
     }
 }
 
@@ -377,6 +386,8 @@ private struct FavoriteRow: View {
     let selection: Selection
     /// The trains you can still catch; nil until they're fetched.
     let trains: [Arrival]?
+    /// Whether they couldn't be fetched the last time.
+    let failed: Bool
     let now: Date
     let marksLive: Bool
     let marksScheduled: Bool
@@ -396,7 +407,7 @@ private struct FavoriteRow: View {
             }
             Spacer(minLength: 8)
             if showsTimes {
-                Minutes(trains: trains, now: now, marksLive: marksLive, marksScheduled: marksScheduled)
+                Minutes(trains: trains, failed: failed, now: now, marksLive: marksLive, marksScheduled: marksScheduled)
             }
         }
         .padding(.vertical, 2)
@@ -432,7 +443,8 @@ private struct StationLive: View {
     let open: (Selection) -> Void
     /// Each train's next arrivals, by `Selection.trainID`, as last fetched.
     @State private var trains: [String: [Arrival]] = [:]
-    @State private var failed = false
+    /// The `Selection.trainID`s whose trains couldn't be fetched the last time.
+    @State private var failed: Set<String> = []
     /// Moves along every few seconds so the minutes count down.
     @State private var now = Date.now
 
@@ -444,7 +456,7 @@ private struct StationLive: View {
 
     var body: some View {
         List {
-            if failed {
+            if !failed.isEmpty {
                 Label("Couldn't reach the MTA. Pull down to try again.", systemImage: "wifi.exclamationmark")
                     .foregroundStyle(.secondary)
             }
@@ -457,6 +469,7 @@ private struct StationLive: View {
                             // Each line's own trains, not those of another line running on its tracks
                             trains[selection.trainID]?.filter { $0.route == route && $0.time > now }
                         },
+                        failed: { failed.contains($0.trainID) },
                         now: now,
                         marksLive: marksLive,
                         marksScheduled: marksScheduled,
@@ -487,9 +500,11 @@ private struct StationLive: View {
     private func load() async {
         let fetched = await TrainService.trains(for: selections)
         guard !Task.isCancelled else { return }
-        trains.merge(fetched) { $1 }
+        // One left out couldn't be fetched: its old times go, rather than
+        // count down as if they were new
+        trains = fetched
+        failed = Set(selections.map(\.trainID)).subtracting(fetched.keys)
         now = .now
-        failed = fetched.isEmpty
     }
 }
 
@@ -501,7 +516,8 @@ private struct TransferLive: View {
     let marksScheduled: Bool
     /// Each train's next arrivals, by `Selection.trainID`, as last fetched.
     @State private var trains: [String: [Arrival]] = [:]
-    @State private var failed = false
+    /// The `Selection.trainID`s whose trains couldn't be fetched the last time.
+    @State private var failed: Set<String> = []
     /// Moves along every few seconds so the minutes count down.
     @State private var now = Date.now
 
@@ -509,7 +525,7 @@ private struct TransferLive: View {
 
     var body: some View {
         List {
-            if failed {
+            if !failed.isEmpty {
                 Label("Couldn't reach the MTA. Pull down to try again.", systemImage: "wifi.exclamationmark")
                     .foregroundStyle(.secondary)
             }
@@ -543,6 +559,7 @@ private struct TransferLive: View {
             FavoriteRow(
                 selection: selection,
                 trains: trains[selection.trainID].map { selection.catchable($0, now: now) },
+                failed: failed.contains(selection.trainID),
                 now: now,
                 marksLive: marksLive,
                 marksScheduled: marksScheduled,
@@ -554,9 +571,11 @@ private struct TransferLive: View {
     private func load() async {
         let fetched = await TrainService.trains(for: selections)
         guard !Task.isCancelled else { return }
-        trains.merge(fetched) { $1 }
+        // One left out couldn't be fetched: its old times go, rather than
+        // count down as if they were new
+        trains = fetched
+        failed = Set(selections.map(\.trainID)).subtracting(fetched.keys)
         now = .now
-        failed = fetched.isEmpty
     }
 }
 
@@ -568,6 +587,8 @@ private struct NearbyLineRow: View {
     let route: String
     /// A direction's trains; nil until they're fetched.
     let trains: (Selection) -> [Arrival]?
+    /// Whether a direction's trains couldn't be fetched the last time.
+    let failed: (Selection) -> Bool
     let now: Date
     let marksLive: Bool
     let marksScheduled: Bool
@@ -597,7 +618,8 @@ private struct NearbyLineRow: View {
                                 .font(.subheadline)
                                 .lineLimit(1)
                             Spacer(minLength: 8)
-                            Minutes(trains: trains(selection), now: now, marksLive: marksLive, marksScheduled: marksScheduled)
+                            Minutes(trains: trains(selection), failed: failed(selection), now: now,
+                                    marksLive: marksLive, marksScheduled: marksScheduled)
                             Image(systemName: "chevron.right")
                                 .font(.footnote.weight(.semibold))
                                 .foregroundStyle(.tertiary)
@@ -607,7 +629,7 @@ private struct NearbyLineRow: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel("\(Lines.name(of: route)) \(station.directionLabel(direction, routes: [route]))")
                     // The label stands for the whole row, so the times come as its value
-                    .accessibilityValue(Minutes.spoken(trains(selection), now: now))
+                    .accessibilityValue(Minutes.spoken(trains(selection), failed: failed(selection), now: now))
                 }
             }
         }
@@ -674,12 +696,16 @@ private struct DropPinSheet: View {
 private struct Minutes: View {
     /// Nil until they're fetched.
     let trains: [Arrival]?
+    /// Whether they couldn't be fetched the last time, which it then says instead.
+    let failed: Bool
     let now: Date
     let marksLive: Bool
     let marksScheduled: Bool
 
     var body: some View {
-        if let trains {
+        if failed {
+            Text("Couldn't load").font(.subheadline).foregroundStyle(.secondary)
+        } else if let trains {
             if trains.isEmpty {
                 Text("No trains").font(.subheadline).foregroundStyle(.secondary)
             } else {
@@ -700,7 +726,8 @@ private struct Minutes: View {
     }
 
     /// As VoiceOver reads them: "Now, 1 minute, 7 minutes".
-    static func spoken(_ trains: [Arrival]?, now: Date) -> String {
+    static func spoken(_ trains: [Arrival]?, failed: Bool = false, now: Date) -> String {
+        guard !failed else { return "Couldn't load" }
         guard let trains else { return "Loading" }
         guard !trains.isEmpty else { return "No trains" }
         return trains.prefix(3).map { train in
