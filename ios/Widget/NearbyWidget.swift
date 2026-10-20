@@ -129,10 +129,10 @@ struct NearbyStation {
     /// The lines with a row of their own: those with trains, or with an alert
     /// saying why there are none.
     var lines: [NearbyLine]
-    /// The lines not running now, in the small row under them.
+    /// The lines not running now, in a small row under them.
     let notRunning: [String]
-    /// At a station with more lines than there's room for, the rest, in the
-    /// small row too ("4 more lines").
+    /// At a station with more lines than there's room for, the rest, in a
+    /// small row of their own above that ("4 more lines").
     var leftOut: [String] = []
 
     /// `result`'s lines, with their trains (each line's own, by
@@ -149,12 +149,11 @@ struct NearbyStation {
         notRunning = lines.filter(\.isIdle).map(\.route)
     }
 
-    /// Whether it has the small row.
-    var hasSmallRow: Bool { !notRunning.isEmpty || !leftOut.isEmpty }
-
-    /// How tall it is on the widget.
+    /// How tall it is on the widget, with a small row each for the lines left
+    /// out and those not running.
     var height: CGFloat {
-        NearbyLayout.stationHeader + CGFloat(lines.count) * NearbyLayout.row + (hasSmallRow ? NearbyLayout.smallRow : 0)
+        let smallRows = CGFloat([leftOut, notRunning].filter { !$0.isEmpty }.count)
+        return NearbyLayout.stationHeader + CGFloat(lines.count) * NearbyLayout.row + smallRows * NearbyLayout.smallRow
     }
 
     /// Moves its last line with a row of its own to the lines left out, ahead
@@ -315,7 +314,7 @@ enum NearbyLayout {
     /// A station's name and how far it is, with the rule above it.
     static let stationHeader: CGFloat = 29
     static let row: CGFloat = 26
-    /// The small row of lines not running, and of those left out for room.
+    /// A small row of lines left out for room, or of those not running.
     static let smallRow: CGFloat = 22
     /// "Couldn't reach the MTA" along the bottom.
     static let problem: CGFloat = 22
@@ -454,7 +453,7 @@ struct NearbyWidgetView: View {
         .padding(.bottom, NearbyLayout.gap)
     }
 
-    /// Its name and how far it is, then a row for each line, then any small row.
+    /// Its name and how far it is, then a row for each line, then any small rows.
     private func stationView(_ nearby: NearbyStation) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             Rectangle()
@@ -498,8 +497,11 @@ struct NearbyWidgetView: View {
                     .frame(height: NearbyLayout.row)
                 }
             }
-            if nearby.hasSmallRow {
-                foldedRow(nearby)
+            if !nearby.leftOut.isEmpty {
+                leftOutRow(nearby)
+            }
+            if !nearby.notRunning.isEmpty {
+                notRunningRow(nearby)
             }
         }
     }
@@ -608,61 +610,30 @@ struct NearbyWidgetView: View {
         }
     }
 
-    /// The bullets of lines left out for room, then of those not running now.
-    /// It opens the station, every line both ways; lines left out for room
-    /// at the top.
-    private func foldedRow(_ nearby: NearbyStation) -> some View {
+    /// The bullets of lines left out for room, and "4 more lines ›". It opens
+    /// the station, every line both ways, with those lines at the top.
+    private func leftOutRow(_ nearby: NearbyStation) -> some View {
         Link(destination: Nearby.stationURL(nearby.station, first: nearby.leftOut)) {
-            foldedLabel(nearby)
-                // The whole row, not just its bullets and words
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-        }
-    }
-
-    /// "4 more lines ›" and "Not running now", each after its lines' bullets;
-    /// with no room for both, just the lines left out for room, which the
-    /// station shows first.
-    private func foldedLabel(_ nearby: NearbyStation) -> some View {
-        Group {
-            if nearby.leftOut.isEmpty {
-                notRunningLabel(nearby.notRunning)
-            } else if nearby.notRunning.isEmpty {
-                leftOutLabel(nearby.leftOut)
-            } else {
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 10) {
-                        leftOutLabel(nearby.leftOut)
-                        notRunningLabel(nearby.notRunning)
-                    }
-                    leftOutLabel(nearby.leftOut)
-                }
+            folded(nearby.leftOut) {
+                Text(nearby.leftOut.count == 1 ? "1 more line" : "\(nearby.leftOut.count) more lines")
+                Image(systemName: "chevron.right")
+                    .font(.caption2.weight(.bold))
+                    .accessibilityHidden(true)
             }
         }
-        .font(.footnote)
-        .foregroundStyle(Color.boardGray)
-        .lineLimit(1)
-        .frame(height: NearbyLayout.smallRow)
     }
 
-    /// "4 more lines ›", after their bullets.
-    private func leftOutLabel(_ routes: [String]) -> some View {
-        folded(routes) {
-            Text(routes.count == 1 ? "1 more line" : "\(routes.count) more lines")
-            Image(systemName: "chevron.right")
-                .font(.caption2.weight(.bold))
-                .accessibilityHidden(true)
+    /// The bullets of lines not running now, and "Not running now". It opens
+    /// the station, every line both ways.
+    private func notRunningRow(_ nearby: NearbyStation) -> some View {
+        Link(destination: Nearby.stationURL(nearby.station)) {
+            folded(nearby.notRunning) {
+                Text("Not running now")
+            }
         }
     }
 
-    /// "Not running now", after their bullets.
-    private func notRunningLabel(_ routes: [String]) -> some View {
-        folded(routes) {
-            Text("Not running now")
-        }
-    }
-
-    /// `routes`' bullets, then what they are.
+    /// A small row: `routes`' bullets, then what they are.
     private func folded<Words: View>(_ routes: [String], @ViewBuilder _ words: () -> Words) -> some View {
         HStack(spacing: 3) {
             ForEach(routes, id: \.self) { route in
@@ -673,6 +644,13 @@ struct NearbyWidgetView: View {
             }
             .padding(.leading, 5)
         }
+        .font(.footnote)
+        .foregroundStyle(Color.boardGray)
+        .lineLimit(1)
+        .frame(height: NearbyLayout.smallRow)
+        // The whole row, not just its bullets and words
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
     }
 
     /// In place of the stations: why there are none, and what to do. `spoken`
