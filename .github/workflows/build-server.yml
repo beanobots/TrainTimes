@@ -22,8 +22,9 @@ concurrency:
 
 jobs:
   server:
-    # The server compiles nine of ios/Shared's files in Swift 6 mode, which the
-    # app's build doesn't. It needs macOS for SQLite.
+    # The server compiles the ios/Shared files linked from its
+    # Sources/TrainCore/Shared in Swift 6 mode, which the app's build doesn't.
+    # It needs macOS for SQLite.
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
