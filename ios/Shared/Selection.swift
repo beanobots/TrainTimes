@@ -112,6 +112,20 @@ struct Selection: Codable, Hashable, Sendable {
         connections.filter { lastLeaveTime(for: $0.first) > now }
     }
 
+    /// The first of `trains` you reach as it gets to the platform if you leave
+    /// at or after `now`, not one you'd catch only while it's held there: the
+    /// one the countdown starts on, as it counts down to arrivals.
+    func firstReachable(_ trains: [Arrival], now: Date) -> Arrival? {
+        trains.first { leaveTime(for: $0) > now }
+    }
+
+    /// With a change, the first connection whose train at your station you
+    /// reach as it gets in: the one the Transfers widget counts down to, as
+    /// its walk button's countdown does.
+    func firstReachable(_ connections: [Connection], now: Date) -> Connection? {
+        connections.first { leaveTime(for: $0.first) > now }
+    }
+
     /// Prospect Av, R, toward Manhattan: what the widget shows until you choose.
     static let fallback = Selection(stationID: "R34", routes: ["R"], direction: .north)
 

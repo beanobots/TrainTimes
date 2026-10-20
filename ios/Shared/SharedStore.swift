@@ -227,11 +227,31 @@ enum SharedStore {
         var notice: Notice?
         /// With a change, the trains that get there and the trains they meet.
         var connections: [Connection]? = nil
+        /// When a try for newer times than these couldn't reach the MTA, so
+        /// they're old; nil while none has.
+        var failed: Date? = nil
     }
 
     /// With `change`, the times of the large widget showing it.
     static func loadBoard(for selection: Selection, change: Change? = nil) -> SavedBoard? {
         savedBoards()[boardKey(selection, change: change)]
+    }
+
+    /// Notes that a try for newer times than those saved, begun at `tried`,
+    /// couldn't reach the MTA, so a widget redrawn with them after a tap
+    /// still says they're old. Not times saved since it began, by another
+    /// widget or the countdown, which are new.
+    static func markBoardFailed(for selection: Selection, change: Change? = nil, tried: Date) {
+        guard let boardsFile else { return }
+        let key = boardKey(selection, change: change)
+        changing(boardsFile) {
+            var boards = savedBoards()
+            guard let saved = boards[key], saved.fetched <= tried else { return }
+            boards[key]?.failed = .now
+            if let data = try? JSONEncoder().encode(boards) {
+                try? data.write(to: boardsFile, options: .atomic)
+            }
+        }
     }
 
     /// Kept for an hour: iOS can leave a widget that long between reloads,

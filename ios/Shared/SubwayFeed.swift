@@ -68,8 +68,10 @@ struct Arrival: Codable, Hashable, Sendable {
         if let position, let index = approach.firstIndex(where: { $0.id == position.stop }) {
             return position.isStopped ? .at(index) : .approaching(index)
         }
-        // Without a position, the first stop it isn't due at yet
-        return .approaching(approach.firstIndex { $0.time > now } ?? approach.count - 1)
+        // Without a position, the first stop it isn't due at yet; due at them
+        // all, it's at the last, held there until it leaves
+        if let next = approach.firstIndex(where: { $0.time > now }) { return .approaching(next) }
+        return .at(approach.count - 1)
     }
 }
 

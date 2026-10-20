@@ -71,14 +71,16 @@ struct RefreshWidgetsIntent: AppIntent {
 }
 
 // iOS reloads only the widget tapped, and the map and the alert are kept by
-// widget, so these leave the others as they are. Each stores what its toggle
-// flips to, the other way from what the widget showed, rather than flip what's
+// widget, so these leave the others as they are. Each stores the state its
+// toggle is tapped to, which iOS gives it as `value`, rather than flip what's
 // stored: widgets alike in kind, size and Edit menu share it, and one still
-// showing the other state would flip it back.
+// showing the other state would flip it back. Nor is it the other way from
+// what the widget showed when it was drawn: a second tap before the widget
+// reloads would ask for that again, rather than undo the first.
 
 /// The medium and large widgets' map button: shows where the next train is,
 /// or the later trains again.
-struct ToggleMapIntent: AppIntent {
+struct ToggleMapIntent: SetValueIntent {
     static let title: LocalizedStringResource = "Show where the train is"
     static let isDiscoverable = false
 
@@ -90,20 +92,19 @@ struct ToggleMapIntent: AppIntent {
     @Parameter(title: "Train")
     var trainID: String
 
-    /// Whether it's to show the stops.
+    /// Whether it's to show the stops: the toggle's new state.
     @Parameter(title: "Shows the stops", default: false)
-    var shows: Bool
+    var value: Bool
 
     init() {}
 
-    init(selection: Selection, widgetID: String, shows: Bool) {
+    init(selection: Selection, widgetID: String) {
         self.widgetID = widgetID
         trainID = selection.trainID
-        self.shows = shows
     }
 
     func perform() async throws -> some IntentResult {
-        SharedStore.setMap(shows, for: trainID, in: widgetID)
+        SharedStore.setMap(value, for: trainID, in: widgetID)
         SharedStore.recordTap(\.toggled, for: widgetID)
         return .result()
     }
@@ -111,7 +112,7 @@ struct ToggleMapIntent: AppIntent {
 
 /// A home screen widget's alert banner: shows the alert in full, or the times
 /// again.
-struct ToggleAlertIntent: AppIntent {
+struct ToggleAlertIntent: SetValueIntent {
     static let title: LocalizedStringResource = "Show the alert"
     static let isDiscoverable = false
 
@@ -123,20 +124,19 @@ struct ToggleAlertIntent: AppIntent {
     @Parameter(title: "Train")
     var trainID: String
 
-    /// Whether it's to show the alert in full.
+    /// Whether it's to show the alert in full: the toggle's new state.
     @Parameter(title: "Shows the alert", default: false)
-    var shows: Bool
+    var value: Bool
 
     init() {}
 
-    init(selection: Selection, widgetID: String, shows: Bool) {
+    init(selection: Selection, widgetID: String) {
         self.widgetID = widgetID
         trainID = selection.alertID
-        self.shows = shows
     }
 
     func perform() async throws -> some IntentResult {
-        SharedStore.setAlert(shows, for: trainID, in: widgetID)
+        SharedStore.setAlert(value, for: trainID, in: widgetID)
         SharedStore.recordTap(\.toggled, for: widgetID)
         return .result()
     }

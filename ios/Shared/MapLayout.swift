@@ -229,7 +229,10 @@ struct TransferMapLayout {
             return Row(id: index, name: stops[stop].name, kind: kind, time: stops[stop].time, shared: shared)
         }
         self.rows = rows
-        firstRow = Self.row(at: now, in: rows)
+        // No further on than your station until it leaves it: held there, it's
+        // there after it was due
+        let originRow = connection.first.leaves > now ? rows.firstIndex(where: { $0.kind == .origin }) : nil
+        firstRow = max(Self.row(at: now, in: rows), CGFloat(originRow ?? 0))
 
         // The note as VoiceOver says it, naming a shuttle
         let spokenNote: String?

@@ -82,6 +82,18 @@ import Testing
         #expect(at.spoken(clock: clock) == "R train at Prospect Av, your stop")
     }
 
+    @Test func aTrainHeldAtYourStopIsAtItTillItLeaves() throws {
+        // Due a minute ago and held till 3 minutes, with no position to go by
+        var held = rTrain([("R35N", -3), ("R34N", -1)])
+        held.departure = time(3)
+        #expect(held.place(now: now) == .at(1))
+        let layout = try #require(StopLayout(train: held, now: now))
+        #expect(layout.label == "AT YOUR STOP")
+        #expect(layout.rows.map(\.name) == ["Prospect Av"])
+        #expect(layout.trainRow == 0)
+        #expect(layout.spoken(clock: clock) == "R train at Prospect Av, your stop")
+    }
+
     @Test func aShuttleIsSaidByItsName() throws {
         // Left Botanic Garden 30 seconds ago for Park Pl and Franklin Av
         let stops = [("S04N", -0.5), ("S03N", 1.0), ("S01N", 3.0)]
@@ -131,6 +143,23 @@ import Testing
         #expect(layout.nextNote == nil)
         #expect(layout.spoken == "Your R train is between 25 St and Prospect Av. "
             + "The D gets to Atlantic Av-Barclays Ctr a minute after yours.")
+    }
+
+    @Test func aTrainHeldAtYourStationIsDrawnThereTillItLeaves() throws {
+        // Due at Prospect Av half a minute ago, and held there till 2 minutes
+        let gone = connection(leaves: -0.5, wait: 1)
+        var held = gone
+        held.first.departure = time(2)
+        let layout = try #require(TransferMapLayout(connection: held, selection: prospect, now: now, maxRows: 5))
+        #expect(layout.rows.map(\.kind) == [.change, .stop, .stop, .origin, .stop])
+        #expect(layout.firstRow == 3)
+        #expect(layout.spoken == "Your R train is at Prospect Av. "
+            + "The D gets to Atlantic Av-Barclays Ctr a minute after yours.")
+
+        // Not held, it has left, a quarter of the way to 4 Av-9 St
+        let left = try #require(TransferMapLayout(connection: gone, selection: prospect, now: now, maxRows: 5))
+        #expect(abs(left.firstRow - 2.75) < 0.001)
+        #expect(left.spoken.hasPrefix("Your R train is between Prospect Av and 4 Av-9 St."))
     }
 
     @Test func aTrainFurtherOffThanTheMapIsSaidWhereItIs() throws {

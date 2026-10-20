@@ -140,6 +140,27 @@ import Testing
         #expect(TimelinePlan.reload(now: noon, fetched: noon, runsOut: minute(0.2), switches: nil) == minute(1))
     }
 
+    @Test func showingOldTimesItTriesAgainLessOftenTheOlderTheyAre() throws {
+        let (noon, two) = (try newYork(hour: 12), try newYork(hour: 2))
+        let minute = { (minutes: Double) in noon.addingTimeInterval(minutes * 60) }
+        // Just after times that came, soon
+        #expect(TimelinePlan.reload(now: noon, fetched: nil, old: minute(-1), runsOut: nil, switches: nil) == minute(2))
+        // Then after as long as they're old
+        #expect(TimelinePlan.reload(now: noon, fetched: nil, old: minute(-3.5), runsOut: nil, switches: nil)
+            == minute(3.5))
+        // But no later than with new ones, overnight too
+        #expect(TimelinePlan.reload(now: noon, fetched: nil, old: minute(-20), runsOut: nil, switches: nil) == minute(5))
+        #expect(TimelinePlan.reload(now: two, fetched: nil, old: two.addingTimeInterval(-40 * 60), runsOut: nil,
+                                    switches: nil) == two.addingTimeInterval(15 * 60))
+        // And sooner as they run out of trains, or commuting hours switch
+        #expect(TimelinePlan.reload(now: noon, fetched: nil, old: minute(-20), runsOut: minute(3), switches: nil)
+            == minute(3))
+        #expect(TimelinePlan.reload(now: noon, fetched: nil, old: minute(-20), runsOut: nil, switches: minute(4))
+            == minute(4))
+        // Ones from after now, saved before the clock was set back, are tried again soon
+        #expect(TimelinePlan.reload(now: noon, fetched: nil, old: minute(10), runsOut: nil, switches: nil) == minute(2))
+    }
+
     @Test func savedTimesAreReusedOnlyWhenFreshOrAfterATap() {
         let some = { true }
         let none = { false }

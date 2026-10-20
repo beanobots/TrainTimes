@@ -82,13 +82,17 @@ enum TimelinePlan {
 
     /// When the widget reloads: `reloadInterval` after its times were
     /// `fetched`, as they may be ones another widget fetched a while ago, or
-    /// in 2 minutes without new ones; sooner if its entries run out of trains
-    /// first, rather than say there are none, or as commuting hours start or
-    /// end (`switches`), for the other train; and never within a minute.
-    /// Times fetched after `now`, before the clock was set back, are old.
-    static func reload(now: Date, fetched: Date?, runsOut: Date?, switches: Date?) -> Date {
+    /// in 2 minutes without new ones. Showing `old` ones instead, fetched
+    /// then, it waits as long as they're old, up to `reloadInterval`: the MTA
+    /// can be out of reach for a whole ride underground, and a widget's
+    /// reloads are budgeted by the day. Sooner if its entries run out of
+    /// trains first, rather than say there are none, or as commuting hours
+    /// start or end (`switches`), for the other train; and never within a
+    /// minute. Times fetched after `now`, before the clock was set back, are old.
+    static func reload(now: Date, fetched: Date?, old: Date? = nil, runsOut: Date?, switches: Date?) -> Date {
+        let retry = old.map { min(reloadInterval(at: now), max(2 * 60, now.timeIntervalSince($0))) } ?? 2 * 60
         var reload = fetched.map { $0 > now ? now : $0.addingTimeInterval(reloadInterval(at: now)) }
-            ?? now.addingTimeInterval(2 * 60)
+            ?? now.addingTimeInterval(retry)
         if let runsOut { reload = min(reload, runsOut) }
         if let switches { reload = min(reload, switches) }
         return max(reload, now.addingTimeInterval(60))

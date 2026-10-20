@@ -61,6 +61,33 @@ import Testing
         #expect(state.refreshed(for: selection, board: board, settings: all, now: minutes(5)).trip == "next")
     }
 
+    @Test func theTransfersWalkButtonNamesATrainTheCountdownKeepsTillYouGetThere() throws {
+        // The Transfers widget's first change is on that held train: its walk
+        // button names the next, which the countdown follows as it does when
+        // starting, and still has as you get there
+        var selection = prospect
+        selection.walkMinutes = 5
+        var held = arrival(3, trip: "held")
+        held.departure = minutes(6)
+        let board = Board(trains: [held, arrival(12, trip: "next"), arrival(20, trip: "later")], alerts: [], outages: [])
+        let connections = selection.catchable(board.trains.map { train in
+            Connection(first: train, arrival: arrival(30, trip: train.trip), next: nil)
+        }, now: now)
+        #expect(connections.first?.first.trip == "held")
+        let trip = try #require(selection.firstReachable(connections, now: now)?.first.trip)
+        #expect(trip == "next")
+        let state = try #require(ContentState(for: selection, board: board, settings: all, now: now,
+                                              following: trip, after: nil))
+        #expect(state.train == minutes(12))
+        #expect(state.movedOn(at: minutes(5)).train == minutes(12))
+        #expect(state.refreshed(for: selection, board: board, settings: all, now: minutes(5)).trip == "next")
+
+        // Named the held one, it would let it go as it got in, with you still on your way
+        let toHeld = try #require(ContentState(for: selection, board: board, settings: all, now: now,
+                                               following: "held", after: nil))
+        #expect(toHeld.movedOn(at: minutes(5)).train == minutes(12))
+    }
+
     @Test func followsTheSameTripEvenIfItCantBeCaughtAnyMore() throws {
         var selection = prospect
         selection.walkMinutes = 5

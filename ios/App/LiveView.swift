@@ -226,7 +226,7 @@ struct LiveView: View {
 
     private var favoritesSection: some View {
         Section {
-            if !live.failed.isEmpty {
+            if live.anyFailed(everyTrain) {
                 UnreachableNote()
             }
             if favorites.favorites.isEmpty {
@@ -405,7 +405,7 @@ private struct StationLive: View {
 
     var body: some View {
         List {
-            if !live.failed.isEmpty {
+            if live.anyFailed(station.lineSelections) {
                 UnreachableNote()
             }
             Section {
@@ -435,7 +435,7 @@ private struct TransferLive: View {
 
     var body: some View {
         List {
-            if !live.failed.isEmpty {
+            if live.anyFailed(selections) {
                 UnreachableNote()
             }
             Section("Your train") {
@@ -475,15 +475,18 @@ private struct TransferLive: View {
 final class LiveTrains {
     /// Each train's next arrivals, by `Selection.trainID`, as last fetched.
     private(set) var trains: [String: [Arrival]] = [:]
-    /// The `Selection.trainID`s whose trains couldn't be fetched the last time.
+    /// The `Selection.trainID`s whose trains couldn't be fetched the last time
+    /// they were asked for. It can hold trains of an older list, so a page
+    /// goes by its own; see `anyFailed(_:)`.
     private(set) var failed: Set<String> = []
     /// Moves along every few seconds so the minutes count down.
     var now = Date.now
 
     /// New times for `selections`, as `TrainService.trains(for:)` fetches
     /// them. One left out couldn't be fetched: its old times go, rather than
-    /// count down as if they were new. Other trains keep theirs, so a load of
-    /// an older list that ends after the newer one's doesn't clear its rows.
+    /// count down as if they were new. Other trains keep theirs, and whether
+    /// theirs failed, so a load of an older list that ends after the newer
+    /// one's doesn't clear its rows or what failed of them.
     func load(_ selections: [Selection], includingOtherLines: Bool = true, ownLinesOnly: Set<String> = []) async {
         // With nothing to fetch, nothing failed
         guard !selections.isEmpty else {
@@ -494,11 +497,19 @@ final class LiveTrains {
                                                 ownLinesOnly: ownLinesOnly)
         // A newer list cancels this load; that isn't a failure
         guard !Task.isCancelled else { return }
-        let missing = Set(selections.map(\.trainID)).subtracting(fetched.keys)
+        let asked = Set(selections.map(\.trainID))
+        let missing = asked.subtracting(fetched.keys)
         trains.merge(fetched) { $1 }
         for trainID in missing { trains[trainID] = nil }
-        failed = missing
+        failed.subtract(asked)
+        failed.formUnion(missing)
         now = .now
+    }
+
+    /// Whether the trains of any of `selections`, those a page lists,
+    /// couldn't be fetched the last time.
+    func anyFailed(_ selections: [Selection]) -> Bool {
+        !failed.isDisjoint(with: selections.map(\.trainID))
     }
 }
 

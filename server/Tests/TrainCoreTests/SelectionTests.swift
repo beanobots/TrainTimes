@@ -62,6 +62,26 @@ import Testing
         #expect(prospect.catchable(connections, now: now).map(\.first.trip) == ["held", "next"])
     }
 
+    @Test func theFirstTrainYouReachAsItGetsIn() {
+        // Due in 3 minutes and held till 6: with a 5-minute walk you'd catch it
+        // only while it's held, and a countdown to it would move on as it got in
+        var walking = prospect
+        walking.walkMinutes = 5
+        var held = arrival(3, trip: "held")
+        held.departure = now.addingTimeInterval(6 * 60)
+        let trains = [held, arrival(12, trip: "next")]
+        #expect(walking.catchable(trains, now: now).first?.trip == "held")
+        #expect(walking.firstReachable(trains, now: now)?.trip == "next")
+        #expect(walking.firstReachable(trains, now: now.addingTimeInterval(8 * 60)) == nil)
+        // Without the walk, you're there as it gets in
+        #expect(prospect.firstReachable(trains, now: now)?.trip == "held")
+
+        // With a change, by the train at your station
+        let connections = trains.map { Connection(first: $0, arrival: arrival(20, trip: $0.trip), next: nil) }
+        #expect(walking.firstReachable(connections, now: now)?.first.trip == "next")
+        #expect(prospect.firstReachable(connections, now: now)?.first.trip == "held")
+    }
+
     @Test func aChoiceOfOneLineSavedBeforeThereCouldBeMore() throws {
         let json = #"{"stationID":"R34","route":"R","direction":"N"}"#
         let selection = try JSONDecoder().decode(Selection.self, from: Data(json.utf8))

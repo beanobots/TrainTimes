@@ -41,9 +41,10 @@ platform, like the 2 or 3 at Atlantic Av, counts the walk to it in the wait; set
 how long that walk is on the widget. A Transfers widget shows the widget picked
 in its Edit menu, or with none picked the first one that changes trains.
 
-**Choosing a train.** In the app, tap the train at the top and choose in three
-steps, each leading to the next: the station (search, or show only one line's),
-its lines, and the direction. The lines are laid out platform by platform: tap
+**Choosing a train.** In the app's **Widgets** tab, tap a widget and then its
+train (or, in the Live tab, the train at the top of a train's page), and choose
+in three steps, each leading to the next: the station (search, or show only one
+line's), its lines, and the direction. The lines are laid out platform by platform: tap
 as many as you like, say the N and the R at Atlantic Av, from one platform or
 several (the 2 and the Q work too), or all of a platform's at once, and their
 trains show up together, each with its bullet. A station with one line skips
@@ -66,8 +67,8 @@ The app also shows, for the station and line you choose:
   widgets say what kind it is.
 - **Accessibility**: whether the station is step-free, which elevators and
   escalators are out or have planned work, and the MTA's advice for getting
-  around a broken elevator. Turn on "Show elevator outages on the widget" to
-  see them there too.
+  around a broken elevator. Turn on **Elevator outages** for a widget in the
+  Widgets tab to see them there too.
 - **A map** of the station and its entrances, with elevator entrances marked,
   and walking directions in Maps.
 
@@ -182,9 +183,10 @@ pull request and every push to `main` that changes it or the app's shared code.
    [latest release](../../releases/tag/latest), put it on the iPhone (AirDrop,
    iCloud Drive or Files), and in AltStore go to **My Apps**, tap **+**, and pick
    it. You won't get update notices this way.
-4. **Choose your train.** Open **Train Times** and tap the train at the top.
-   Search for your station (or show only one line's), tap one or more of its
-   lines, then the direction. The widget updates right away.
+4. **Choose your train.** Open **Train Times**, go to the **Widgets** tab, tap
+   your widget, then tap its train. Search for your station (or show only one
+   line's), tap one or more of its lines, then the direction. The widget
+   updates right away.
 5. **Add the widget.** Touch and hold the Home Screen, tap **Edit → Add Widget**,
    and choose **Train Times**: Next train, Transfers for a widget that
    changes trains, or Trains near you for the stations closest to you. Until

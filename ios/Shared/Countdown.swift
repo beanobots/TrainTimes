@@ -65,7 +65,7 @@ extension CountdownState {
     init?(for selection: Selection, trains: [Arrival], notice: String?, now: Date,
           following trip: String?, after last: Date?) {
         let upcoming = trains.filter { $0.time > now }
-        let reachable = upcoming.first { selection.leaveTime(for: $0) > now }
+        let reachable = selection.firstReachable(upcoming, now: now)
         let target: Arrival?
         if let trip {
             // A trip without an id can't be told from another one, so that goes by its time

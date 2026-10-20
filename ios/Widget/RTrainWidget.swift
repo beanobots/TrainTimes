@@ -104,7 +104,8 @@ struct Provider: AppIntentTimelineProvider {
                                    largeText: Self.hasRoom(context), widgetID: widgetID(configuration, context))
         // iOS rations how often widgets reload, so this may come later;
         // until it does, the entries step through the trains already known.
-        let reload = TimelinePlan.reload(now: .now, fetched: plan.fetched, runsOut: plan.runsOut, switches: switches)
+        let reload = TimelinePlan.reload(now: .now, fetched: plan.fetched, old: plan.old, runsOut: plan.runsOut,
+                                         switches: switches)
         return Timeline(entries: plan.entries, policy: .after(reload))
     }
 
@@ -113,6 +114,8 @@ struct Provider: AppIntentTimelineProvider {
         var entries: [TrainEntry]
         /// When its times were fetched; nil if new ones couldn't be.
         var fetched: Date?
+        /// Without new times, when the old ones it shows instead were fetched.
+        var old: Date? = nil
         /// The last entry's date, after which the widget knows of no train to show.
         var runsOut: Date?
     }
@@ -163,8 +166,9 @@ struct Provider: AppIntentTimelineProvider {
     /// the next that gets there. The medium and large widgets also get one a
     /// minute, for their later trains' minutes to go and their maps. When the
     /// MTA can't be reached, the times last fetched, while any of them is
-    /// still to catch, said to be old. The Transfers widget without a change
-    /// has just the one entry, with no trains.
+    /// still to catch, said to be old, as they still are when a tap redraws
+    /// the widget with them. The Transfers widget without a change has just
+    /// the one entry, with no trains.
     private static func plan(for selection: Selection, change: Change?, transfers: Bool, family: WidgetFamily,
                              largeText: Bool, widgetID: String) async -> Plan {
         let countdown = SharedStore.loadCountdown().flatMap { $0.ends > .now ? $0 : nil }
@@ -198,10 +202,13 @@ struct Provider: AppIntentTimelineProvider {
         let taps = SharedStore.loadTaps(for: widgetID)
         let board: SharedStore.SavedBoard
         let updated: Bool
+        let tried = Date.now
         do {
-            board = try await Self.board(for: selection, change: change, taps: taps, settings: settings)
-            updated = true
+            let got = try await Self.board(for: selection, change: change, taps: taps, settings: settings)
+            board = got.board
+            updated = !got.old
         } catch {
+            SharedStore.markBoardFailed(for: selection, change: change, tried: tried)
             guard let saved = SharedStore.loadBoard(for: selection, change: change),
                   Self.anyToCatch(in: saved, selection: selection, change: change, now: .now) else {
                 return Plan(entries: [TrainEntry(date: .now, selection: selection, trains: [], problem: "Couldn't reach the MTA",
@@ -237,8 +244,8 @@ struct Provider: AppIntentTimelineProvider {
         let toCatch = change == nil ? trains : connections.map(\.first)
         let entries = [entry(now)]
             + TimelinePlan.dates(after: now, toCatch: toCatch, selection: selection, everyMinute: hasMap).map(entry)
-        // Without new times, it tries again soon
-        return Plan(entries: entries, fetched: updated ? board.fetched : nil,
+        // Without new times, it tries again soon, then less often as those it shows age
+        return Plan(entries: entries, fetched: updated ? board.fetched : nil, old: updated ? nil : board.fetched,
                     runsOut: TimelinePlan.runsOut(toCatch, selection: selection))
     }
 
@@ -254,16 +261,18 @@ struct Provider: AppIntentTimelineProvider {
     /// widget showing it, fetched; or, to redraw at once, saved ones, as
     /// `TimelinePlan.reuses` has it: after a tap on the map or walk button or
     /// the alert banner, those it already shows, however old; the widget
-    /// reloads a minute later, as they're old. Only the alerts and outages it
-    /// can mention, with `settings`, are fetched.
+    /// reloads a minute later, as they're old. Should the last try for newer
+    /// ones have failed, they're `old`: still said to be, and tried again as
+    /// times that couldn't be fetched are. Only the alerts and outages it can
+    /// mention, with `settings`, are fetched.
     private static func board(for selection: Selection, change: Change?, taps: SharedStore.Taps,
-                              settings: AppSettings) async throws -> SharedStore.SavedBoard {
+                              settings: AppSettings) async throws -> (board: SharedStore.SavedBoard, old: Bool) {
         let now = Date.now
         if let saved = SharedStore.loadBoard(for: selection, change: change),
            TimelinePlan.reuses(saved: saved.fetched, refreshed: taps.refreshed, toggled: taps.toggled,
                                anyToCatch: { anyToCatch(in: saved, selection: selection, change: change, now: now) },
                                now: now) {
-            return saved
+            return (saved, saved.failed != nil)
         }
         let alerts = selection.mentionsAlerts(with: settings)
         let board: Board
@@ -274,7 +283,7 @@ struct Provider: AppIntentTimelineProvider {
             board = try await TrainService.board(for: selection, includingAlerts: alerts,
                                                  includingOutages: selection.elevatorAlerts, now: now)
         }
-        return SharedStore.saveBoard(board, for: selection, change: change, fetched: .now)
+        return (SharedStore.saveBoard(board, for: selection, change: change, fetched: .now), false)
     }
 }
 
@@ -335,8 +344,13 @@ struct TrainWidgetView: View {
 
     private var next: Arrival? { entry.trains.first }
     /// The train the widget counts down to: on the Transfers widget, the next
-    /// one that gets to the change, which needn't be the next at your station.
-    private var countedDown: Arrival? { entry.transfers ? entry.connections?.first?.first : next }
+    /// one that gets to the change, which needn't be the next at your station,
+    /// and that you reach as it gets in. The countdown its walk button starts
+    /// moves on as that train gets in, so not one you'd catch only while it's
+    /// held there.
+    private var countedDown: Arrival? {
+        entry.transfers ? entry.selection.firstReachable(entry.connections ?? [], now: entry.date)?.first : next
+    }
     private var later: ArraySlice<Arrival> { entry.trains.dropFirst() }
     /// With a walking time, the countdown is to when to leave.
     private var walking: Bool { entry.selection.walkMinutes > 0 }
@@ -410,8 +424,7 @@ struct TrainWidgetView: View {
         if alertOpen {
             EmptyView()
         } else if hasMap {
-            Toggle(isOn: entry.showsMap,
-                   intent: ToggleMapIntent(selection: entry.selection, widgetID: entry.widgetID, shows: !entry.showsMap)) {
+            Toggle(isOn: entry.showsMap, intent: ToggleMapIntent(selection: entry.selection, widgetID: entry.widgetID)) {
                 Text("Where the train is")
             }
             .toggleStyle(SwapToggleStyle { isOn in
@@ -429,8 +442,7 @@ struct TrainWidgetView: View {
     /// Screens would draw what covers them as one solid block, so there the
     /// times stay until the alert comes.
     private func alertLayer(_ notice: Notice) -> some View {
-        Toggle(isOn: entry.showsAlert,
-               intent: ToggleAlertIntent(selection: entry.selection, widgetID: entry.widgetID, shows: !entry.showsAlert)) {
+        Toggle(isOn: entry.showsAlert, intent: ToggleAlertIntent(selection: entry.selection, widgetID: entry.widgetID)) {
             Text("The whole alert")
         }
         .toggleStyle(SwapToggleStyle { isOn in
@@ -1624,15 +1636,19 @@ struct TrainWidgetView: View {
 
     /// The lock screen's countdown. Dimmed, iOS stops a timer's seconds and
     /// shows "3:--", so it's the time instead, after a small "at" with
-    /// `saysAt`, where nothing beside it says so. Otherwise the timer is held
-    /// to a hidden stand-in for its digits: left to size itself, it's laid out
-    /// afresh as the screen wakes, and its first digit is cut off.
+    /// `saysAt`, where nothing beside it says so; with a walking time, a small
+    /// walker, as it's when to leave, not when the train comes. Otherwise the
+    /// timer is held to a hidden stand-in for its digits: left to size itself,
+    /// it's laid out afresh as the screen wakes, and its first digit is cut off.
     @ViewBuilder
     private func lockScreenCountdown(to train: Arrival, alignment: Alignment, saysAt: Bool = false) -> some View {
         let leave = entry.selection.leaveTime(for: train)
         if luminanceReduced {
             let time = Text(leave.clock)
-            let shown = saysAt ? Text("\(Text("at ").font(.caption2))\(time)") : time
+            let walker = Text("\(Image(systemName: "figure.walk")) ").font(.caption2)
+            let shown: Text = !saysAt ? time
+                : walking ? Text("\(walker)\(time)").accessibilityLabel("Leave at \(Spoken.clock(leave))")
+                : Text("\(Text("at ").font(.caption2))\(time)")
             shown
                 .monospacedDigit()
                 .lineLimit(1)

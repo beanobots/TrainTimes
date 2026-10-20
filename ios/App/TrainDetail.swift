@@ -90,6 +90,19 @@ struct TrainDetail: View {
             }
         }
         .ticking($now)
+        // The countdown's, on the list: on its section, each of its rows,
+        // header and footer would run them. A problem starting one is the
+        // other train's
+        .onChange(of: selection.trainID) { countdownProblem = nil }
+        // The countdown gets the times this page fetches, so it moves on with them
+        .onChange(of: timesFetched) {
+            guard countdownTrain != nil, let board, let fetched = timesFetched else { return }
+            let shown = selection
+            Task {
+                let train = await TrainActivityController.update(for: shown, from: board, fetched: fetched)
+                if selection.trainID == shown.trainID { countdownTrain = train }
+            }
+        }
     }
 
     /// The train the picker changes: a favorite moves to the new train, keeping
@@ -182,17 +195,6 @@ struct TrainDetail: View {
         } footer: {
             Text("Counts down to your train on the Lock Screen and in the Dynamic Island until you stop it, in place of any other countdown. A widget's walk button starts and stops it too. While this page is open, it gets the times shown here; otherwise tap ↻ on it, or open the app, for new times.")
                 .accessibilityLabel("Counts down to your train on the Lock Screen and in the Dynamic Island until you stop it, in place of any other countdown. A widget's walk button starts and stops it too. While this page is open, it gets the times shown here; otherwise tap Refresh on it, or open the app, for new times.")
-        }
-        // A problem starting one is the other train's
-        .onChange(of: selection.trainID) { countdownProblem = nil }
-        // The countdown gets the times this page fetches, so it moves on with them
-        .onChange(of: timesFetched) {
-            guard countdownTrain != nil, let board, let fetched = timesFetched else { return }
-            let shown = selection
-            Task {
-                let train = await TrainActivityController.update(for: shown, from: board, fetched: fetched)
-                if selection.trainID == shown.trainID { countdownTrain = train }
-            }
         }
     }
 
