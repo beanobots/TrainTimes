@@ -75,14 +75,15 @@ enum TrainActivityController {
         var fullBoard: Board?
         var fromOwnLines = false
         var state: CountdownState?
-        if let saved = SharedStore.loadBoard(for: selection), now.timeIntervalSince(saved.fetched) < savedBoardAge {
+        if let saved = SharedStore.loadBoard(for: selection), saved.fetched.isWithin(savedBoardAge, before: now) {
             state = CountdownState(for: selection, trains: saved.trains, notice: saved.notice?.label, now: now,
                                    following: trip, after: nil)
             // Updated when they were
             state?.updated = saved.fetched
         }
         if state == nil, let quick = try? await TrainService.board(for: selection, includingAlerts: false,
-                                                                    includingOtherLines: false, now: now) {
+                                                                    includingOutages: false, includingOtherLines: false,
+                                                                    now: now) {
             state = CountdownState(for: selection, board: quick, settings: SharedStore.loadSettings(), now: now,
                                    following: trip, after: nil)
             fromOwnLines = state != nil
@@ -135,9 +136,16 @@ enum TrainActivityController {
     /// Everything for `selection`'s countdown, saved for the widgets to redraw
     /// with rather than fetching it again.
     private static func fetchAll(for selection: Selection) async throws -> Board {
-        let board = try await TrainService.board(for: selection, includingOutages: selection.elevatorAlerts)
+        let board = try await fetchBoard(for: selection, settings: SharedStore.loadSettings())
         SharedStore.saveBoard(board, for: selection, fetched: .now)
         return board
+    }
+
+    /// `selection`'s trains, and only the alerts and outages its countdown can
+    /// mention, as Settings has them.
+    private static func fetchBoard(for selection: Selection, settings: AppSettings, now: Date = .now) async throws -> Board {
+        try await TrainService.board(for: selection, includingAlerts: selection.mentionsAlerts(with: settings),
+                                     includingOutages: selection.elevatorAlerts, now: now)
     }
 
     /// A widget's walk button (`widgetID` is that widget's): stops the
@@ -183,15 +191,15 @@ enum TrainActivityController {
         if running.isEmpty { tellWidgets(nil) }
         for activity in running {
             let selection = activity.attributes.selection
+            let settings = SharedStore.loadSettings()
             let now = Date.now
-            guard let board = try? await TrainService.board(for: selection, includingOutages: selection.elevatorAlerts, now: now) else {
+            guard let board = try? await fetchBoard(for: selection, settings: settings, now: now) else {
                 // Its times stay as they were, but not its marks, should Settings have changed them
                 await redraw(activity)
                 continue
             }
             SharedStore.saveBoard(board, for: selection, fetched: .now)
-            let state = activity.content.state.refreshed(for: selection, board: board, settings: SharedStore.loadSettings(),
-                                                         now: now)
+            let state = activity.content.state.refreshed(for: selection, board: board, settings: settings, now: now)
             await activity.update(content(state))
         }
     }

@@ -182,11 +182,13 @@ private func status(_ context: ActivityViewContext<TrainActivityAttributes>) -> 
     shownState(context).isLive ? "Live" : "Scheduled"
 }
 
-/// What's in the way, or that there are no trains.
+/// What's in the way, with its kind's symbol and colour as on the widgets, or
+/// that there are no trains.
 private func noticeLabel(_ notice: String) -> some View {
-    Label(notice, systemImage: "exclamationmark.triangle.fill")
+    let kind = Notice.Kind(label: notice)
+    return Label(notice, systemImage: kind?.symbol ?? "exclamationmark.triangle.fill")
         .font(.caption.weight(.semibold))
-        .foregroundStyle(.orange)
+        .foregroundStyle(kind?.tint ?? .orange)
         .accessibilityLabel("Alert: \(notice)")
 }
 

@@ -94,13 +94,10 @@ struct NearbyProvider: TimelineProvider {
                                      settings: settings, locatedAt: locatedAt)], reload(now))
             }
             // Every line at each station, both ways
-            let selections = near.flatMap { result in
-                result.station.routes.flatMap { route in
-                    Direction.allCases.map { Selection(stationID: result.station.id, routes: [route], direction: $0) }
-                }
-            }
+            let selections = near.flatMap(\.station.lineSelections)
             async let fetched = TrainService.trains(for: selections, includingOtherLines: false)
-            async let alertEntries = TrainService.alertEntries()
+            // None, where Settings has every kind of alert off
+            async let alertEntries = TrainService.alertEntries(if: !settings.alertKinds.isEmpty)
             let trains = await fetched
             let alerts = await alertEntries
             let name = await place
@@ -186,25 +183,27 @@ struct NearbyLine: Identifiable {
     init(_ route: String, at station: Station, trains: [String: [Arrival]], alerts: [AlertsFeed.Entry]?,
          kinds: Set<ServiceAlert.Kind>, now: Date) {
         self.route = route
-        let named = Direction.allCases.filter { !station.directionName($0, of: route).isEmpty }
-        // Where the MTA names neither, both, as "Northbound" and "Southbound"
-        let goes = named.isEmpty ? Direction.allCases : named
-        // Toward Manhattan first, from outside it; otherwise north, which in Manhattan is uptown
-        let towardManhattan = station.borough == "Manhattan" || !Lines.servesManhattan(route) ? nil
-            : goes.first(where: { station.directionName($0, of: route).contains("Manhattan") })
-        let order = towardManhattan.map { [$0, $0.opposite] } ?? [.north, .south]
-
+        // Its ways, named and in order, with the line's own trains, as the app's Nearby list has them
+        let ways = station.ways(of: route, trains: trains, now: now)
         // The last entry's next train is the first after the timeline ends
         let end = now.addingTimeInterval(TimeInterval(NearbyProvider.minutesShown * 60))
-        var ways: [Direction: Way] = [:]
-        for direction in order where goes.contains(direction) {
-            let selection = Selection(stationID: station.id, routes: [route], direction: direction)
-            // Each line's own trains, not those of another line running on its
-            // tracks: every one due before the timeline ends, and the one after,
-            // so each entry has its next train. Without their stops, which the
+        var directions: [NearbyDirection?] = []
+        // Each way's worst alert, in their order, so of two as bad the first way's
+        var worst: (alert: ServiceAlert, selection: Selection)?
+        for way in ways {
+            guard let way else {
+                directions.append(nil)
+                continue
+            }
+            let shown = alerts.map { AlertsFeed.alerts(for: way.selection, in: $0, now: now).filter { kinds.contains($0.kind) } } ?? []
+            if let alert = shown.first, worst.map({ alert.kind < $0.alert.kind }) ?? true {
+                worst = (alert, way.selection)
+            }
+            // Every one due before the timeline ends, and the one after, so
+            // each entry has its next train. Without their stops, which the
             // widget doesn't show, to keep them small in its little memory
-            let own = trains[selection.trainID].map { list in
-                var kept = list.filter { $0.route == route }
+            let kept = way.trains.map { list in
+                var kept = list
                 if let after = kept.firstIndex(where: { $0.time > end }) {
                     kept = Array(kept[...after])
                 }
@@ -215,77 +214,18 @@ struct NearbyLine: Identifiable {
                     return train
                 }
             }
-            // Left out where the line ends, though others go on from here, unless some of its trains do too
-            if StationDirectory.line(route, endsAt: station, going: direction), own?.isEmpty != false { continue }
-            let shown = alerts.map { AlertsFeed.alerts(for: selection, in: $0, now: now).filter { kinds.contains($0.kind) } } ?? []
-            ways[direction] = Way(selection: selection, trains: own, alerts: shown)
+            directions.append(NearbyDirection(label: way.label, selection: way.selection, trains: kept,
+                                              alert: shown.first?.kind))
         }
-        let labels = Self.labels(of: route, at: station, ways: ways)
-        directions = order.map { direction in
-            ways[direction].map { way in
-                NearbyDirection(label: labels[direction] ?? "", selection: way.selection, trains: way.trains,
-                                alert: way.alerts.first?.kind)
-            }
-        }
-        let noTrains = ways.values.allSatisfy { $0.trains?.isEmpty == true }
-        // Each way's worst alert, in their order, so of two as bad the first way's
-        let worst = order.compactMap { direction -> (alert: ServiceAlert, selection: Selection)? in
-            guard let way = ways[direction], let alert = way.alerts.first else { return nil }
-            return (alert, way.selection)
-        }
-        .min { $0.alert.kind < $1.alert.kind }
+        self.directions = directions
+        let noTrains = ways.compactMap { $0 }.allSatisfy { $0.trains?.isEmpty == true }
         if noTrains, let worst {
-            notice = Notice(kind: .alert(worst.alert.kind), label: worst.alert.kind.label, text: worst.alert.header, others: 0)
+            notice = Notice(worst.alert)
             noticeSelection = worst.selection
         } else {
             notice = nil
             noticeSelection = nil
         }
-    }
-
-    private struct Way {
-        let selection: Selection
-        let trains: [Arrival]?
-        let alerts: [ServiceAlert]
-    }
-
-    /// What each way is called. In Manhattan, the MTA's name: "Uptown",
-    /// "Downtown". From elsewhere, "Manhattan" for the way there, and for the
-    /// other the borough its trains are headed for. A line that stays in one
-    /// borough, like the Staten Island Railway, goes by where its trains end up.
-    private static func labels(of route: String, at station: Station, ways: [Direction: Way]) -> [Direction: String] {
-        // "Uptown & The Bronx" and "Uptown - Queens" are uptown
-        func named(_ direction: Direction) -> String {
-            var name = station.directionName(direction, of: route)
-            // Where the lines here part, this one's way: "Broad St (JZ) - Uptown (M)" is uptown for the M
-            let label = LineStyle.of(route).label
-            if let own = name.components(separatedBy: " - ").first(where: {
-                $0.hasSuffix(")") && ($0.components(separatedBy: "(").last ?? "").contains(label)
-            }) {
-                name = own.components(separatedBy: " (")[0]
-            }
-            name = name.components(separatedBy: " & ")[0]
-            // Only those: "34 St - Hudson Yards" stays as it is
-            let first = name.components(separatedBy: " - ")[0]
-            if first == "Uptown" || first == "Downtown" { name = first }
-            return name.isEmpty ? (direction == .north ? "Northbound" : "Southbound") : name
-        }
-        var labels: [Direction: String] = [:]
-        for (direction, way) in ways {
-            if station.borough == "Manhattan" {
-                labels[direction] = named(direction)
-            } else if Lines.servesManhattan(route) && station.directionName(direction, of: route).contains("Manhattan") {
-                labels[direction] = "Manhattan"
-            } else {
-                labels[direction] = way.trains?.first.flatMap { StationDirectory.borough(ofStop: $0.lastStop) } ?? station.borough
-            }
-        }
-        if labels.count == 2, Set(labels.values).count == 1 {
-            for (direction, way) in ways {
-                labels[direction] = way.trains?.first?.terminal ?? named(direction)
-            }
-        }
-        return labels
     }
 }
 
@@ -693,18 +633,14 @@ extension NearbyEntry {
         let ends = ["F": ("F01N", "D43S"), "G": ("G22N", "F27S"), "R": ("G08N", "R45S")]
         var trains: [String: [Arrival]] = [:]
         var minutes = 1.0
-        for result in near {
-            for route in result.station.routes {
-                for direction in Direction.allCases {
-                    let selection = Selection(stationID: result.station.id, routes: [route], direction: direction)
-                    let end = ends[route].map { direction == .north ? $0.0 : $0.1 } ?? ""
-                    trains[selection.trainID] = [minutes, minutes + 9].map {
-                        Arrival(route: route, time: now.addingTimeInterval($0 * 60 + 30), stop: selection.stopIDs.first ?? "",
-                                lastStop: end, isLive: $0 < 15)
-                    }
-                    minutes = (minutes + 5).truncatingRemainder(dividingBy: 13)
-                }
+        for selection in near.flatMap(\.station.lineSelections) {
+            let route = selection.firstRoute
+            let end = ends[route].map { selection.direction == .north ? $0.0 : $0.1 } ?? ""
+            trains[selection.trainID] = [minutes, minutes + 9].map {
+                Arrival(route: route, time: now.addingTimeInterval($0 * 60 + 30), stop: selection.stopIDs.first ?? "",
+                        lastStop: end, isLive: $0 < 15)
             }
+            minutes = (minutes + 5).truncatingRemainder(dividingBy: 13)
         }
         let stations = near.map { NearbyStation($0, trains: trains, alerts: nil, kinds: [], now: now) }
         let shown = NearbyLayout.fit(stations, in: NearbyLayout.room(height: 354, unreachable: false))

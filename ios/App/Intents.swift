@@ -14,11 +14,14 @@ struct NextTrainIntent: AppIntent {
         // In the default widget's commuting hours, their train, as the widget shows
         let app = Selection.defaultWidgetTrain(at: now)
         let selection = stop?.selection(basedOn: app) ?? app
-        guard let board = try? await TrainService.board(for: selection, includingOutages: selection.elevatorAlerts, now: now) else {
+        let settings = SharedStore.loadSettings()
+        // Only the alerts and outages Siri can mention
+        guard let board = try? await TrainService.board(for: selection, includingAlerts: selection.mentionsAlerts(with: settings),
+                                                        includingOutages: selection.elevatorAlerts, now: now) else {
             return .result(dialog: "I couldn't reach the MTA. Try again in a moment.", view: NextTrainSnippet(selection: selection, trains: []))
         }
         let trains = selection.catchable(board.trains, now: now)
-        let notice = board.notice(for: selection, settings: SharedStore.loadSettings())
+        let notice = board.notice(for: selection, settings: settings)
         // The board's trains are all still to come, so any not caught are too soon to reach
         let sentence = Spoken.nextTrain(selection: selection, trains: trains, unreachable: trains.count < board.trains.count,
                                         notice: notice, now: now)

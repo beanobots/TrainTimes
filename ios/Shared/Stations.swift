@@ -6,6 +6,9 @@ enum Direction: String, Codable, CaseIterable, Sendable {
     case south = "S"
 
     var opposite: Direction { self == .north ? .south : .north }
+
+    /// "Northbound" or "Southbound": what it's called where the MTA gives it no name.
+    var compassName: String { self == .north ? "Northbound" : "Southbound" }
 }
 
 /// One of a station's sets of tracks, as the MTA lists them: the D N R at
@@ -55,7 +58,7 @@ struct Platform: Codable, Hashable, Identifiable, Sendable {
         guard !notes.contains("local"), !notes.contains("express") else { return nil }
         let ways = Direction.allCases.filter { way in
             let name = directionName(way).lowercased()
-            return notes.hasPrefix(way == .north ? "northbound" : "southbound") || (!name.isEmpty && notes.hasPrefix(name))
+            return notes.hasPrefix(way.compassName.lowercased()) || (!name.isEmpty && notes.hasPrefix(name))
         }
         return ways.count == 1 ? ways[0] : nil
     }
@@ -165,17 +168,114 @@ struct Station: Hashable, Identifiable, Sendable {
         platforms(serving: [route]).lazy.map { $0.directionName(direction) }.first { !$0.isEmpty } ?? ""
     }
 
+    /// The ways the lines of `routes` go from here: those the MTA names, or
+    /// both where it names neither. One it gives no name, at the end of the
+    /// line, has no trains.
+    func directions(of routes: [String]) -> [Direction] {
+        let serving = platforms(serving: routes)
+        let named = Direction.allCases.filter { way in serving.contains { !$0.directionName(way).isEmpty } }
+        return named.isEmpty ? Direction.allCases : named
+    }
+
     static func directionLabel(_ direction: Direction, on platforms: [Platform]) -> String {
         var names: [String] = []
         for name in platforms.map({ $0.directionName(direction) }) where !name.isEmpty && !names.contains(name) {
             names.append(name)
         }
-        if names.isEmpty { return direction == .north ? "Northbound" : "Southbound" }
+        if names.isEmpty { return direction.compassName }
         return names.joined(separator: " or ")
     }
 
     func serves(label: String) -> Bool {
         routes.contains { LineStyle.of($0).label == label }
+    }
+}
+
+/// One way a line goes from a station, as Trains near you and the app's
+/// Nearby list show it: what it's called, and its trains.
+struct LineWay {
+    /// The line on its own, going this way.
+    let selection: Selection
+    /// "Manhattan", "Brooklyn", "Uptown"
+    let label: String
+    /// Its own trains still to leave, not those of another line running on
+    /// its tracks, soonest first; nil when they couldn't be had.
+    let trains: [Arrival]?
+
+    var direction: Direction { selection.direction }
+}
+
+extension Station {
+    /// Each of its lines on its own, both ways: what the Nearby lists fetch.
+    var lineSelections: [Selection] {
+        routes.flatMap { route in
+            Direction.allCases.map { Selection(stationID: id, routes: [route], direction: $0) }
+        }
+    }
+
+    /// `route`'s two ways from here, as Trains near you and the app's Nearby
+    /// list show them, with its trains from `trains` (by `Selection.trainID`,
+    /// as `TrainService.trains(for:)` has them) still to leave at `now`. From
+    /// outside Manhattan the way toward it comes first; otherwise north, which
+    /// in Manhattan is uptown. Nil for a way it doesn't go: one the MTA gives
+    /// no name, at the end of the line, or where the line ends though others
+    /// go on from here, unless some of its trains do too.
+    func ways(of route: String, trains: [String: [Arrival]], now: Date) -> [LineWay?] {
+        let goes = directions(of: [route])
+        let towardManhattan = borough == "Manhattan" || !Lines.servesManhattan(route) ? nil
+            : goes.first(where: { directionName($0, of: route).contains("Manhattan") })
+        let order = towardManhattan.map { [$0, $0.opposite] } ?? [.north, .south]
+        var found: [Direction: (selection: Selection, trains: [Arrival]?)] = [:]
+        for direction in order where goes.contains(direction) {
+            let selection = Selection(stationID: id, routes: [route], direction: direction)
+            let own = trains[selection.trainID]?.filter { $0.route == route && $0.leaves > now }
+            if StationDirectory.line(route, endsAt: self, going: direction), own?.isEmpty != false { continue }
+            found[direction] = (selection, own)
+        }
+        let labels = wayLabels(of: route, trains: found.mapValues { $0.trains })
+        return order.map { direction in
+            found[direction].map { LineWay(selection: $0.selection, label: labels[direction] ?? "", trains: $0.trains) }
+        }
+    }
+
+    /// What each of `route`'s ways from here is called, given their trains.
+    /// In Manhattan, the MTA's name: "Uptown", "Downtown". From elsewhere,
+    /// "Manhattan" for the way there, and for the other the borough its trains
+    /// are headed for. A line that stays in one borough, like the Staten
+    /// Island Railway, goes by where its trains end up.
+    private func wayLabels(of route: String, trains ways: [Direction: [Arrival]?]) -> [Direction: String] {
+        // "Uptown & The Bronx" and "Uptown - Queens" are uptown
+        func named(_ direction: Direction) -> String {
+            var name = directionName(direction, of: route)
+            // Where the lines here part, this one's way: "Broad St (JZ) - Uptown (M)" is uptown for the M
+            let label = LineStyle.of(route).label
+            if let own = name.components(separatedBy: " - ").first(where: {
+                $0.hasSuffix(")") && ($0.components(separatedBy: "(").last ?? "").contains(label)
+            }) {
+                name = own.components(separatedBy: " (")[0]
+            }
+            name = name.components(separatedBy: " & ")[0]
+            // Only those: "34 St - Hudson Yards" stays as it is
+            let first = name.components(separatedBy: " - ")[0]
+            if first == "Uptown" || first == "Downtown" { name = first }
+            return name.isEmpty ? direction.compassName : name
+        }
+        var labels: [Direction: String] = [:]
+        for (direction, trains) in ways {
+            if borough == "Manhattan" {
+                labels[direction] = named(direction)
+            } else if Lines.servesManhattan(route) && directionName(direction, of: route).contains("Manhattan") {
+                labels[direction] = "Manhattan"
+            } else {
+                labels[direction] = trains?.first.flatMap { StationDirectory.borough(ofStop: $0.lastStop) } ?? borough
+            }
+        }
+        if labels.count == 2, Set(labels.values).count == 1 {
+            for (direction, trains) in ways {
+                labels[direction] = trains?.first?.terminal ?? named(direction)
+            }
+        }
+        return labels
     }
 }
 
@@ -270,9 +370,9 @@ enum StationDirectory {
         byID[id]
     }
 
-    /// The short name of the station a platform id belongs to ("G08N" is Forest Hills).
-    static func terminalName(forStop stop: String) -> String? {
-        shortName(forStop: stop)
+    /// The station of a stop on a train's way: "R31N" is Atlantic Av-Barclays Ctr.
+    static func station(forStop stop: String) -> Station? {
+        platform(forStop: stop).flatMap { byID[$0.id] }
     }
 
     /// The short name of a stop on a train's way: "R45N" is Bay Ridge.

@@ -50,7 +50,7 @@ enum TimelinePlan {
     /// due at each stop.
     static func trains(_ trains: [Arrival], at date: Date, selection: Selection, fetched: Date,
                        keepsStops: Bool) -> [Arrival] {
-        let positionStale = date.timeIntervalSince(fetched) > positionLife
+        let positionStale = !fetched.isWithin(positionLife, before: date)
         return selection.catchable(trains, now: date).enumerated().map { index, train in
             var train = train
             if !keepsStops || index > 0 { train.approach = [] }
@@ -63,7 +63,7 @@ enum TimelinePlan {
     /// first's trains keep their stops, and only with `keepsStops`.
     static func connections(_ connections: [Connection], at date: Date, selection: Selection, fetched: Date,
                             keepsStops: Bool) -> [Connection] {
-        let positionStale = date.timeIntervalSince(fetched) > positionLife
+        let positionStale = !fetched.isWithin(positionLife, before: date)
         return selection.catchable(connections, now: date).enumerated().map { index, connection in
             var connection = connection
             if !keepsStops || index > 0 {
@@ -85,8 +85,11 @@ enum TimelinePlan {
     /// in 2 minutes without new ones; sooner if its entries run out of trains
     /// first, rather than say there are none, or as commuting hours start or
     /// end (`switches`), for the other train; and never within a minute.
+    /// Times fetched after `now`, before the clock was set back, count as
+    /// fetched now.
     static func reload(now: Date, fetched: Date?, runsOut: Date?, switches: Date?) -> Date {
-        var reload = fetched.map { $0.addingTimeInterval(reloadInterval(at: now)) } ?? now.addingTimeInterval(2 * 60)
+        var reload = fetched.map { min($0, now).addingTimeInterval(reloadInterval(at: now)) }
+            ?? now.addingTimeInterval(2 * 60)
         if let runsOut { reload = min(reload, runsOut) }
         if let switches { reload = min(reload, switches) }
         return max(reload, now.addingTimeInterval(60))
@@ -109,10 +112,11 @@ enum TimelinePlan {
     /// the alert banner in the last 30 seconds (`toggled`), which changes only
     /// how the widget looks, ones of any age while any of their trains is
     /// still to catch. Never ones from before the widget's ↻ (`refreshed`).
+    /// Times after `now`, saved before the clock was set back, are old.
     static func reuses(saved: Date, refreshed: Date?, toggled: Date?, anyToCatch: () -> Bool, now: Date) -> Bool {
         guard saved > refreshed ?? .distantPast else { return false }
-        if now.timeIntervalSince(saved) < reuseWindow { return true }
-        let tapped = toggled.map { now.timeIntervalSince($0) < reuseWindow } ?? false
+        if saved.isWithin(reuseWindow, before: now) { return true }
+        let tapped = toggled?.isWithin(reuseWindow, before: now) ?? false
         return tapped && anyToCatch()
     }
 }

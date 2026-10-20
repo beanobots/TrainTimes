@@ -474,11 +474,7 @@ private struct DirectionStep: View {
     /// of the line, has no trains and is left out, as in the Live tab; where
     /// it names neither, both.
     private var directions: [Direction] {
-        let platforms = station.platforms(serving: routes)
-        let named = Direction.allCases.filter { direction in
-            platforms.contains { !$0.directionName(direction).isEmpty }
-        }
-        return named.isEmpty ? Direction.allCases : named
+        station.directions(of: routes)
     }
 
     var body: some View {
@@ -499,7 +495,7 @@ private struct DirectionStep: View {
                                 .accessibilityHidden(true)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(station.directionLabel(direction, routes: routes)).foregroundStyle(.primary)
-                                Text(direction == .north ? "Northbound" : "Southbound")
+                                Text(direction.compassName)
                                     .font(.footnote)
                                     .foregroundStyle(.secondary)
                                 // A partly accessible platform can be step-free one way only

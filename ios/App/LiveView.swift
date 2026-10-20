@@ -97,11 +97,7 @@ struct LiveView: View {
 
     /// Every train in both lists, for fetching them together.
     private var everyTrain: [Selection] {
-        favorites.favorites + nearby.flatMap { result in
-            result.station.routes.flatMap { route in
-                Direction.allCases.map { Selection(stationID: result.station.id, routes: [route], direction: $0) }
-            }
-        }
+        favorites.favorites + nearby.flatMap(\.station.lineSelections)
     }
 
     private var marks: TimeMarks { settings.timeMarks(withoutColor: withoutColor) }
@@ -331,18 +327,7 @@ struct LiveView: View {
         ForEach(nearby) { result in
             NearbyStationRow(result: result)
             ForEach(result.station.routes, id: \.self) { route in
-                NearbyLineRow(
-                    station: result.station,
-                    route: route,
-                    trains: { selection in
-                        // Each line's own trains, not those of another line running on its tracks
-                        live.trains[selection.trainID]?.filter { $0.route == route && $0.leaves > live.now }
-                    },
-                    failed: { live.failed.contains($0.trainID) },
-                    now: live.now,
-                    marks: marks,
-                    open: { path.append($0) }
-                )
+                NearbyLineRow(station: result.station, route: route, live: live, marks: marks) { path.append($0) }
             }
         }
     }
@@ -418,12 +403,6 @@ private struct StationLive: View {
     let open: (Selection) -> Void
     @State private var live = LiveTrains()
 
-    private var selections: [Selection] {
-        station.routes.flatMap { route in
-            Direction.allCases.map { Selection(stationID: station.id, routes: [route], direction: $0) }
-        }
-    }
-
     var body: some View {
         List {
             if !live.failed.isEmpty {
@@ -431,18 +410,7 @@ private struct StationLive: View {
             }
             Section {
                 ForEach(routes, id: \.self) { route in
-                    NearbyLineRow(
-                        station: station,
-                        route: route,
-                        trains: { selection in
-                            // Each line's own trains, not those of another line running on its tracks
-                            live.trains[selection.trainID]?.filter { $0.route == route && $0.leaves > live.now }
-                        },
-                        failed: { live.failed.contains($0.trainID) },
-                        now: live.now,
-                        marks: marks,
-                        open: open
-                    )
+                    NearbyLineRow(station: station, route: route, live: live, marks: marks, open: open)
                 }
             } header: {
                 Text(station.borough)
@@ -451,7 +419,7 @@ private struct StationLive: View {
         .navigationTitle(station.name)
         .updatingTrains(live, id: station.id) {
             // Each line's own trains are all in its own feeds
-            await live.load(selections, includingOtherLines: false)
+            await live.load(station.lineSelections, includingOtherLines: false)
         }
     }
 }
@@ -592,31 +560,23 @@ private struct UnreachableNote: View {
     }
 }
 
-/// One line at a station near you, and its next trains each way. Each
-/// direction opens on its own. A direction with no name, at the end of the
-/// line, has no trains to show and is left out; so is the way a line ends at
-/// a platform others go on from, unless some of its trains go on too.
+/// One line at a station near you, and its next trains each way, as the
+/// Trains near you widget has them (`Station.ways(of:trains:now:)`): toward
+/// Manhattan first, and named as there. Each direction opens on its own. A
+/// direction with no name, at the end of the line, has no trains to show and
+/// is left out; so is the way a line ends at a platform others go on from,
+/// unless some of its trains go on too.
 private struct NearbyLineRow: View {
     let station: Station
     let route: String
-    /// A direction's trains; nil until they're fetched.
-    let trains: (Selection) -> [Arrival]?
-    /// Whether a direction's trains couldn't be fetched the last time.
-    let failed: (Selection) -> Bool
-    let now: Date
+    /// The page's trains: each way's, nil until they're fetched, and whether
+    /// they couldn't be the last time.
+    let live: LiveTrains
     let marks: TimeMarks
     let open: (Selection) -> Void
 
-    private var directions: [Direction] {
-        let platforms = station.platforms(serving: [route])
-        let named = Direction.allCases.filter { direction in
-            platforms.contains { !$0.directionName(direction).isEmpty }
-        }
-        // Where the MTA names neither, both, as "Northbound" and "Southbound"
-        return (named.isEmpty ? Direction.allCases : named).filter { direction in
-            !StationDirectory.line(route, endsAt: station, going: direction)
-                || trains(Selection(stationID: station.id, routes: [route], direction: direction))?.isEmpty == false
-        }
+    private var ways: [LineWay] {
+        station.ways(of: route, trains: live.trains, now: live.now).compactMap { $0 }
     }
 
     var body: some View {
@@ -624,17 +584,17 @@ private struct NearbyLineRow: View {
             LineBullet(route: route, size: 30)
                 .frame(width: 40)
             VStack(spacing: 10) {
-                ForEach(directions, id: \.self) { direction in
-                    let selection = Selection(stationID: station.id, routes: [route], direction: direction)
+                ForEach(ways, id: \.direction) { way in
+                    let failed = live.failed.contains(way.selection.trainID)
                     Button {
-                        open(selection)
+                        open(way.selection)
                     } label: {
                         HStack(spacing: 8) {
-                            Text(station.directionLabel(direction, routes: [route]))
+                            Text(way.label)
                                 .font(.subheadline)
                                 .lineLimit(1)
                             Spacer(minLength: 8)
-                            Minutes(trains: trains(selection), failed: failed(selection), now: now, marks: marks)
+                            Minutes(trains: way.trains, failed: failed, now: live.now, marks: marks)
                             Image(systemName: "chevron.right")
                                 .font(.footnote.weight(.semibold))
                                 .foregroundStyle(.tertiary)
@@ -642,9 +602,9 @@ private struct NearbyLineRow: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("\(Lines.name(of: route)) \(station.directionLabel(direction, routes: [route]))")
+                    .accessibilityLabel("\(Lines.name(of: route)) \(way.label)")
                     // The label stands for the whole row, so the times come as its value
-                    .accessibilityValue(Minutes.spoken(trains(selection), failed: failed(selection), now: now))
+                    .accessibilityValue(Minutes.spoken(way.trains, failed: failed, now: live.now))
                 }
             }
         }

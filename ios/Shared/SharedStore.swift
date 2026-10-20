@@ -235,7 +235,8 @@ enum SharedStore {
     }
 
     /// Kept for an hour: iOS can leave a widget that long between reloads,
-    /// showing these times, and a tap redraws it with them.
+    /// showing these times, and a tap redraws it with them. Not ones from
+    /// after now, saved before the clock was set back.
     @discardableResult
     static func saveBoard(_ board: Board, for selection: Selection, change: Change? = nil, fetched: Date) -> SavedBoard {
         let saved = SavedBoard(fetched: fetched, trains: board.trains,
@@ -244,7 +245,9 @@ enum SharedStore {
         guard let boardsFile else { return saved }
         let key = boardKey(selection, change: change)
         changing(boardsFile) {
-            var boards = savedBoards().filter { fetched.timeIntervalSince($0.value.fetched) < 60 * 60 }
+            // Taken in turn, so a board another widget has just saved isn't after it
+            let now = Date.now
+            var boards = savedBoards().filter { $0.value.fetched.isWithin(60 * 60, before: now) }
             boards[key] = saved
             if let data = try? JSONEncoder().encode(boards) {
                 try? data.write(to: boardsFile, options: .atomic)

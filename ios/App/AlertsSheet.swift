@@ -19,7 +19,7 @@ struct AlertsSheet: View {
     /// Elevators out now, as the widget counts them.
     private var elevatorsOut: [Outage] {
         guard selection.elevatorAlerts else { return [] }
-        return (board?.outages ?? []).filter { !$0.isPlanned && $0.isAccessibilityElevator }
+        return board?.elevatorsOut ?? []
     }
 
     /// Whether elevators were to be mentioned but their status couldn't be had.
@@ -33,21 +33,20 @@ struct AlertsSheet: View {
                 Section {
                     if let board {
                         if board.alerts?.isEmpty == true && elevatorsOut.isEmpty && !elevatorsUnknown {
-                            Label("No alerts for this line here right now", systemImage: "checkmark.circle")
-                                .foregroundStyle(.secondary)
+                            NoAlertsNote()
                         }
                         ForEach(elevatorsOut) { outage in
                             ElevatorDetail(outage: outage)
                         }
                         if elevatorsUnknown {
-                            Text("Couldn't load elevator status from the MTA").foregroundStyle(.secondary)
+                            CouldntLoadNote(what: "elevator status")
                         }
                         if let alerts = board.alerts {
                             ForEach(alerts) { alert in
                                 AlertDetail(alert: alert)
                             }
                         } else {
-                            Text("Couldn't load alerts from the MTA").foregroundStyle(.secondary)
+                            CouldntLoadNote(what: "alerts")
                         }
                     } else if failed {
                         Text("Couldn't reach the MTA").foregroundStyle(.secondary)
@@ -92,9 +91,7 @@ private struct AlertDetail: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Label(alert.kind.label, systemImage: alert.kind.symbol)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(alert.kind.tint)
+            NoticeKindLabel(kind: .alert(alert.kind))
             Text(alert.header)
                 .font(.body.weight(.semibold))
             if !alert.details.isEmpty {
@@ -113,28 +110,77 @@ private struct AlertDetail: View {
     }
 }
 
-/// An elevator out: what it serves, and how to get around it.
+/// An elevator out: what it serves, how to get around it, and since and until when.
 private struct ElevatorDetail: View {
     let outage: Outage
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Label("Elevator out", systemImage: "figure.roll")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.orange)
+            NoticeKindLabel(kind: .elevator)
             Text(outage.serving)
                 .font(.body.weight(.semibold))
             if !outage.alternative.isEmpty {
                 Text(outage.alternative)
                     .font(.subheadline)
             }
-            if let back = outage.estimatedReturn {
-                Label("Back \(back.formatted(date: .abbreviated, time: .shortened)) (estimate)", systemImage: "calendar")
+            if !outage.when.isEmpty {
+                Label(outage.when, systemImage: "calendar")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
         }
         .padding(.vertical, 4)
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// A notice's kind, as an alert or an elevator out is headed in the app:
+/// "Delays", with its symbol and in its colour, as on the widgets.
+struct NoticeKindLabel: View {
+    let kind: Notice.Kind
+
+    var body: some View {
+        Label(kind.label, systemImage: kind.symbol)
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(kind.tint)
+    }
+}
+
+/// "No alerts for this line here right now", in a train's page or its alerts.
+struct NoAlertsNote: View {
+    var body: some View {
+        Label("No alerts for this line here right now", systemImage: "checkmark.circle")
+            .foregroundStyle(.secondary)
+    }
+}
+
+/// In place of what couldn't be had: "Couldn't load alerts from the MTA".
+struct CouldntLoadNote: View {
+    /// "alerts", "elevator status"
+    let what: String
+
+    var body: some View {
+        Text("Couldn't load \(what) from the MTA").foregroundStyle(.secondary)
+    }
+}
+
+extension Outage {
+    /// When it began and is to end, as far as the MTA says: "Since Oct 18,
+    /// 2026 at 9:00 AM. Back Oct 21, 2026 at 5:00 PM (estimate)", or for
+    /// planned work, "Oct 30, 2026 at 10:00 PM to Oct 31, 2026 at 5:00 AM".
+    /// Empty where it gives neither date.
+    var when: String {
+        let start = self.start?.formatted(date: .abbreviated, time: .shortened)
+        let end = estimatedReturn?.formatted(date: .abbreviated, time: .shortened)
+        // The MTA can leave either date blank
+        switch (isPlanned, start, end) {
+        case (true, let start?, let end?): return "\(start) to \(end)"
+        case (true, let start?, nil): return "From \(start)"
+        case (true, nil, let end?): return "Until \(end)"
+        case (false, let start?, let end?): return "Since \(start). Back \(end) (estimate)"
+        case (false, let start?, nil): return "Since \(start)"
+        case (false, nil, let end?): return "Back \(end) (estimate)"
+        case (_, nil, nil): return ""
+        }
     }
 }

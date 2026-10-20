@@ -18,19 +18,22 @@ struct Board: Sendable {
     /// the first train there it can catch.
     var connections: [Connection] = []
 
+    /// The elevators someone needs for step-free access that are out now: what
+    /// the widgets, the countdown and the alerts sheet mention.
+    var elevatorsOut: [Outage] {
+        (outages ?? []).filter { !$0.isPlanned && $0.isAccessibilityElevator }
+    }
+
     /// The one thing the widget has room to mention, and how many more there are.
     func notice(includingElevators: Bool, includingAlerts: Bool = true,
                 kinds: Set<ServiceAlert.Kind> = Set(ServiceAlert.Kind.allCases)) -> Notice? {
         var notices: [Notice] = []
-        let elevatorsOut = (outages ?? []).filter { !$0.isPlanned && $0.isAccessibilityElevator }
-        if includingElevators, let first = elevatorsOut.first {
-            let label = elevatorsOut.count == 1 ? "Elevator out" : "\(elevatorsOut.count) elevators out"
-            notices.append(Notice(kind: .elevator, label: label, text: first.serving, others: 0))
+        if includingElevators, let elevators = Notice(elevatorsOut: elevatorsOut) {
+            notices.append(elevators)
         }
         notices += (includingAlerts ? alerts ?? [] : [])
             .filter { kinds.contains($0.kind) }
-            .map { Notice(kind: .alert($0.kind), label: $0.kind.label, text: $0.header, others: 0, brief: $0.brief,
-                         markedText: $0.markedHeader) }
+            .map { Notice($0) }
         guard let first = notices.first else { return nil }
         return Notice(kind: first.kind, label: first.label, text: first.text, others: notices.count - 1, brief: first.brief,
                       markedText: first.markedText)
@@ -41,6 +44,15 @@ struct Board: Sendable {
     func notice(for selection: Selection, settings: AppSettings) -> Notice? {
         notice(includingElevators: selection.elevatorAlerts, includingAlerts: selection.serviceAlerts,
                kinds: settings.alertKinds)
+    }
+}
+
+extension Selection {
+    /// Whether what it mentions (`Board.notice(for:settings:)`) can be a
+    /// service alert, so that they're worth fetching: it mentions them, and
+    /// Settings has some kinds of alert on.
+    func mentionsAlerts(with settings: AppSettings) -> Bool {
+        serviceAlerts && !settings.alertKinds.isEmpty
     }
 }
 
@@ -63,17 +75,61 @@ struct Notice: Codable, Hashable, Sendable {
     var markedText: String? = nil
 }
 
+extension Notice {
+    /// `alert`, as the widgets mention it: its kind, and its headline.
+    init(_ alert: ServiceAlert) {
+        self.init(kind: .alert(alert.kind), label: alert.kind.label, text: alert.header, others: 0,
+                  brief: alert.brief, markedText: alert.markedHeader)
+    }
+
+    /// The elevators out (`Board.elevatorsOut`), as the widgets mention them:
+    /// how many, and what the first serves. Nil with none.
+    init?(elevatorsOut outages: [Outage]) {
+        guard let first = outages.first else { return nil }
+        self.init(kind: .elevator, label: Self.elevatorLabel(count: outages.count), text: first.serving, others: 0)
+    }
+
+    /// "Elevator out", or "2 elevators out".
+    static func elevatorLabel(count: Int) -> String {
+        count == 1 ? "Elevator out" : "\(count) elevators out"
+    }
+}
+
+extension Notice.Kind {
+    /// What one of this kind is called: "Delays", "Elevator out".
+    var label: String {
+        switch self {
+        case .alert(let kind): kind.label
+        case .elevator: Notice.elevatorLabel(count: 1)
+        }
+    }
+
+    /// The kind of a notice by its label, as the countdown keeps it: nil for
+    /// one that's neither an alert's nor an elevator's, such as "No trains
+    /// predicted".
+    init?(label: String) {
+        // "Elevator out", or how many: "2 elevators out"
+        let elevators = label == Notice.elevatorLabel(count: 1) ? 1 : Int(label.prefix(while: { $0.isNumber }))
+        if let kind = ServiceAlert.Kind.allCases.first(where: { $0.label == label }) {
+            self = .alert(kind)
+        } else if let elevators, label == Notice.elevatorLabel(count: elevators) {
+            self = .elevator
+        } else {
+            return nil
+        }
+    }
+}
+
 enum TrainService {
-    /// Trains, alerts and (when asked for) elevator outages for `selection`, fetched
-    /// together. Only the chosen lines' own train feeds are required, and up to
-    /// date (`SubwayFeed.isStale`): without the other lines' feeds there are
-    /// just no rerouted trains, and without alerts or outages the board has nil
-    /// for them. Without `includingAlerts`, it has neither.
-    /// Without `includingOtherLines`, only the chosen lines' feeds are fetched,
-    /// which is quicker, and there are no rerouted trains.
+    /// Trains, and when asked for, alerts and elevator outages for `selection`,
+    /// fetched together. Only the chosen lines' own train feeds are required,
+    /// and up to date (`SubwayFeed.isStale`): without the other lines' feeds
+    /// there are just no rerouted trains, and without alerts or outages, or
+    /// those not asked for, the board has nil for them. Without
+    /// `includingOtherLines`, only the chosen lines' feeds are fetched, which
+    /// is quicker, and there are no rerouted trains.
     static func board(for selection: Selection, includingAlerts: Bool = true, includingOutages: Bool = true,
                       includingOtherLines: Bool = true, now: Date = Date()) async throws -> Board {
-        let includingOutages = includingAlerts && includingOutages
         let feeds = Lines.feedURLs(sharingTracksWith: selection.routes)
         async let trainData = data(from: feeds.own)
         async let otherTrainData = optionalData(from: includingOtherLines ? feeds.others : [])
@@ -87,16 +143,17 @@ enum TrainService {
         return Board(trains: trains, alerts: alerts, outages: await outages)
     }
 
-    /// For a widget with a change: `board`'s trains and alerts, and those of the
-    /// trains that get to the change, each with the first train there it can
-    /// catch. The feeds of its own lines and of those changed to are required.
-    static func board(for selection: Selection, change: Change, includingOutages: Bool = true,
-                      now: Date = Date()) async throws -> Board {
+    /// For a widget with a change: `board`'s trains, alerts and outages, and
+    /// those of the trains that get to the change, each with the first train
+    /// there it can catch. The feeds of its own lines and of those changed to
+    /// are required.
+    static func board(for selection: Selection, change: Change, includingAlerts: Bool = true,
+                      includingOutages: Bool = true, now: Date = Date()) async throws -> Board {
         let routes = selection.routes + change.routes.filter { !selection.routes.contains($0) }
         let feeds = Lines.feedURLs(sharingTracksWith: routes)
         async let trainData = data(from: feeds.own)
         async let otherTrainData = optionalData(from: feeds.others)
-        async let alertEntries = alertEntries(if: true)
+        async let alertEntries = alertEntries(if: includingAlerts)
         async let outages = outages(for: selection, if: includingOutages)
 
         let origin = Set(selection.stopIDs)
@@ -132,17 +189,18 @@ enum TrainService {
         // A station once, where the trip first calls at it, and never yours
         var seen = Set([selection.station?.id ?? ""])
         return longest.compactMap { stop in
-            guard let station = StationDirectory.station(id: String(stop.dropLast())),
+            guard let station = StationDirectory.station(forStop: stop),
                   seen.insert(station.id).inserted else { return nil }
             return station
         }
     }
 
-    /// Just the alerts and (when asked for) outages for `selection`, as `board`
+    /// Just the alerts and outages for `selection`, when asked for, as `board`
     /// has them, with no trains: for the alerts sheet, which needn't fail
     /// because a train feed did.
-    static func notices(for selection: Selection, includingOutages: Bool = true, now: Date = Date()) async -> Board {
-        async let alertEntries = alertEntries(if: true)
+    static func notices(for selection: Selection, includingAlerts: Bool = true, includingOutages: Bool = true,
+                        now: Date = Date()) async -> Board {
+        async let alertEntries = alertEntries(if: includingAlerts)
         async let outages = outages(for: selection, if: includingOutages)
         let alerts = await alertEntries.map { AlertsFeed.alerts(for: selection, in: $0, now: now) }
         return Board(trains: [], alerts: alerts, outages: await outages)
@@ -312,7 +370,7 @@ enum TrainService {
                    fetch: @escaping @Sendable () async throws -> Value) async throws -> Value {
             let now = Date.now
             // Ones too old to go by are let go
-            recent = recent.filter { now.timeIntervalSince($0.value.fetched) < window }
+            recent = recent.filter { $0.value.fetched.isWithin(window, before: now) }
             if let recent = recent[url] { return recent.value }
             if let fetch = fetches[url] { return try await fetch.value }
             let task = Task { try await fetch() }
@@ -365,5 +423,16 @@ private extension [Arrival] {
     func oncePerTrip() -> [Arrival] {
         var seen = Set<String>()
         return filter { $0.trip.isEmpty || seen.insert($0.trip).inserted }
+    }
+}
+
+extension Date {
+    /// Whether it's less than `interval` before `now`, as times fetched or
+    /// saved are when they're fresh. One after `now`, saved before the clock
+    /// was set back, is taken to be old: it would otherwise stay fresh until
+    /// the clock caught up.
+    func isWithin(_ interval: TimeInterval, before now: Date) -> Bool {
+        let age = now.timeIntervalSince(self)
+        return age >= 0 && age < interval
     }
 }

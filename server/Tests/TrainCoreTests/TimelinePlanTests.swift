@@ -157,4 +157,40 @@ import Testing
         #expect(!TimelinePlan.reuses(saved: now.addingTimeInterval(-10), refreshed: now.addingTimeInterval(-5),
                                      toggled: tapped, anyToCatch: some, now: now))
     }
+
+    // MARK: The clock set back
+
+    @Test func aTimeFromAfterNowIsOld() {
+        #expect(now.addingTimeInterval(-29).isWithin(30, before: now))
+        #expect(now.isWithin(30, before: now))
+        #expect(!now.addingTimeInterval(-30).isWithin(30, before: now))
+        #expect(!now.addingTimeInterval(1).isWithin(30, before: now))
+        #expect(!now.addingTimeInterval(1).isWithin(0, before: now))
+    }
+
+    @Test func timesSavedBeforeTheClockWasSetBackAreFetchedAgain() {
+        let some = { true }
+        // Saved "later" than now: not fresh, so ↻ and the next reload fetch
+        #expect(!TimelinePlan.reuses(saved: time(10), refreshed: nil, toggled: nil, anyToCatch: some, now: now))
+        #expect(!TimelinePlan.reuses(saved: time(10), refreshed: now.addingTimeInterval(-1), toggled: nil,
+                                     anyToCatch: some, now: now))
+        // Nor is a tap from then a tap just now
+        #expect(!TimelinePlan.reuses(saved: time(-20), refreshed: nil, toggled: time(10), anyToCatch: some, now: now))
+    }
+
+    @Test func aWidgetWhoseTimesAreFromAfterNowReloadsAsThoughJustFetched() throws {
+        let noon = try newYork(hour: 12)
+        let minute = { (minutes: Double) in noon.addingTimeInterval(minutes * 60) }
+        #expect(TimelinePlan.reload(now: noon, fetched: minute(60), runsOut: nil, switches: nil) == minute(5))
+    }
+
+    @Test func positionsFromAfterNowGoToo() {
+        let trains = [mapped(4, trip: "a")]
+        let ahead = TimelinePlan.trains(trains, at: now, selection: prospect, fetched: time(10), keepsStops: true)
+        #expect(ahead[0].approach.count == 2)
+        #expect(ahead[0].position == nil)
+        let connections = [Connection(first: mapped(4, trip: "a"), arrival: mapped(10, trip: "a"), next: nil)]
+        let shown = TimelinePlan.connections(connections, at: now, selection: prospect, fetched: time(10), keepsStops: true)
+        #expect(shown[0].first.position == nil)
+    }
 }

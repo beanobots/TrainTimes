@@ -253,18 +253,24 @@ extension ServiceAlert.Kind {
     var tint: Color { self == .notice ? .blue : .orange }
 }
 
-extension Notice {
+extension Notice.Kind {
     var symbol: String {
-        switch kind {
+        switch self {
         case .alert(let kind): kind.symbol
         case .elevator: "figure.roll"
         }
     }
 
     var tint: Color {
-        switch kind {
+        switch self {
         case .alert(let kind): kind.tint
         case .elevator: .orange
         }
     }
+}
+
+extension Notice {
+    var symbol: String { kind.symbol }
+
+    var tint: Color { kind.tint }
 }

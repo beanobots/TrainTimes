@@ -57,13 +57,11 @@ enum ActivityState {
     static func keepingNotice(of last: ContentState, in new: ContentState, board: Board,
                               selection: Selection, now: Date) -> ContentState {
         guard let notice = last.notice, notice != new.notice else { return new }
-        let alerts = Set(ServiceAlert.Kind.allCases.map(\.label))
         func isElevator(_ label: String?) -> Bool {
-            guard let label else { return false }
-            return label != noTrains && !alerts.contains(label)
+            label.flatMap(Notice.Kind.init(label:)) == .elevator
         }
         let mayHold: Bool
-        if alerts.contains(notice) {
+        if case .alert? = Notice.Kind(label: notice) {
             mayHold = selection.serviceAlerts && board.alerts == nil && !isElevator(new.notice)
         } else if isElevator(notice), selection.elevatorAlerts, board.outages == nil {
             // Unless the trains have gone, as `refreshed` finds them

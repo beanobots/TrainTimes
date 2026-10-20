@@ -214,14 +214,13 @@ struct TrainDetail: View {
     private func alertsSection(_ alerts: [ServiceAlert]?) -> some View {
         Section {
             if let alerts, alerts.isEmpty {
-                Label("No alerts for this line here right now", systemImage: "checkmark.circle")
-                    .foregroundStyle(.secondary)
+                NoAlertsNote()
             } else if let alerts {
                 ForEach(alerts) { alert in
                     AlertRow(alert: alert)
                 }
             } else {
-                Text("Couldn't load alerts from the MTA").foregroundStyle(.secondary)
+                CouldntLoadNote(what: "alerts")
             }
         } header: {
             Text("Service alerts")
@@ -255,7 +254,7 @@ struct TrainDetail: View {
                 let outages = board?.outages ?? []
                 if loadState == .loaded, let board {
                     if board.outages == nil {
-                        Text("Couldn't load elevator status from the MTA").foregroundStyle(.secondary)
+                        CouldntLoadNote(what: "elevator status")
                     } else if outages.isEmpty {
                         // Only those that serve the lines chosen are listed
                         Label("No elevator or escalator outages for the \(Lines.list(selection.routes))", systemImage: "checkmark.circle")
@@ -335,9 +334,10 @@ struct TrainDetail: View {
         countdownTrain = TrainActivityController.currentTrain(for: selection)
         let trainID = selection.trainID
         let fetchesNotices = includingNotices || board == nil
-            || noticesFetched.map { now.timeIntervalSince($0) >= 10 * 60 } ?? true
+            || noticesFetched.map { !$0.isWithin(10 * 60, before: now) } ?? true
         do {
-            var fetched = try await TrainService.board(for: selection, includingAlerts: fetchesNotices)
+            var fetched = try await TrainService.board(for: selection, includingAlerts: fetchesNotices,
+                                                       includingOutages: fetchesNotices)
             // A newer choice cancels this load, but can't stop the fetch: what
             // it brings is the other train's
             guard !Task.isCancelled, trainID == selection.trainID else { return }
@@ -432,9 +432,7 @@ private struct AlertRow: View {
     /// Its kind and headline.
     private var summary: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Label(alert.kind.label, systemImage: alert.kind.symbol)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(alert.kind.tint)
+            NoticeKindLabel(kind: .alert(alert.kind))
             Text(alert.header)
         }
     }
@@ -446,21 +444,6 @@ private struct OutageRow: View {
     private var title: String {
         let machine = outage.isElevator ? "elevator" : "escalator"
         return outage.isPlanned ? "Planned \(machine) work" : (outage.isElevator ? "Elevator out" : "Escalator out")
-    }
-
-    private var when: String {
-        let start = outage.start?.formatted(date: .abbreviated, time: .shortened)
-        let end = outage.estimatedReturn?.formatted(date: .abbreviated, time: .shortened)
-        // The MTA can leave either date blank
-        switch (outage.isPlanned, start, end) {
-        case (true, let start?, let end?): return "\(start) to \(end)"
-        case (true, let start?, nil): return "From \(start)"
-        case (true, nil, let end?): return "Until \(end)"
-        case (false, let start?, let end?): return "Since \(start). Back \(end) (estimate)"
-        case (false, let start?, nil): return "Since \(start)"
-        case (false, nil, let end?): return "Back \(end) (estimate)"
-        case (_, nil, nil): return ""
-        }
     }
 
     var body: some View {
@@ -481,8 +464,8 @@ private struct OutageRow: View {
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(outage.isPlanned ? Color.secondary : Color.orange)
                 Text(outage.serving)
-                if !when.isEmpty {
-                    Text(when).font(.footnote).foregroundStyle(.secondary)
+                if !outage.when.isEmpty {
+                    Text(outage.when).font(.footnote).foregroundStyle(.secondary)
                 }
             }
         }

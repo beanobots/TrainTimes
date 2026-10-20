@@ -173,44 +173,37 @@ extension Selection {
     /// direction=N&elevators=0&walk=4&change=R31&to=D,N&going=N". The walking
     /// time goes along so the page leaves out the trains the widget does.
     func transferURL(changingAt change: Change) -> URL {
-        let base = link(to: "transfer")
-        guard var components = URLComponents(url: base, resolvingAgainstBaseURL: false) else { return base }
-        components.queryItems? += [
+        link(to: "transfer", adding: [
             URLQueryItem(name: "walk", value: String(walkMinutes)),
             URLQueryItem(name: "change", value: change.stationID),
-            URLQueryItem(name: "to", value: change.routes.joined(separator: ",")),
+            URLQueryItem(name: "to", value: AppLink.list(change.routes)),
             URLQueryItem(name: "going", value: change.departureDirection(for: self).rawValue),
-        ]
-        return components.url ?? base
+        ])
     }
 
     /// The train and change a `transferURL` is for, or nil for any other link
     /// or a change that's no longer on the train's way.
     static func transfer(from url: URL) -> (selection: Selection, change: Change)? {
         guard var selection = Selection(link: url, to: "transfer"),
-              let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems else { return nil }
-        let value = { (name: String) in items.first { $0.name == name }?.value }
-        guard let stationID = value("change"), let routes = value("to"),
-              let change = Change(stationID: stationID, routes: routes.split(separator: ",").map(String.init),
-                                  direction: value("going").flatMap(Direction.init(rawValue:)))
+              let query = AppLink.query(of: url, to: "transfer"),
+              let stationID = query["change"], let routes = query.list("to"),
+              let change = Change(stationID: stationID, routes: routes,
+                                  direction: query["going"].flatMap(Direction.init(rawValue:)))
                   .validated(for: selection) else { return nil }
         // As the app could set it, so a link made up with a huge one can't overflow
-        let walk = value("walk").flatMap(Int.init) ?? 0
+        let walk = query["walk"].flatMap(Int.init) ?? 0
         selection.walkMinutes = min(max(walk, walkRange.lowerBound), walkRange.upperBound)
         return (selection, change)
     }
 
-    private func link(to host: String) -> URL {
-        var components = URLComponents()
-        components.scheme = "traintimes"
-        components.host = host
-        components.queryItems = [
+    /// A link to the app's `host` page for this train, with `extra` after its own query.
+    private func link(to host: String, adding extra: [URLQueryItem] = []) -> URL {
+        AppLink.url(to: host, query: [
             URLQueryItem(name: "station", value: stationID),
-            URLQueryItem(name: "lines", value: routes.joined(separator: ",")),
+            URLQueryItem(name: "lines", value: AppLink.list(routes)),
             URLQueryItem(name: "direction", value: direction.rawValue),
             URLQueryItem(name: "elevators", value: elevatorAlerts ? "1" : "0"),
-        ]
-        return components.url ?? URL(string: "traintimes://\(host)")!
+        ] + extra) ?? URL(string: "\(AppLink.scheme)://\(host)")!
     }
 
     /// The train an `alertsURL` is for, or nil for any other link.
@@ -224,16 +217,57 @@ extension Selection {
     }
 
     private init?(link url: URL, to host: String) {
-        guard url.scheme == "traintimes", url.host == host,
-              let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems else { return nil }
-        let value = { (name: String) in items.first { $0.name == name }?.value }
-        guard let station = value("station"), let lines = value("lines"),
-              let direction = value("direction").flatMap(Direction.init(rawValue:)) else { return nil }
+        guard let query = AppLink.query(of: url, to: host),
+              let station = query["station"], let lines = query.list("lines"),
+              let direction = query["direction"].flatMap(Direction.init(rawValue:)) else { return nil }
         // Not the fallback train, as validated() would give for a station
         // that's gone or lines it doesn't have: that's not the widget's train
-        guard let known = Selection(stationID: station, routes: lines.split(separator: ",").map(String.init),
-                                    direction: direction, elevatorAlerts: value("elevators") == "1")
+        guard let known = Selection(stationID: station, routes: lines, direction: direction,
+                                    elevatorAlerts: query["elevators"] == "1")
             .validatedIfKnown() else { return nil }
         self = known
+    }
+}
+
+/// The app's own links, which the widgets open it with:
+/// "traintimes://train?station=R33&lines=R&direction=N&elevators=0".
+enum AppLink {
+    static let scheme = "traintimes"
+
+    /// A link to the app's `host` page with `query`; nil should they not make one.
+    static func url(to host: String, query: [URLQueryItem]) -> URL? {
+        var components = URLComponents()
+        components.scheme = scheme
+        components.host = host
+        components.queryItems = query
+        return components.url
+    }
+
+    /// The query of `url`, where it's a link to the app's `host` page; nil
+    /// for any other link.
+    static func query(of url: URL, to host: String) -> Query? {
+        guard url.scheme == scheme, url.host == host,
+              let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems else { return nil }
+        return Query(items: items)
+    }
+
+    /// A list as a link gives it, in one value: "N,R".
+    static func list(_ values: [String]) -> String {
+        values.joined(separator: ",")
+    }
+
+    /// A link's values, by name.
+    struct Query {
+        let items: [URLQueryItem]
+
+        /// The value named `name`; the first, should there be more.
+        subscript(_ name: String) -> String? {
+            items.first { $0.name == name }?.value
+        }
+
+        /// The list named `name`, written as `AppLink.list` writes it.
+        func list(_ name: String) -> [String]? {
+            self[name].map { $0.split(separator: ",").map(String.init) }
+        }
     }
 }

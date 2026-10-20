@@ -212,7 +212,7 @@ struct TransferMapLayout {
         if origin > 0 { groups.append([0]) }
 
         // Stations the train it meets calls at on its way, where the two share a platform
-        let station = { (stop: String) in StationDirectory.station(id: String(stop.dropLast()))?.id }
+        let station = { (stop: String) in StationDirectory.station(forStop: stop)?.id }
         let theirs = Set((connection.next?.approach ?? []).compactMap { station($0.id) })
 
         let rows = groups.enumerated().map { (index, group) -> Row in

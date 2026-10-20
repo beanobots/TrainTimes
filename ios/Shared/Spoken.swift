@@ -79,7 +79,7 @@ enum Spoken {
     /// Whether `heading` is a place, "Manhattan", rather than the
     /// "Northbound" or "Southbound" given where the MTA names none.
     private static func isNamed(_ heading: String) -> Bool {
-        !heading.isEmpty && heading != "Northbound" && heading != "Southbound"
+        !heading.isEmpty && !Direction.allCases.contains { $0.compassName == heading }
     }
 
     static func clock(_ date: Date) -> String {

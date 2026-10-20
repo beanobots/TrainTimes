@@ -122,7 +122,8 @@ enum Lines {
         joined(routes.map(name(of:)), by: conjunction)
     }
 
-    private static func joined(_ names: [String], by conjunction: String) -> String {
+    /// `names` as a sentence lists them: "D, N and R".
+    static func joined(_ names: [String], by conjunction: String = "and") -> String {
         guard let last = names.last, names.count > 1 else { return names.first ?? "" }
         return names.dropLast().joined(separator: ", ") + " \(conjunction) " + last
     }

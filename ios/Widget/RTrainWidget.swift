@@ -179,11 +179,12 @@ struct Provider: AppIntentTimelineProvider {
             var notice: Notice?
             // Whether the alerts and outages it mentions could be had
             var reached = true
-            if selection.serviceAlerts || selection.elevatorAlerts {
-                let notices = await TrainService.notices(for: selection, includingOutages: selection.elevatorAlerts)
+            let alerts = selection.mentionsAlerts(with: settings)
+            if alerts || selection.elevatorAlerts {
+                let notices = await TrainService.notices(for: selection, includingAlerts: alerts,
+                                                         includingOutages: selection.elevatorAlerts)
                 notice = notices.notice(for: selection, settings: settings)
-                reached = (!selection.serviceAlerts || notices.alerts != nil)
-                    && (!selection.elevatorAlerts || notices.outages != nil)
+                reached = (!alerts || notices.alerts != nil) && (!selection.elevatorAlerts || notices.outages != nil)
             }
             // Only once the alert's known to be over
             if notice == nil && reached {
@@ -198,7 +199,7 @@ struct Provider: AppIntentTimelineProvider {
         let board: SharedStore.SavedBoard
         let updated: Bool
         do {
-            board = try await Self.board(for: selection, change: change, taps: taps)
+            board = try await Self.board(for: selection, change: change, taps: taps, settings: settings)
             updated = true
         } catch {
             guard let saved = SharedStore.loadBoard(for: selection, change: change),
@@ -253,9 +254,10 @@ struct Provider: AppIntentTimelineProvider {
     /// widget showing it, fetched; or, to redraw at once, saved ones, as
     /// `TimelinePlan.reuses` has it: after a tap on the map or walk button or
     /// the alert banner, those it already shows, however old; the widget
-    /// reloads a minute later, as they're old.
-    private static func board(for selection: Selection, change: Change?,
-                              taps: SharedStore.Taps) async throws -> SharedStore.SavedBoard {
+    /// reloads a minute later, as they're old. Only the alerts and outages it
+    /// can mention, with `settings`, are fetched.
+    private static func board(for selection: Selection, change: Change?, taps: SharedStore.Taps,
+                              settings: AppSettings) async throws -> SharedStore.SavedBoard {
         let now = Date.now
         if let saved = SharedStore.loadBoard(for: selection, change: change),
            TimelinePlan.reuses(saved: saved.fetched, refreshed: taps.refreshed, toggled: taps.toggled,
@@ -263,11 +265,14 @@ struct Provider: AppIntentTimelineProvider {
                                now: now) {
             return saved
         }
+        let alerts = selection.mentionsAlerts(with: settings)
         let board: Board
         if let change {
-            board = try await TrainService.board(for: selection, change: change, includingOutages: selection.elevatorAlerts, now: now)
+            board = try await TrainService.board(for: selection, change: change, includingAlerts: alerts,
+                                                 includingOutages: selection.elevatorAlerts, now: now)
         } else {
-            board = try await TrainService.board(for: selection, includingOutages: selection.elevatorAlerts, now: now)
+            board = try await TrainService.board(for: selection, includingAlerts: alerts,
+                                                 includingOutages: selection.elevatorAlerts, now: now)
         }
         return SharedStore.saveBoard(board, for: selection, change: change, fetched: .now)
     }

@@ -142,7 +142,7 @@ struct SavedWidgetQuery: EntityQuery {
 /// empty, a widget follows the default widget even after another becomes it.
 struct SavedWidgetOptions: DynamicOptionsProvider {
     func results() async throws -> [SavedWidgetEntity] {
-        SharedStore.loadWidgets().widgets.map(SavedWidgetEntity.init)
+        try await SavedWidgetQuery().suggestedEntities()
     }
 }
 
@@ -214,7 +214,7 @@ struct DirectionEntity: AppEntity {
     }
 
     var displayRepresentation: DisplayRepresentation {
-        DisplayRepresentation(title: direction == .north ? "Northbound" : "Southbound")
+        DisplayRepresentation(title: "\(direction.compassName)")
     }
 }
 

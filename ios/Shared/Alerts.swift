@@ -195,9 +195,7 @@ enum AlertsFeed {
     /// by side, as in "[2][5] trains", become "2 and 5 trains", not "25 trains".
     static func readable(_ text: String) -> String {
         text.replacing(#/\[[A-Z0-9]{1,3}\](?:\s*\[[A-Z0-9]{1,3}\])*/#) { run in
-            let lines = run.output.matches(of: #/\[([A-Z0-9]{1,3})\]/#).map { String($0.1) }
-            guard let last = lines.last, lines.count > 1 else { return lines.joined() }
-            return lines.dropLast().joined(separator: ", ") + " and " + last
+            Lines.joined(run.output.matches(of: #/\[([A-Z0-9]{1,3})\]/#).map { String($0.1) })
         }
             .replacingOccurrences(of: #"\s*\[[a-z ]+ icon\]"#, with: "", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)

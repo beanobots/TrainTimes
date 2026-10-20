@@ -30,7 +30,8 @@ struct Arrival: Codable, Hashable, Sendable {
     /// Whether its trip ends at this stop, so it doesn't leave from here.
     var endsHere: Bool { stop == lastStop }
 
-    var terminal: String? { StationDirectory.terminalName(forStop: lastStop) }
+    /// Where it ends up: "Forest Hills" for "G08N".
+    var terminal: String? { StationDirectory.shortName(forStop: lastStop) }
     var lineLabel: String { LineStyle.of(route).label }
 
     struct Stop: Codable, Hashable, Sendable {

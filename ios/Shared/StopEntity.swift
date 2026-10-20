@@ -35,9 +35,8 @@ struct StopEntity: AppEntity {
 
     var displayRepresentation: DisplayRepresentation {
         let name = station?.name ?? stationID
-        let lines = routes.map { LineStyle.of($0).label }.joined(separator: "/")
-        let heading = station?.directionLabel(direction, routes: routes) ?? ""
-        return DisplayRepresentation(title: "\(name): \(lines) \(heading)", subtitle: "\(station?.borough ?? "")")
+        let train = Selection(stationID: stationID, routes: routes, direction: direction)
+        return DisplayRepresentation(title: "\(name): \(train.linesLabel) \(train.heading)", subtitle: "\(station?.borough ?? "")")
     }
 
     /// The selection this stands for, keeping the app's other settings (walking
