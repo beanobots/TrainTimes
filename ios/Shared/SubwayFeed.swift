@@ -27,8 +27,9 @@ struct Arrival: Codable, Hashable, Sendable {
 
     /// When it leaves the stop, so until when it can still be caught there.
     var leaves: Date { max(departure ?? time, time) }
-    /// Whether its trip ends at this stop, so it doesn't leave from here.
-    var endsHere: Bool { stop == lastStop }
+    /// Whether its trip ends at this stop, so it doesn't leave from here: there,
+    /// or on a track of its platform the feeds name apart, as the H's do at Broad Channel.
+    var endsHere: Bool { StationDirectory.isSameStop(stop, lastStop) }
 
     /// Where it ends up: "Forest Hills" for "G08N".
     var terminal: String? { StationDirectory.shortName(forStop: lastStop) }

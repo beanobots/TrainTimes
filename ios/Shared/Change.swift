@@ -78,7 +78,7 @@ struct Change: Codable, Hashable, Sendable {
 
     /// Where the lines changed to go: "Manhattan".
     func heading(for selection: Selection) -> String {
-        Station.directionLabel(departureDirection(for: selection), on: departurePlatforms)
+        Station.directionLabel(departureDirection(for: selection), on: departurePlatforms, routes: routes)
     }
 
     /// Whether `route` stops, going `selection`'s train's way, at every platform
@@ -171,10 +171,10 @@ struct Change: Codable, Hashable, Sendable {
         }
         guard ways.count > 1 else { return ways.first ?? selection.direction }
         let arriving = arrivalPlatforms(for: selection)
-        let onward = Self.places(arriving.map { $0.directionName(selection.direction) }, for: selection.routes)
-        let back = Self.places(arriving.map { $0.directionName(selection.direction.opposite) }, for: selection.routes)
+        let onward = Self.places(selection.direction, on: arriving, for: selection.routes)
+        let back = Self.places(selection.direction.opposite, on: arriving, for: selection.routes)
         let platforms = departurePlatforms
-        let named = { (way: Direction) in Self.places(platforms.map { $0.directionName(way) }, for: routes) }
+        let named = { (way: Direction) in Self.places(way, on: platforms, for: routes) }
         return ways.first { !named($0).isDisjoint(with: onward) }
             ?? ways.first { !named($0.opposite).isDisjoint(with: back) }
             ?? selection.direction
@@ -184,11 +184,15 @@ struct Change: Codable, Hashable, Sendable {
     /// where `selection`'s train goes on to from here, so it's plainly the way
     /// to go, as from the R to the D at Atlantic Av, both toward Manhattan.
     func goesYourWay(from selection: Selection) -> Bool {
-        let onward = Self.places(arrivalPlatforms(for: selection).map { $0.directionName(selection.direction) },
-                                 for: selection.routes)
-        let way = departureDirection(for: selection)
-        let names = departurePlatforms.map { $0.directionName(way) }.filter { !$0.isEmpty }
+        let onward = Self.places(selection.direction, on: arrivalPlatforms(for: selection), for: selection.routes)
+        let names = Station.directionNames(departureDirection(for: selection), on: departurePlatforms, routes: routes)
         return !names.isEmpty && names.allSatisfy { !Self.places([$0], for: routes).isDisjoint(with: onward) }
+    }
+
+    /// The places the MTA's names for where the lines of `routes` go in
+    /// `direction` from `platforms` list for them (`places(_:for:)`).
+    private static func places(_ direction: Direction, on platforms: [Platform], for routes: [String]) -> Set<String> {
+        places(Station.directionNames(direction, on: platforms, routes: routes), for: routes)
     }
 
     /// The places directions' names list for the lines of `routes`: "Uptown &

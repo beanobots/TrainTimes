@@ -184,7 +184,8 @@ import Testing
 
     @Test func aPlaceNamedForSomeLinesIsJustTheirs() {
         // At Delancey St-Essex St the J, Z and M share a platform whose S is
-        // "Broad St (JZ) - Uptown (M)": uptown is the M's way, not the J's
+        // "Broad St (JZ) - Uptown (M)": uptown is the M's way, not the J's,
+        // and the M's N, as it runs the other way to the J there
         let uptownF = Selection(stationID: "F18", routes: ["F"], direction: .north)
         var jz = Change(stationID: "F15", routes: ["J", "Z"])
         // Nothing there is named like Uptown & Queens, so it's away from Brooklyn, where the F came from
@@ -194,17 +195,19 @@ import Testing
         #expect(!jz.goesYourWay(from: uptownF))
         // On another platform, going either way, so both are offered
         #expect(!jz.isAllAcross(from: uptownF))
-        #expect(Change(stationID: "F15", routes: ["M"]).suggestedDirection(for: uptownF) == .south)
-        #expect(Change(stationID: "F15", routes: ["M"], direction: .south).goesYourWay(from: uptownF))
+        #expect(Change(stationID: "F15", routes: ["M"]).suggestedDirection(for: uptownF) == .north)
+        let uptownM = Change(stationID: "F15", routes: ["M"], direction: .north)
+        #expect(uptownM.goesYourWay(from: uptownF))
+        #expect(uptownM.heading(for: uptownF) == "Broad St (JZ) - Uptown (M)")
+        #expect(Change(stationID: "F15", routes: ["M"], direction: .south).heading(for: uptownF) == "Brooklyn")
 
         // From the downtown F, the J and Z toward Brooklyn
         let downtownF = Selection(stationID: "F14", routes: ["F"], direction: .south)
         #expect(Change(stationID: "F15", routes: ["J", "Z"]).suggestedDirection(for: downtownF) == .north)
-        // From the M, the J across the platform goes the M's way, though for the J it's Broad St
-        let m = Selection(stationID: "M16", routes: ["M"], direction: .south)
-        let j = Change(stationID: "M18", routes: ["J"])
-        #expect(j.suggestedDirection(for: m) == .south)
-        #expect(j.isAllAcross(from: m))
+        // From an M toward Manhattan, the J goes the M's way, though for the J it's Broad St
+        let m = Selection(stationID: "M16", routes: ["M"], direction: .north)
+        #expect(m.heading == "Manhattan")
+        #expect(Change(stationID: "M18", routes: ["J"]).suggestedDirection(for: m) == .south)
     }
 
     @Test func theFeedsNameEachTripsWayAlongItsWholeLine() {
@@ -228,7 +231,11 @@ import Testing
 
         // So an M from W 4 St toward Brooklyn is found at Delancey St-Essex St by its S
         let fromW4 = Selection(stationID: "D20", routes: ["M"], direction: .south)
+        // and goes on toward Brooklyn, as the J and Z do going N
+        #expect(Change(stationID: "M18", routes: ["J", "Z"]).suggestedDirection(for: fromW4) == .north)
         let jz = Change(stationID: "M18", routes: ["J", "Z"], direction: .north)
+        #expect(jz.goesYourWay(from: fromW4))
+        #expect(jz.heading(for: fromW4) == "Brooklyn")
         #expect(jz.arrivalStops(for: fromW4) == ["M18S"])
         let connections = jz.connections(
             for: [train("M", 2, trip: "m1", at: "D20S", lastStop: "M01S")],

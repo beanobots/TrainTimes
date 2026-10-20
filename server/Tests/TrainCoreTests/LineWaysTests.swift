@@ -59,9 +59,10 @@ import Testing
         let ways = unionSquare.ways(of: "R", trains: [:], now: now)
         #expect(ways.map { $0?.direction } == [.north, .south])
         #expect(labels(ways) == ["Uptown", "Downtown"])
-        // Where the lines part, each line's own way: "Broad St (JZ) - Uptown (M)"
+        // Where the lines part, each line's own way: "Broad St (JZ) - Uptown (M)",
+        // which is the M's north, as it runs the other way to the J there
         let delancey = try station("M18")
-        #expect(labels(delancey.ways(of: "M", trains: [:], now: now)) == ["Brooklyn", "Uptown"])
+        #expect(labels(delancey.ways(of: "M", trains: [:], now: now)) == ["Uptown", "Brooklyn"])
         #expect(labels(delancey.ways(of: "J", trains: [:], now: now)) == ["Brooklyn", "Broad St"])
     }
 
@@ -74,8 +75,8 @@ import Testing
         ], now: now)
         #expect(ways.map { $0?.direction } == [.north, .south])
         #expect(labels(ways) == ["Queens", "Brooklyn"])
-        // Without trains, both would be Brooklyn, so each goes by the MTA's name
-        #expect(labels(classon.ways(of: "G", trains: [:], now: now)) == ["Queens", "Church Av"])
+        // Without trains, the same: where the line ends each way
+        #expect(labels(classon.ways(of: "G", trains: [:], now: now)) == ["Queens", "Brooklyn"])
 
         // The Staten Island Railway stays on Staten Island: where its trains end
         let princesBay = try station("S15")
@@ -84,6 +85,102 @@ import Testing
             key("SI", at: princesBay, going: .south): [train("SI", at: princesBay, going: .south, to: "S09S")],
         ], now: now)
         #expect(labels(sir) == ["St George", "Tottenville"])
+    }
+
+    @Test func withNoTrainsToGoByAWayIsNamedForWhereTheLineEnds() throws {
+        // The G's one way from Court Sq goes to Brooklyn, though the station's in Queens
+        let courtSq = try station("G22")
+        #expect(labels(courtSq.ways(of: "G", trains: [:], now: now)) == [nil, "Brooklyn"])
+        #expect(labels(try station("F27").ways(of: "G", trains: [:], now: now)) == ["Queens", nil])
+        // Not the MTA's names at Hoyt-Schermerhorn Sts, which are for the A and C there too
+        #expect(labels(try station("A42").ways(of: "G", trains: [:], now: now)) == ["Queens", "Brooklyn"])
+        // The J from Flushing Av with none just now toward Jamaica, and the Z, which runs only in rush hours
+        let flushing = try station("M12")
+        let j = flushing.ways(of: "J", trains: [
+            key("J", at: flushing, going: .north): [],
+            key("J", at: flushing, going: .south): [train("J", at: flushing, going: .south, to: "M23S")],
+        ], now: now)
+        #expect(labels(j) == ["Manhattan", "Queens"])
+        #expect(labels(try station("J24").ways(of: "Z", trains: [:], now: now)) == ["Manhattan", "Queens"])
+    }
+
+    @Test func aLinesOneWayFromWhereItEndsGoesByWhereItsTrainsEndUp() throws {
+        // A line that stays in one borough, from either end
+        let stGeorge = try station("S31")
+        #expect(labels(stGeorge.ways(of: "SI", trains: [:], now: now)) == [nil, "Tottenville"])
+        let sir = stGeorge.ways(of: "SI", trains: [
+            key("SI", at: stGeorge, going: .south): [train("SI", at: stGeorge, going: .south, to: "S09S")],
+        ], now: now)
+        #expect(labels(sir) == [nil, "Tottenville"])
+        #expect(labels(try station("S09").ways(of: "SI", trains: [:], now: now)) == ["St George", nil])
+        #expect(labels(try station("S01").ways(of: "FS", trains: [:], now: now)) == [nil, "Prospect Park"])
+        #expect(labels(try station("D26").ways(of: "FS", trains: [:], now: now)) == ["Franklin Av", nil])
+        #expect(labels(try station("H15").ways(of: "H", trains: [:], now: now)) == ["Broad Channel", nil])
+        // One that leaves the borough goes by the borough it's headed for
+        #expect(labels(try station("G22").ways(of: "G", trains: [:], now: now)) == [nil, "Brooklyn"])
+    }
+
+    @Test func theRockawayParkShuttleEndsAtBroadChannel() throws {
+        // On its own track there, which the feeds call H19 and the station list doesn't have
+        let broadChannel = try station("H04")
+        #expect(StationDirectory.station(forStop: "H19N")?.id == broadChannel.id)
+        let ending = train("H", at: broadChannel, going: .north, to: "H19N")
+        #expect(ending.endsHere)
+        #expect(ending.terminal == "Broad Channel")
+        #expect(Arrival.Stop(id: "H19S", time: now).name == "Broad Channel")
+        // So it doesn't leave from there, and the way it ends isn't one
+        let north = Selection(stationID: "H04", routes: ["H"], direction: .north)
+        #expect(TrainService.trains(for: north, in: [ending], now: now).isEmpty)
+        let ways = broadChannel.ways(of: "H", trains: [
+            key("H", at: broadChannel, going: .north): [],
+            key("H", at: broadChannel, going: .south): [train("H", at: broadChannel, going: .south, to: "H15S")],
+        ], now: now)
+        #expect(labels(ways) == [nil, "Rockaway Park"])
+        // Coming from Rockaway Park, it goes to Broad Channel, not Manhattan
+        let beach90 = try station("H12")
+        let up = beach90.ways(of: "H", trains: [
+            key("H", at: beach90, going: .north): [train("H", at: beach90, going: .north, to: "H19N")],
+            key("H", at: beach90, going: .south): [train("H", at: beach90, going: .south, to: "H15S")],
+        ], now: now)
+        #expect(labels(up) == ["Broad Channel", "Rockaway Park"])
+        #expect(labels(beach90.ways(of: "H", trains: [:], now: now)) == ["Broad Channel", "Rockaway Park"])
+        // Another of its stops, or another way, isn't where it ends
+        #expect(!train("H", at: broadChannel, going: .south, to: "H15S").endsHere)
+        #expect(!Arrival(route: "H", time: now, stop: "H04S", lastStop: "H19N", isLive: true).endsHere)
+        #expect(!Arrival(route: "R", time: now, stop: "R31N", lastStop: "D24N", isLive: true).endsHere)
+    }
+
+    @Test func aLineRunningTheOtherWayToTheStationsNamesGoesByItsOwn() throws {
+        // At Marcy Av the MTA names the ways for the J: an M going S is on its way to Middle Village
+        let marcy = try station("M16")
+        #expect(marcy.directionLabel(.south, routes: ["J"]) == "Manhattan")
+        #expect(marcy.directionLabel(.south, routes: ["M"]) == "Jamaica - Middle Village")
+        #expect(marcy.directionLabel(.north, routes: ["M"]) == "Manhattan")
+        #expect(marcy.directionLabel(.south, routes: ["J", "M"]) == "Manhattan or Jamaica - Middle Village")
+        let m = marcy.ways(of: "M", trains: [:], now: now)
+        #expect(m.map { $0?.direction } == [.north, .south])
+        #expect(labels(m) == ["Manhattan", "Queens"])
+        let j = marcy.ways(of: "J", trains: [:], now: now)
+        #expect(j.map { $0?.direction } == [.south, .north])
+        #expect(labels(j) == ["Manhattan", "Queens"])
+        // Each train goes by its own line's
+        let both = Selection(stationID: "M16", routes: ["J", "M"], direction: .south)
+        #expect(both.heading(of: Arrival(route: "M", time: now, stop: "M16S", lastStop: "M01S", isLive: true))
+            == "Jamaica - Middle Village")
+        #expect(both.heading(of: Arrival(route: "J", time: now, stop: "M16S", lastStop: "M23S", isLive: true))
+            == "Manhattan")
+
+        // At Hoyt-Schermerhorn Sts they're for the A and C: the G toward Church Av is S
+        let hoyt = try station("A42")
+        #expect(hoyt.directionLabel(.south, routes: ["G"]) == "Manhattan - Church Av")
+        #expect(hoyt.directionLabel(.north, routes: ["G"]) == "Euclid Av & Queens - Court Sq")
+        #expect(hoyt.directionLabel(.north, routes: ["A"]) == "Manhattan - Church Av")
+
+        // Every such line, from the schedule: the M along the Broadway el and the G at Hoyt-Schermerhorn Sts
+        let reversed = StationDirectory.platforms.flatMap { platform in
+            (platform.reversed ?? []).map { "\($0) at \(platform.id)" }
+        }
+        #expect(Set(reversed) == ["M at M11", "M at M12", "M at M13", "M at M14", "M at M16", "M at M18", "G at A42"])
     }
 
     @Test func aWayTheMTADoesntNameIsLeftOut() throws {
@@ -102,12 +199,13 @@ import Testing
     }
 
     @Test func whereTheMTANamesNeitherWayBothAreNamedByTheCompass() {
-        let platform = Platform(id: "X01", name: "Nowhere", short: "Nowhere", borough: "Brooklyn", routes: ["G"],
+        // A line lines.json has no ends for, either
+        let platform = Platform(id: "X01", name: "Nowhere", short: "Nowhere", borough: "Brooklyn", routes: ["X"],
                                 north: "", south: "", lat: 0, lon: 0, complex: "X", ada: 0, adaNotes: "", entrances: [])
         let nowhere = Station(platforms: [platform])
-        #expect(nowhere.directions(of: ["G"]) == [.north, .south])
-        #expect(labels(nowhere.ways(of: "G", trains: [:], now: now)) == ["Northbound", "Southbound"])
-        #expect(nowhere.directionLabel(.south, routes: ["G"]) == "Southbound")
+        #expect(nowhere.directions(of: ["X"]) == [.north, .south])
+        #expect(labels(nowhere.ways(of: "X", trains: [:], now: now)) == ["Northbound", "Southbound"])
+        #expect(nowhere.directionLabel(.south, routes: ["X"]) == "Southbound")
     }
 
     // MARK: Trains
@@ -144,6 +242,37 @@ import Testing
         #expect(try station("R34").directions(of: ["R"]) == [.north, .south])
         // The C ends at 168 St, but the A goes on, so the way is named
         #expect(try station("A09").directions(of: ["C"]) == [.north, .south])
+    }
+
+    @Test func theWaysALineGoesOnFrom() throws {
+        // As the train picker offers them: not where the line ends, though others go on
+        #expect(try station("A09").onwardDirections(of: ["C"]) == [.south])
+        #expect(try station("A09").onwardDirections(of: ["A", "C"]) == [.north, .south])
+        let forestHills = try station("G08")
+        #expect(forestHills.onwardDirections(of: ["R"]) == [.south])
+        #expect(forestHills.onwardDirections(of: ["M", "R"]) == [.south])
+        #expect(forestHills.onwardDirections(of: ["E", "R"]) == [.north, .south])
+        #expect(try station("H04").onwardDirections(of: ["H"]) == [.south])
+        #expect(try station("250").onwardDirections(of: ["4"]) == [.north])
+        #expect(try station("640").onwardDirections(of: ["6"]) == [.north])
+        // A way the MTA doesn't name was never one
+        #expect(try station("G22").onwardDirections(of: ["G"]) == [.south])
+        // Where every way ends, as on a made-up line, both
+        let platform = Platform(id: "X01", name: "Nowhere", short: "Nowhere", borough: "Brooklyn", routes: ["X"],
+                                north: "", south: "", lat: 0, lon: 0, complex: "X", ada: 0, adaNotes: "", entrances: [])
+        #expect(Station(platforms: [platform]).onwardDirections(of: ["X"]) == [.north, .south])
+
+        // Only these: one line at its end by day where another goes on, by its platform
+        let ends = StationDirectory.all.flatMap { station in
+            station.routes.flatMap { route in
+                station.directions(of: [route]).filter { !station.onwardDirections(of: [route]).contains($0) }
+                    .map { "\(route) \($0.rawValue) at \(station.platforms(serving: [route])[0].id)" }
+            }
+        }
+        #expect(Set(ends) == [
+            "C N at A09", "B N at D03", "B S at D40", "H N at H04", "6 S at 640", "G S at F27", "4 S at 250",
+            "C S at A55", "M N at G08", "R N at G08", "FS S at D26", "W S at R27",
+        ])
     }
 
     @Test func aStopsStation() throws {

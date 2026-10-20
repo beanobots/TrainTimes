@@ -65,10 +65,10 @@ import Testing
         #expect(boards[canal6South]?.outages?.map(\.id).sorted() == ["EL324", "EL325"])
         #expect(boards[canalR]?.outages?.isEmpty == true)
 
-        // Without the feed, those with elevators can't say
+        // Without the feed, those with elevators can't say; no elevator serves the R's platform
         let without = self.boards(all, trains: trains)
         #expect(without[withElevators]?.outages?.isEmpty == true)
         #expect(without[canal6]?.outages == nil)
-        #expect(without[canalR]?.outages == nil)
+        #expect(without[canalR]?.outages?.isEmpty == true)
     }
 }

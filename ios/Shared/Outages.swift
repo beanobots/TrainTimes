@@ -53,6 +53,17 @@ enum EquipmentDirectory {
     static func hasEquipment(atComplex complex: String) -> Bool {
         all.values.contains { $0.complex == complex }
     }
+
+    /// Whether any elevator or escalator serves one of `platforms`, a
+    /// station's, or might, as `Outage.serves(anyOf:)` has it.
+    static func hasEquipment(serving platforms: [Platform]) -> Bool {
+        guard let complex = platforms.first?.complex else { return false }
+        return all.values.contains { machine in
+            guard machine.complex == complex else { return false }
+            guard let stops = machine.stops, !stops.isEmpty else { return true }
+            return platforms.contains { stops.contains($0.id) }
+        }
+    }
 }
 
 enum OutagesFeed {

@@ -188,6 +188,20 @@ import Testing
         #expect(!EquipmentDirectory.hasEquipment(atComplex: prospect.station?.complex ?? ""))
         #expect(TrainService.outages(for: prospect, in: nil) == [])
         // Where there are some, the feed is needed
-        #expect(TrainService.outages(for: Selection(stationID: "R23", routes: ["R"], direction: .north), in: nil) == nil)
+        #expect(TrainService.outages(for: Selection(stationID: "R23", routes: ["6"], direction: .north), in: nil) == nil)
+    }
+
+    /// Canal St's R W, N Q and J Z, Chambers St's A C, 5 Av's 7 and 14
+    /// St-Union Sq's 4 5 6: their complexes have elevators or escalators, but
+    /// none of them serve these platforms.
+    @Test(arguments: ["R23", "Q01", "M20", "A36", "724", "635"])
+    func noneToFetchForPlatformsNoneServe(stop: String) throws {
+        let station = try #require(StationDirectory.station(id: stop))
+        let platform = try #require(station.platforms.first { $0.id == stop })
+        let selection = Selection(stationID: stop, routes: platform.routes, direction: .north)
+        #expect(EquipmentDirectory.hasEquipment(atComplex: station.complex))
+        #expect(!EquipmentDirectory.hasEquipment(serving: selection.platforms))
+        // So without the feed there are still none
+        #expect(TrainService.outages(for: selection, in: nil) == [])
     }
 }

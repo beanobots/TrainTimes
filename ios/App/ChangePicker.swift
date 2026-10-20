@@ -340,7 +340,9 @@ private struct ChangeLinesStep: View {
 
     private func platformCard(_ platform: Platform) -> some View {
         let routes = platform.routes.filter { lines.contains($0) || selection.routes.contains($0) }
-        let heading = platform.directionName(direction)
+        // Where the lines to change to go from it, each of their names
+        let heading = Station.directionNames(direction, on: [platform], routes: routes.filter(lines.contains))
+            .joined(separator: " or ")
         return VStack(alignment: .leading, spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
                 // Another station's platform has its name: "59 St · 4 5 6 platform"

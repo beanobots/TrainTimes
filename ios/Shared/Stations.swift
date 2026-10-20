@@ -23,8 +23,14 @@ struct Platform: Codable, Hashable, Identifiable, Sendable {
     /// Real-time route ids of the lines that stop here.
     let routes: [String]
     /// The MTA's names for the two directions; empty at the end of a line.
+    /// They're the way its first line goes: see `reversed`.
     let north: String
     let south: String
+    /// Lines whose trains here go N the way `south` names, and S the way
+    /// `north` does: the feeds give a trip one direction all along its line,
+    /// so an M toward Middle Village is S at Marcy Av, whose south is
+    /// "Manhattan" for the J. Nil for none.
+    var reversed: [String]? = nil
     let lat: Double
     let lon: Double
     /// The station complex: stations joined by passageways share one, and so do their elevators.
@@ -34,6 +40,9 @@ struct Platform: Codable, Hashable, Identifiable, Sendable {
     /// Which part is accessible at a partly accessible station, e.g. "Manhattan-bound only".
     let adaNotes: String
     let entrances: [Station.Entrance]
+    /// Other ids the feeds give it: H19 at Broad Channel, the track the
+    /// Rockaway Park Shuttle ends on. Nil for none.
+    var aliases: [String]? = nil
 
     /// "Accessible", or nil for a platform without step-free access.
     var accessibility: String? {
@@ -46,6 +55,12 @@ struct Platform: Codable, Hashable, Identifiable, Sendable {
 
     func directionName(_ direction: Direction) -> String {
         direction == .north ? north : south
+    }
+
+    /// The MTA's name for where `route`'s trains going `direction` from here
+    /// are headed: its name for the other way where the line is `reversed`.
+    func directionName(_ direction: Direction, of route: String) -> String {
+        directionName(reversed?.contains(route) == true ? direction.opposite : direction)
     }
 
     /// The one way a partly accessible platform is step-free, where `adaNotes`
@@ -159,13 +174,13 @@ struct Station: Hashable, Identifiable, Sendable {
     /// where the MTA gives no name. Platforms that name it differently are all named:
     /// "Coney Island - Bay Ridge or Flatbush - New Lots".
     func directionLabel(_ direction: Direction, routes: [String]) -> String {
-        Self.directionLabel(direction, on: platforms(serving: routes))
+        Self.directionLabel(direction, on: platforms(serving: routes), routes: routes)
     }
 
     /// The MTA's name for where `route` goes in `direction` from here: "Manhattan",
     /// "Uptown & The Bronx"; empty at the end of the line.
     func directionName(_ direction: Direction, of route: String) -> String {
-        platforms(serving: [route]).lazy.map { $0.directionName(direction) }.first { !$0.isEmpty } ?? ""
+        platforms(serving: [route]).lazy.map { $0.directionName(direction, of: route) }.first { !$0.isEmpty } ?? ""
     }
 
     /// The ways the lines of `routes` go from here: those the MTA names, or
@@ -173,17 +188,41 @@ struct Station: Hashable, Identifiable, Sendable {
     /// line, has no trains.
     func directions(of routes: [String]) -> [Direction] {
         let serving = platforms(serving: routes)
-        let named = Direction.allCases.filter { way in serving.contains { !$0.directionName(way).isEmpty } }
+        let named = Direction.allCases.filter { !Self.directionNames($0, on: serving, routes: routes).isEmpty }
         return named.isEmpty ? Direction.allCases : named
     }
 
-    static func directionLabel(_ direction: Direction, on platforms: [Platform]) -> String {
-        var names: [String] = []
-        for name in platforms.map({ $0.directionName(direction) }) where !name.isEmpty && !names.contains(name) {
-            names.append(name)
+    /// The ways trains of `routes` go on from here: `directions(of:)`, less
+    /// any where every one of them ends its run by day though others go on,
+    /// as the C does at 168 St, unless that leaves none.
+    func onwardDirections(of routes: [String]) -> [Direction] {
+        let named = directions(of: routes)
+        let onward = named.filter { direction in
+            routes.contains { !StationDirectory.line($0, endsAt: self, going: direction) }
         }
+        return onward.isEmpty ? named : onward
+    }
+
+    /// `directionNames`, joined by "or"; the compass name where there are none.
+    static func directionLabel(_ direction: Direction, on platforms: [Platform], routes: [String]? = nil) -> String {
+        let names = directionNames(direction, on: platforms, routes: routes)
         if names.isEmpty { return direction.compassName }
         return names.joined(separator: " or ")
+    }
+
+    /// The MTA's names for `direction` at `platforms`, each once: at each, for
+    /// the lines of `routes` that stop there, or without any, as it names it.
+    static func directionNames(_ direction: Direction, on platforms: [Platform], routes: [String]? = nil) -> [String] {
+        var names: [String] = []
+        for platform in platforms {
+            let own = routes?.filter(platform.routes.contains) ?? []
+            let named = own.isEmpty ? [platform.directionName(direction)]
+                : own.map { platform.directionName(direction, of: $0) }
+            for name in named where !name.isEmpty && !names.contains(name) {
+                names.append(name)
+            }
+        }
+        return names
     }
 
     func serves(label: String) -> Bool {
@@ -241,8 +280,9 @@ extension Station {
     /// What each of `route`'s ways from here is called, given their trains.
     /// In Manhattan, the MTA's name: "Uptown", "Downtown". From elsewhere,
     /// "Manhattan" for the way there, and for the other the borough its trains
-    /// are headed for. A line that stays in one borough, like the Staten
-    /// Island Railway, goes by where its trains end up.
+    /// are headed for, or with none to go by, where the line ends. A line that
+    /// stays in one borough, like the Staten Island Railway, goes by where its
+    /// trains end up.
     private func wayLabels(of route: String, trains ways: [Direction: [Arrival]?]) -> [Direction: String] {
         // "Uptown & The Bronx" and "Uptown - Queens" are uptown
         func named(_ direction: Direction) -> String {
@@ -267,13 +307,22 @@ extension Station {
             } else if Lines.servesManhattan(route) && directionName(direction, of: route).contains("Manhattan") {
                 labels[direction] = "Manhattan"
             } else {
-                labels[direction] = trains?.first.flatMap { StationDirectory.borough(ofStop: $0.lastStop) } ?? borough
+                labels[direction] = trains?.first.flatMap { StationDirectory.borough(ofStop: $0.lastStop) }
+                    ?? StationDirectory.end(of: route, going: direction)?.borough ?? borough
             }
+        }
+        // Where its trains going `direction` end up, or with none to go by, where the line ends
+        func ending(_ direction: Direction, _ trains: [Arrival]?) -> String? {
+            trains?.first?.terminal ?? StationDirectory.end(of: route, going: direction)?.short
         }
         if labels.count == 2, Set(labels.values).count == 1 {
             for (direction, trains) in ways {
-                labels[direction] = trains?.first?.terminal ?? named(direction)
+                labels[direction] = ending(direction, trains) ?? named(direction)
             }
+        } else if labels.count == 1, let only = ways.first, !Lines.servesManhattan(route),
+                  labels[only.key] == borough, let end = ending(only.key, only.value) {
+            // The one way from the end of a line that stays in its borough, which the borough wouldn't say
+            labels[only.key] = end
         }
         return labels
     }
@@ -295,7 +344,11 @@ enum StationDirectory {
     private static let byID = Dictionary(all.flatMap { station in
         station.platforms.map { ($0.id, station) }
     }, uniquingKeysWith: { first, _ in first })
-    private static let platformsByID = Dictionary(platforms.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+    /// Each platform by its id, and by any of its `aliases` no platform has as its id.
+    private static let platformsByID: [String: Platform] = {
+        let aliases = platforms.flatMap { platform in (platform.aliases ?? []).map { ($0, platform) } }
+        return Dictionary(platforms.map { ($0.id, $0) } + aliases, uniquingKeysWith: { first, _ in first })
+    }()
 
     /// Each complex's stations, in the list's order.
     private static let byComplex = Dictionary(grouping: all, by: \.complex)
@@ -337,10 +390,16 @@ enum StationDirectory {
     /// the line's first stop north, or its last south. Where other lines go on,
     /// as the A does from the C's 168 St, the MTA still names the direction.
     static func line(_ route: String, endsAt station: Station, going direction: Direction) -> Bool {
+        guard let stop = end(of: route, going: direction) else { return false }
+        return station.platforms.contains { $0.id == stop.id }
+    }
+
+    /// Where `route`'s line ends going `direction`, by day: its first stop
+    /// north, or its last south. Nil where lines.json has no order for it.
+    static func end(of route: String, going direction: Direction) -> Platform? {
         // Just the route's own stops, as the three shuttles share the S's
         let stops = (lineStops[LineStyle.of(route).label] ?? []).filter { platformsByID[$0]?.routes.contains(route) == true }
-        guard let end = direction == .north ? stops.first : stops.last else { return false }
-        return station.platforms.contains { $0.id == end }
+        return (direction == .north ? stops.first : stops.last).flatMap { platformsByID[$0] }
     }
 
     static func load(from url: URL) throws -> [Platform] {
@@ -383,6 +442,14 @@ enum StationDirectory {
     /// The borough of a stop on a train's way: "R45S" is in Brooklyn.
     static func borough(ofStop stop: String) -> String? {
         platform(forStop: stop)?.borough
+    }
+
+    /// Whether two stops on trains' ways are one, though the feeds can give it
+    /// another id: "H19N", where the H ends at Broad Channel, is "H04N".
+    static func isSameStop(_ stop: String, _ other: String) -> Bool {
+        guard stop != other else { return true }
+        guard stop.last == other.last, let platform = platform(forStop: stop) else { return false }
+        return platform.id == self.platform(forStop: other)?.id
     }
 
     private static func platform(forStop stop: String) -> Platform? {

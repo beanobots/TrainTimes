@@ -210,20 +210,19 @@ enum TrainService {
     /// nil when not wanted or the feed couldn't be had or read.
     private static func outages(for selection: Selection, if wanted: Bool) async -> [Outage]? {
         guard wanted else { return nil }
-        // Where there are no elevators or escalators, there's nothing to fetch
-        guard let complex = selection.platforms.first?.complex,
-              EquipmentDirectory.hasEquipment(atComplex: complex) else { return [] }
+        // Where no elevators or escalators serve its platforms, there's nothing to fetch
+        guard EquipmentDirectory.hasEquipment(serving: selection.platforms) else { return [] }
         return outages(for: selection, in: await optionalData(from: OutagesFeed.url))
     }
 
     /// The outages that matter to `selection` in `data`, the outages feed,
     /// which the push server fetches once for all its countdowns: those at its
     /// station of elevators and escalators that serve its lines' platforms, or
-    /// might, so they go by the platforms alone. None where there are no
-    /// elevators or escalators; nil when the feed couldn't be had or read.
+    /// might, so they go by the platforms alone. None where no elevators or
+    /// escalators serve them; nil when the feed couldn't be had or read.
     static func outages(for selection: Selection, in data: Data?) -> [Outage]? {
         let platforms = selection.platforms
-        guard let complex = platforms.first?.complex, EquipmentDirectory.hasEquipment(atComplex: complex) else { return [] }
+        guard let complex = platforms.first?.complex, EquipmentDirectory.hasEquipment(serving: platforms) else { return [] }
         guard let data else { return nil }
         return (try? OutagesFeed.outages(atComplex: complex, in: data))?.filter { $0.serves(anyOf: platforms) }
     }

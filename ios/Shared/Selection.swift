@@ -131,7 +131,7 @@ struct Selection: Codable, Hashable, Sendable {
     /// where the chosen lines' platforms name the direction differently.
     func heading(of train: Arrival) -> String {
         guard let platform = platform(of: train) else { return heading }
-        return Station.directionLabel(direction, on: [platform])
+        return Station.directionLabel(direction, on: [platform], routes: [train.route])
     }
 
     private func platform(of train: Arrival) -> Platform? {

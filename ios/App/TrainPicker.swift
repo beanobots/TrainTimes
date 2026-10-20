@@ -470,11 +470,14 @@ private struct DirectionStep: View {
     /// The arrow's circle grows with the text beside it.
     @ScaledMetric(relativeTo: .subheadline) private var arrowSize: CGFloat = 32
 
-    /// The ways the lines go from here. One the MTA gives no name, at the end
-    /// of the line, has no trains and is left out, as in the Live tab; where
-    /// it names neither, both.
+    /// The ways the lines go on from here, as in the Live tab: one the MTA
+    /// gives no name, at the end of the line, has no trains and is left out
+    /// (where it names neither, both are offered), and so is one where every
+    /// line chosen ends its run by day though others go on, unless it's the
+    /// way already chosen: the 4 runs on from Crown Hts-Utica Av at night.
     private var directions: [Direction] {
-        station.directions(of: routes)
+        let onward = station.onwardDirections(of: routes)
+        return station.directions(of: routes).filter { $0 == current || onward.contains($0) }
     }
 
     var body: some View {

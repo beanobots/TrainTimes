@@ -221,12 +221,13 @@ Built into the app (refresh them now and then):
   MTA's [GTFS schedule](http://web.mta.info/developers/data/nyct/subway/google_transit.zip),
   for listing a line's stations as it runs.
 
-To refresh them, follow the download steps at the top of `tools/make_stations.py`,
-then run `python3 tools/make_stations.py Stations.csv entrances.json equipment.json ios/Shared`.
+To refresh them, follow the download steps at the top of `tools/make_stations.py`
+(the GTFS schedule among them, which shows the lines that run the other way to a
+station's direction names), then run
+`python3 tools/make_stations.py Stations.csv entrances.json equipment.json gtfs ios/Shared`.
 It also copies the first two into the push server's resources, which can't
 link to them (`make_lines.py` does the same with `lines.json`). `lines.json`
-keeps only the stops `stations.json` lists, so then follow the
-download steps at the top of `tools/make_lines.py` and run
+keeps only the stops `stations.json` lists, so then run
 `python3 tools/make_lines.py gtfs ios/Shared/stations.json ios/Shared`. Push all
 six files: the three in `ios/Shared` and the server's copies of them in
 `server/Sources/TrainResources/Resources`, which the server's CI checks match.

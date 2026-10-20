@@ -4,12 +4,20 @@
     curl -o Stations.csv http://web.mta.info/developers/data/nyct/subway/Stations.csv
     curl -o entrances.json 'https://data.ny.gov/resource/i9wp-a4ja.json?$limit=5000'
     curl -o equipment.json https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fnyct_ene_equipments.json
-    python3 tools/make_stations.py Stations.csv entrances.json equipment.json ios/Shared
+    curl -o google_transit.zip http://web.mta.info/developers/data/nyct/subway/google_transit.zip
+    unzip google_transit.zip -d gtfs
+    python3 tools/make_stations.py Stations.csv entrances.json equipment.json gtfs ios/Shared
 
 Each station keeps its GTFS stop id (the real-time feeds name platforms by adding
 N or S to it), the lines that serve it as real-time route ids, the labels the MTA
 gives its two directions, where it is and where its entrances are, and how
-accessible it is. The MTA lists a station's sets of platforms apart, such as
+accessible it is. The labels are for the station's first line, and the feeds
+give each trip one direction all along its line, so a line whose trains run
+the other way to the first one's there, by the GTFS schedule, is listed as
+reversed: at Marcy Av, whose south is "Manhattan" for the J, the M's
+southbound trains are on their way to Middle Village. A track the feeds name
+that the list doesn't, such as the one at Broad Channel where the Rockaway
+Park Shuttle ends, is listed with its platform. The MTA lists a station's sets of platforms apart, such as
 Atlantic Av-Barclays Ctr's D N R, B Q and 2 3 4 5; the app joins those with the
 same name in the same complex into one station. The equipment list ties each elevator and escalator to its
 station complex, so the outage feed, which names only the equipment, can be
@@ -22,16 +30,23 @@ the built bundle, so the server keeps copies, and CI checks they match.
 """
 import csv
 import json
+import math
 import os
 import re
 import shutil
 import sys
 from collections import Counter
 
+from line_styles import label
+
 BOROUGHS = {"M": "Manhattan", "Bk": "Brooklyn", "Q": "Queens", "Bx": "Bronx", "SI": "Staten Island"}
 STREET = re.compile(r"\b(St|Av|Blvd|Pkwy|Rd|Tpke)$")
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SERVER_RESOURCES = os.path.join(REPO, "server", "Sources", "TrainResources", "Resources")
+# Stops the real-time feeds name that neither the list nor the schedule has, by
+# the platform they're part of: the Rockaway Park Shuttle ends on H19, its own
+# track at Broad Channel
+ALIASES = {"H04": ["H19"]}
 
 
 def route_ids(row):
@@ -78,6 +93,56 @@ def entrances_by_stop(path):
         for stop in row["gtfs_stop_id"].split(";"):
             entrances.setdefault(stop.strip(), []).append(entrance)
     return entrances
+
+
+def reversed_routes(gtfs_dir, stations):
+    """The lines at each stop, by its id, whose southbound trains there head the
+    way the MTA's north label names, and northbound ones its south: by the GTFS
+    schedule, those whose southbound trips there go more than 120 degrees away
+    from the stop's first line's (lines bend and part at a stop, but not that
+    much). Only where the MTA names both ways: at the end of a line, trains come
+    in from wherever their lines do."""
+    where = {s["id"]: (s["lon"] * math.cos(math.radians(s["lat"])), s["lat"]) for s in stations}
+    routes = {s["id"]: s["routes"] for s in stations}
+    with open(f"{gtfs_dir}/trips.txt", encoding="utf-8-sig", newline="") as file:
+        # Direction 1 is southbound, 0 northbound
+        trips = {row["trip_id"]: (label(row["route_id"]), row["direction_id"] == "1")
+                 for row in csv.DictReader(file)}
+    calls = {}
+    with open(f"{gtfs_dir}/stop_times.txt", encoding="utf-8-sig", newline="") as file:
+        for row in csv.DictReader(file):
+            # "R01S" is the southbound platform of R01
+            if row["trip_id"] in trips and row["stop_id"][:-1] in where:
+                calls.setdefault(row["trip_id"], []).append((int(row["stop_sequence"]), row["stop_id"][:-1]))
+    # Each line's way south at each of its stops: every trip's way from the stop
+    # before to the one after, added up (a northbound trip's backwards)
+    heading = {}
+    for trip, stops in calls.items():
+        name, southbound = trips[trip]
+        stops = [stop for _, stop in sorted(stops)]
+        for at, stop in enumerate(stops):
+            # A train rerouted to a stop its line doesn't serve by day says nothing about it
+            route = next((route for route in routes[stop] if label(route) == name), None)
+            (x0, y0), (x1, y1) = where[stops[max(at - 1, 0)]], where[stops[min(at + 1, len(stops) - 1)]]
+            length = math.hypot(x1 - x0, y1 - y0)
+            if route and length:
+                sign = 1 if southbound else -1
+                x, y = heading.get((stop, route), (0, 0))
+                heading[(stop, route)] = (x + sign * (x1 - x0) / length, y + sign * (y1 - y0) / length)
+
+    def cos(a, b):
+        return (a[0] * b[0] + a[1] * b[1]) / (math.hypot(*a) * math.hypot(*b) or 1)
+
+    turned = {}
+    for station in stations:
+        first = heading.get((station["id"], station["routes"][0]))
+        if not (first and station["north"] and station["south"]):
+            continue
+        for route in station["routes"][1:]:
+            way = heading.get((station["id"], route))
+            if way and cos(first, way) < -0.5:
+                turned.setdefault(station["id"], []).append(route)
+    return turned
 
 
 def served_lines(text):
@@ -132,7 +197,7 @@ def equipment(path, stations):
     return machines
 
 
-def main(source, entrances_path, equipment_path, target_dir):
+def main(source, entrances_path, equipment_path, gtfs_dir, target_dir):
     with open(source, encoding="utf-8-sig", newline="") as file:
         rows = list(csv.DictReader(file))
     entrances = entrances_by_stop(entrances_path)
@@ -165,8 +230,16 @@ def main(source, entrances_path, equipment_path, target_dir):
     for station in stations:
         if not station["entrances"]:
             station["entrances"] = by_complex[station["complex"]]
+    turned = reversed_routes(gtfs_dir, stations)
+    for station in stations:
+        if station["id"] in turned:
+            station["reversed"] = turned[station["id"]]
+        if station["id"] in ALIASES:
+            station["aliases"] = ALIASES[station["id"]]
+    print(f"Named the other way round: {', '.join(f'{route} at {stop}' for stop, routes in turned.items() for route in routes)}")
     # The app looks each platform up by its id, so two with one id would crash it
-    repeated = sorted(stop for stop, count in Counter(station["id"] for station in stations).items() if count > 1)
+    ids = [stop for station in stations for stop in [station["id"]] + station.get("aliases", [])]
+    repeated = sorted(stop for stop, count in Counter(ids).items() if count > 1)
     if repeated:
         sys.exit(f"{source} lists these GTFS Stop IDs more than once: {', '.join(repeated)}")
     # By name, as the app lists them
@@ -189,4 +262,6 @@ def main(source, entrances_path, equipment_path, target_dir):
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:5])
+    if len(sys.argv) != 6:
+        sys.exit(__doc__)
+    main(*sys.argv[1:6])
