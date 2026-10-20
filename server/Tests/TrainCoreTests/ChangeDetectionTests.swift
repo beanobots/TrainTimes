@@ -59,21 +59,22 @@ import Testing
     }
 
     /// The notice of a countdown that said `last`, made new as `new` from a
-    /// board with or without the alerts and outages.
-    func notice(_ last: String?, _ new: String?, alerts: Bool = true, outages: Bool = true,
+    /// board with or without trains, alerts and outages.
+    func notice(_ last: String?, _ new: String?, trains: Bool = true, alerts: Bool = true, outages: Bool = true,
                 asksForAlerts: Bool = true) -> String? {
         let selection = Selection(stationID: "R34", routes: ["R"], direction: .north, elevatorAlerts: true,
                                   serviceAlerts: asksForAlerts)
-        let board = Board(trains: [], alerts: alerts ? [] : nil, outages: outages ? [] : nil)
+        let board = Board(trains: trains ? fixtureBoard().trains : [], alerts: alerts ? [] : nil,
+                          outages: outages ? [] : nil)
         return ActivityState.keepingNotice(of: state(train: 5, notice: last), in: state(train: 5, notice: new),
-                                           board: board, selection: selection).notice
+                                           board: board, selection: selection, now: now).notice
     }
 
     @Test func anAlertStaysWhileTheAlertsCantBeHad() {
         #expect(notice("Delays", nil, alerts: false) == "Delays")
         #expect(notice("Suspended", nil, alerts: false, outages: false) == "Suspended")
         // With no trains, it's the alert that would be named
-        #expect(notice("Suspended", ActivityState.noTrains, alerts: false) == "Suspended")
+        #expect(notice("Suspended", ActivityState.noTrains, trains: false, alerts: false) == "Suspended")
         // But not once it's known to be over, or an elevator out comes before it
         #expect(notice("Delays", nil) == nil)
         #expect(notice("Delays", "Service change") == "Service change")
@@ -90,7 +91,8 @@ import Testing
         // But not once it's back, nor with the trains gone, when it isn't named
         #expect(notice("Elevator out", nil) == nil)
         #expect(notice("Elevator out", nil, alerts: false) == nil)
-        #expect(notice("Elevator out", ActivityState.noTrains, outages: false) == ActivityState.noTrains)
+        #expect(notice("Elevator out", ActivityState.noTrains, trains: false, outages: false) == ActivityState.noTrains)
+        #expect(notice("Elevator out", "Suspended", trains: false, outages: false) == "Suspended")
     }
 
     @Test func neitherNoTrainsNorNothingStays() {

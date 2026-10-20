@@ -47,15 +47,15 @@ enum ActivityState {
     /// (`ContentState.refreshed(for:board:settings:now:)`).
     static let noTrains = "No trains predicted"
 
-    /// `new`, made from `board`, with `last`'s notice where that may still
-    /// hold but `board` can't say: it hasn't the alerts, or the outages, that
-    /// `selection` asks for, which isn't the same as there being none. The
-    /// notice would otherwise go, and come back with the next pass, a push
+    /// `new`, made from `board` at `now`, with `last`'s notice where that may
+    /// still hold but `board` can't say: it hasn't the alerts, or the outages,
+    /// that `selection` asks for, which isn't the same as there being none.
+    /// The notice would otherwise go, and come back with the next pass, a push
     /// each time. An alert's stays unless an elevator out is now known to
     /// come before it; an elevator's, unless the trains have gone, when the
     /// notice names only an alert.
     static func keepingNotice(of last: ContentState, in new: ContentState, board: Board,
-                              selection: Selection) -> ContentState {
+                              selection: Selection, now: Date) -> ContentState {
         guard let notice = last.notice, notice != new.notice else { return new }
         let alerts = Set(ServiceAlert.Kind.allCases.map(\.label))
         func isElevator(_ label: String?) -> Bool {
@@ -65,8 +65,12 @@ enum ActivityState {
         let mayHold: Bool
         if alerts.contains(notice) {
             mayHold = selection.serviceAlerts && board.alerts == nil && !isElevator(new.notice)
+        } else if isElevator(notice), selection.elevatorAlerts, board.outages == nil {
+            // Unless the trains have gone, as `refreshed` finds them
+            mayHold = ContentState(for: selection, trains: board.trains, notice: nil, now: now,
+                                   following: last.trip, after: last.train) != nil
         } else {
-            mayHold = isElevator(notice) && selection.elevatorAlerts && board.outages == nil && new.notice != noTrains
+            mayHold = false
         }
         guard mayHold else { return new }
         var state = new

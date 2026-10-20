@@ -137,7 +137,7 @@ final class Poller: Service {
                     let refreshed = last.refreshed(for: registration.selection, board: board,
                                                    settings: registration.settings, now: now)
                     state = ActivityState.keepingNotice(of: last, in: refreshed, board: board,
-                                                        selection: registration.selection)
+                                                        selection: registration.selection, now: now)
                 } else if let new = ContentState(for: registration.selection, board: board, settings: registration.settings,
                                                  now: now, following: registration.trip, after: nil) {
                     state = new

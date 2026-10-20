@@ -1,4 +1,5 @@
 import Foundation
+import ServiceLifecycle
 import Testing
 @testable import TrainCore
 
@@ -10,13 +11,11 @@ final class FakePusher: Pusher, @unchecked Sendable {
     private var peak = 0
     private var gaveUp = false
     let result: PushResult
-    let delay: Duration?
     /// Each push waits until this many have been in flight at once.
     let gate: Int?
 
-    init(result: PushResult = .sent, delay: Duration? = nil, gate: Int? = nil) {
+    init(result: PushResult = .sent, gate: Int? = nil) {
         self.result = result
-        self.delay = delay
         self.gate = gate
     }
 
@@ -26,7 +25,6 @@ final class FakePusher: Pusher, @unchecked Sendable {
             inFlight += 1
             peak = max(peak, inFlight)
         }
-        if let delay { try? await Task.sleep(for: delay) }
         if let gate { await waitForPeak(gate) }
         lock.withLock { inFlight -= 1 }
         return result
@@ -153,7 +151,7 @@ func testRegistration(token: String = sampleToken, owner: String = "key", starte
         await poller.pass(at: now.addingTimeInterval(30))
         let noTrains = try #require(pusher.pushes.last)
         #expect(pusher.pushes.count == 2)
-        #expect(noTrains.state.notice == "No trains predicted")
+        #expect(noTrains.state.notice == ActivityState.noTrains)
         #expect(noTrains.priority == 10)
 
         await poller.pass(at: now.addingTimeInterval(60))
@@ -161,7 +159,7 @@ func testRegistration(token: String = sampleToken, owner: String = "key", starte
         await poller.pass(at: now.addingTimeInterval(330))
         #expect(pusher.pushes.count == 3)
         #expect(pusher.pushes.last?.priority == 5)
-        #expect(pusher.pushes.last?.state.notice == "No trains predicted")
+        #expect(pusher.pushes.last?.state.notice == ActivityState.noTrains)
     }
 
     @Test func withNothingPushedYetAndNoTrainsTheAppsOwnStateStands() async throws {
@@ -229,7 +227,26 @@ func testRegistration(token: String = sampleToken, owner: String = "key", starte
         board.alerts = []
         await poller(store, pusher, board: board).pass(at: now.addingTimeInterval(60))
         #expect(pusher.pushes.count == 2)
-        #expect(pusher.pushes.last?.state.notice == "No trains predicted")
+        #expect(pusher.pushes.last?.state.notice == ActivityState.noTrains)
+    }
+
+    @Test func namesTheAlertOnceTheTrainsHaveGoneThoughTheOutagesCantBeHad() async throws {
+        let store = try Store(directory: nil)
+        var registration = testRegistration()
+        registration.selection.elevatorAlerts = true
+        _ = try await store.upsert(registration, maxTotal: 10, maxPerOwner: 5)
+        let pusher = FakePusher()
+        var board = fixtureBoard()
+        await poller(store, pusher, board: board).pass(at: now)
+        #expect(pusher.pushes.last?.state.notice == "Elevator out")
+
+        board.trains = []
+        board.outages = nil
+        board.alerts = [ServiceAlert(id: "2", kind: .suspended, type: "Suspended", header: "No R trains",
+                                     details: "", period: nil)]
+        await poller(store, pusher, board: board).pass(at: now.addingTimeInterval(30))
+        #expect(pusher.pushes.count == 2)
+        #expect(pusher.pushes.last?.state.notice == "Suspended")
     }
 
     @Test func dropsTokensAPNsNoLongerKnows() async throws {
@@ -401,6 +418,23 @@ func testRegistration(token: String = sampleToken, owner: String = "key", starte
         try await Task.sleep(for: .milliseconds(50))
         #expect(passes.value == last)
         #expect(await store.count == 1)
+    }
+
+    @Test(.timeLimit(.minutes(1))) func stopsWaitingWhenShutDownGracefully() async throws {
+        let store = try Store(directory: nil)
+        _ = try await store.upsert(testRegistration(started: .now), maxTotal: 10, maxPerOwner: 5)
+        let passes = Counter()
+        // After its first pass, it would wait an hour for the next
+        let poller = Poller(store: store, pusher: FakePusher(), interval: 60 * 60) { selections, _ in
+            passes.increment()
+            return Dictionary(selections.map { ($0, Board(trains: [])) }, uniquingKeysWith: { a, _ in a })
+        }
+        let group = ServiceGroup(services: [poller])
+        async let running: Void = group.run()
+        while passes.value < 1 { try await Task.sleep(for: .milliseconds(5)) }
+        await group.triggerGracefulShutdown()
+        try await running
+        #expect(passes.value == 1)
     }
 
     @Test func timesOutAHungPush() async {
