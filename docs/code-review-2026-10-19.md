@@ -4,7 +4,7 @@ A review of the whole repository at commit `9be9058` (19 October 2026): the iOS 
 
 ## Status after fixing (20 October 2026)
 
-The fixes are on branch `claude/codebase-review-jsby0y`. Each group of fixes was reviewed by a second agent told to find what it broke, and the branch then had four more review rounds; each finding was checked by two more agents, one reproducing it and one trying to refute it. The server's tests (356 now, up from 85) pass on Linux with Swift 6.2.1, and CI built the app and widget after every merge.
+The fixes are on branch `claude/codebase-review-jsby0y`. Each group of fixes was reviewed by a second agent told to find what it broke, and the branch then had four more review rounds; each finding was checked by two more agents, one reproducing it and one trying to refute it. The server's tests (359 now, up from 85) pass on Linux with Swift 6.2.1, and CI built the app and widget after every merge.
 
 **171 of the 174 issues are fixed.** The other three:
 
