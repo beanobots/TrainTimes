@@ -77,6 +77,17 @@ struct RegistrationRequest: Decodable, Sendable {
     /// from `trip`, which may have gone, taking off the walk again: a
     /// countdown is registered again with each new push token, as it runs.
     var state: ContentState?
+
+    /// Whether `state` is no bigger than one the app posts. Parts of it are
+    /// pushed back, as it was sent, and APNs refuses a payload over 4 KB.
+    var stateFits: Bool {
+        guard let state else { return true }
+        let followingRoutes = state.followingRoutes ?? []
+        return state.trip.utf8.count <= 256 && (state.terminal?.utf8.count ?? 0) <= 256
+            && (state.notice?.utf8.count ?? 0) <= 256 && (state.route?.utf8.count ?? 0) <= 16
+            && state.following.count <= 10 && followingRoutes.count <= 10
+            && followingRoutes.allSatisfy { $0.utf8.count <= 16 }
+    }
 }
 
 /// What a poll did to a registration, saved in one transaction per poll.

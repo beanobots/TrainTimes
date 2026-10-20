@@ -214,8 +214,9 @@ curl -X DELETE "https://$HOST/activities/$TOKEN" -H "Authorization: Bearer $API_
 The database holds only what pushing needs:
 
 - **Each countdown:** its push token, station and lines, trip, start time and
-  last state (pushed, or as the app sent it), and which key registered it. Its row is deleted when the
-  countdown ends (8 h), is deleted by the app, or APNs says the token is gone.
+  last state (pushed, or as the app sent it), and which key registered it. Its
+  row is deleted when the countdown ends (8 h), is deleted by the app, or APNs
+  says the token is gone.
 - **Each attest key:** its ID, public key, counter, environment, and when it
   was made and last used. It's deleted after 90 days unused, along with
   anything it registered.

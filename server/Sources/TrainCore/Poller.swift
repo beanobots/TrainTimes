@@ -89,7 +89,7 @@ final class Poller: Service {
         enum Kind: Sendable { case update, refresh, end }
         var kind: Kind
         var registration: Registration
-        /// Nil for an end with nothing ever pushed: there's nothing to end on the phone.
+        /// Nil for an end with no state, pushed or sent by the app: nothing to end it with.
         var push: Push?
     }
 

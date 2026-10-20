@@ -191,7 +191,8 @@ enum HTTPRoutes {
                   !registration.selection.routes.isEmpty,
                   registration.selection.routes.allSatisfy(station.routes.contains),
                   (0...180).contains(registration.selection.walkMinutes),
-                  registration.trip.utf8.count <= 256 else {
+                  registration.trip.utf8.count <= 256,
+                  registration.stateFits else {
                 throw HTTPError(.badRequest)
             }
             let now = Date.now

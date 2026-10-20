@@ -156,6 +156,50 @@ func text(_ response: TestResponse) -> String {
         }
     }
 
+    @Test func rejectsAStateBiggerThanTheAppSends() async throws {
+        let state = ContentState(train: now, trip: "091200_R..N", isLive: true, terminal: "Forest Hills",
+                                 following: [now.addingTimeInterval(240)], notice: "Delays", updated: now - 60,
+                                 route: "R", followingRoutes: ["R"])
+        func with(_ change: (inout ContentState) -> Void) -> ContentState {
+            var changed = state
+            change(&changed)
+            return changed
+        }
+        func letters(_ count: Int) -> String { String(repeating: "x", count: count) }
+        let bad = [
+            with { $0.trip = letters(257) },
+            with { $0.terminal = letters(257) },
+            with { $0.notice = letters(257) },
+            with { $0.route = letters(17) },
+            with { $0.following = Array(repeating: now, count: 11) },
+            with { $0.followingRoutes = Array(repeating: "R", count: 11) },
+            with { $0.followingRoutes = [letters(17)] },
+        ]
+        // Right at the limits
+        let longest = with {
+            $0.trip = letters(256)
+            $0.terminal = letters(256)
+            $0.notice = letters(256)
+            $0.route = letters(16)
+            $0.following = Array(repeating: now, count: 10)
+            $0.followingRoutes = Array(repeating: letters(16), count: 10)
+        }
+        try await withApp { (client, store) async throws in
+            for state in bad {
+                try await client.execute(uri: "/activities", method: .post, headers: bearer,
+                                         body: ByteBuffer(bytes: try registrationBody(state: state))) { response in
+                    #expect(response.status == .badRequest)
+                }
+            }
+            #expect(await store.count == 0)
+            try await client.execute(uri: "/activities", method: .post, headers: bearer,
+                                     body: ByteBuffer(bytes: try registrationBody(state: longest))) { response in
+                #expect(response.status == .noContent)
+            }
+            #expect(await store.registration(for: sampleToken)?.lastState == longest)
+        }
+    }
+
     @Test func rejectsBadBodies() async throws {
         try await withApp { (client, store) async throws in
             let bad: [[UInt8]] = [
