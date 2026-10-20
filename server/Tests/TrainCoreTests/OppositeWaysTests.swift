@@ -67,10 +67,11 @@ import Testing
     }
 
     @Test func eachLineOnItsOwnKeepsItsWay() throws {
-        // The M alone goes by its own N or S, as it always has
+        // The M alone goes by its own N or S, as it always has, and another
+        // line's train running on it by the other, as it's on the J's side
         let m = Selection(stationID: "M16", routes: ["M"], direction: .north)
         #expect(m.heading == "Manhattan")
-        #expect(m.stopIDs == ["M16N"])
+        #expect(m.stopIDs == ["M16N", "M16S"])
         #expect(try trains(for: m).map(\.trip) == ["079450_M..N24R", "080250_M..N24R"])
         // So do the J and Z without it
         let jz = Selection(stationID: "M16", routes: ["J", "Z"], direction: .south)
@@ -80,7 +81,7 @@ import Testing
         // And the G at Hoyt-Schermerhorn Sts
         let g = Selection(stationID: "A42", routes: ["G"], direction: .south)
         #expect(g.heading == "Manhattan - Church Av")
-        #expect(g.stopIDs == ["A42S"])
+        #expect(g.stopIDs == ["A42S", "A42N"])
     }
 
     @Test func aTrainOfTheOtherLineGoingTheOtherWayIsntShown() {
@@ -94,6 +95,81 @@ import Testing
         // Another line's train running on theirs goes by the J's way
         #expect(jzm.shows(train("F", at: "M16S")))
         #expect(!jzm.shows(train("F", at: "M16N")))
+
+        // With the M alone toward Manhattan, its own trains are N, and another
+        // line's on its side S, as the J's are, not toward Jamaica
+        let m = Selection(stationID: "M16", routes: ["M"], direction: .north)
+        #expect(m.shows(train("M", at: "M16N")))
+        #expect(!m.shows(train("M", at: "M16S")))
+        #expect(m.shows(train("F", at: "M16S")))
+        #expect(!m.shows(train("F", at: "M16N")))
+        #expect(m.heading(of: train("F", at: "M16S")) == m.heading)
+        // And toward Middle Village, the other way round
+        var away = m
+        away.direction = .south
+        #expect(away.shows(train("M", at: "M16S")))
+        #expect(away.shows(train("F", at: "M16N")))
+        #expect(!away.shows(train("F", at: "M16S")))
+        // The G alone toward Church Av at Hoyt-Schermerhorn Sts is S, and an E
+        // running on its side toward Manhattan, as the A and C are, N
+        let g = Selection(stationID: "A42", routes: ["G"], direction: .south)
+        #expect(g.shows(train("G", at: "A42S")))
+        #expect(g.shows(train("E", at: "A42N")))
+        #expect(!g.shows(train("E", at: "A42S")))
+        #expect(g.heading(of: train("E", at: "A42N")) == g.heading)
+    }
+
+    @Test func aTrainOfAnotherLineOnTheMAloneIsFoundOnItsSide() throws {
+        // A Z running local at Flushing Av, where it doesn't usually stop, both ways
+        let jzFeed = GTFSFeed.feed([
+            GTFSFeed.trip("100000_Z..N", route: "Z", stops: [FeedStop("M12N", at: 2), FeedStop("G05N", arrival: 30)]),
+            GTFSFeed.trip("100100_Z..S", route: "Z", stops: [FeedStop("M12S", at: 3), FeedStop("M23S", arrival: 20)]),
+        ])
+        let mFeed = GTFSFeed.feed([
+            GTFSFeed.trip("100300_M..N24R", route: "M", stops: [FeedStop("M12N", at: 6), FeedStop("G08N", arrival: 50)]),
+            GTFSFeed.trip("100400_M..S24R", route: "M", stops: [FeedStop("M12S", at: 7), FeedStop("M01S", arrival: 25)]),
+        ])
+        let toManhattan = Selection(stationID: "M12", routes: ["M"], direction: .north)
+        #expect(toManhattan.heading == "Manhattan")
+        #expect(toManhattan.stopIDs == ["M12N", "M12S"])
+        let feeds = TrainService.arrivals(at: Set(toManhattan.stopIDs), in: [jzURL: jzFeed, mURL: mFeed], now: now)
+        let trains = TrainService.trains(for: [toManhattan], in: feeds, now: now)[toManhattan.trainID] ?? []
+        #expect(trains.map(\.trip) == ["100100_Z..S", "100300_M..N24R"])
+        #expect(trains.allSatisfy { toManhattan.heading(of: $0) == "Manhattan" })
+
+        var away = toManhattan
+        away.direction = .south
+        #expect(away.heading == "Jamaica - Middle Village")
+        let awayFeeds = TrainService.arrivals(at: Set(away.stopIDs), in: [jzURL: jzFeed, mURL: mFeed], now: now)
+        #expect(TrainService.trains(for: [away], in: awayFeeds, now: now)[away.trainID]?.map(\.trip)
+            == ["100000_Z..N", "100400_M..S24R"])
+    }
+
+    @Test func theStopsAfterYoursAreEachLinesWhereTheyPart() throws {
+        // Toward Manhattan, the J and Z go on to Broad St, and the M on to Forest Hills
+        let jzFeed = GTFSFeed.feed([
+            GTFSFeed.trip("076950_J..S12R", route: "J", stops: [
+                FeedStop("M16S", at: 1), FeedStop("M18S", at: 5), FeedStop("M19S", at: 6), FeedStop("M20S", at: 8),
+                FeedStop("M21S", at: 10), FeedStop("M22S", at: 12), FeedStop("M23S", arrival: 14),
+            ]),
+        ])
+        let mFeed = GTFSFeed.feed([
+            GTFSFeed.trip("079450_M..N24R", route: "M", stops: [
+                FeedStop("M16N", at: 4.5), FeedStop("M18N", at: 8), FeedStop("D21N", at: 11), FeedStop("D20N", at: 13),
+                FeedStop("D19N", at: 15), FeedStop("D18N", at: 16), FeedStop("D17N", at: 18), FeedStop("D16N", at: 20),
+                FeedStop("G08N", arrival: 50),
+            ]),
+        ])
+        let names = try TrainService.stations(after: jzm, in: [jzFeed, mFeed]).map(\.name)
+        // The M's, the longer, then the J's it doesn't call at: Delancey St-Essex St once, and never Marcy Av
+        #expect(names.first == "Delancey St-Essex St")
+        #expect(names.contains("Broadway-Lafayette St"))
+        #expect(names.suffix(5) == ["Bowery", "Canal St", "Chambers St", "Fulton St", "Broad St"])
+        #expect(names.filter { $0 == "Delancey St-Essex St" }.count == 1)
+        #expect(!names.contains("Marcy Av"))
+        #expect(names.count == 13)
+        // So a change at Fulton St, which the J and Z go on to, can be picked
+        #expect(Change(stationID: "M22", routes: ["A", "C"]).validated(for: jzm)?.routes == ["A", "C"])
     }
 
     @Test func theServerFindsThemOnceForEveryCountdown() throws {

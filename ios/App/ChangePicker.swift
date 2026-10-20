@@ -36,8 +36,9 @@ struct ChangePicker: View {
 }
 
 /// Step 1: the stations after yours on your train's way, each with the lines
-/// you can change to there. They come from a train running now, so they
-/// follow any change to the line's route.
+/// you can change to there. They come from trains running now, one of each
+/// of its lines, so they follow any change to a line's route, and where its
+/// lines part, each one's are there.
 private struct ChangeStationStep: View {
     let selection: Selection
     let chosenID: String?
@@ -86,7 +87,7 @@ private struct ChangeStationStep: View {
             } header: {
                 Text("Next stops")
             } footer: {
-                Text("Stops after \(stationName) on the \(Spoken.describe(line: Lines.list(selection.routes), heading: selection.heading)), with the lines you can change to at each.")
+                Text("Stops after \(stationName) on \(selection.routes.count > 1 ? "any of " : "")the \(Spoken.describe(line: Lines.list(selection.routes), heading: selection.heading)), with the lines you can change to at each.")
             }
         }
         .navigationBarTitleDisplayMode(.inline)
@@ -183,10 +184,11 @@ private struct ChangeStationRow: View {
 /// Step 2: the change station's lines, platform by platform, with those of
 /// any station joined to it, starting with those across the platform from
 /// your train chosen. Your train's own are there but can't be chosen, nor can
-/// a line that ends its run there going the way chosen. Both ways are offered
-/// where the lines chosen could go either, unless they're all across the
-/// platform from your train and every line here plainly goes your way. A line
-/// on another platform counts the walk to it, set on the widget.
+/// a line that ends its run there going the way chosen, or that would turn a
+/// line chosen the other way. Both ways are offered where the lines chosen
+/// could go either, unless they're all across the platform from your train
+/// and every line here plainly goes your way. A line on another platform
+/// counts the walk to it, set on the widget.
 private struct ChangeLinesStep: View {
     let selection: Selection
     let station: Station
@@ -293,39 +295,52 @@ private struct ChangeLinesStep: View {
     }
 
     /// Whether `route` can be chosen: it goes the way chosen, or with none
-    /// chosen yet, either way, as the first line chosen sets the way.
+    /// chosen yet, either way, as the first line chosen sets the way. Not
+    /// where choosing it would turn a line chosen the other way (`way(with:)`).
     private func canChoose(_ route: String) -> Bool {
+        if chosen.isEmpty { return true }
         let routes = chosen.contains(route) ? chosen : chosen + [route]
-        return chosen.isEmpty || Change.leaves(route, from: station, going: way(with: routes), with: routes)
+        guard let way = way(with: routes) else { return false }
+        return Change.leaves(route, from: station, going: way, with: routes)
     }
 
     private func toggle(_ route: String) {
         if chosen.contains(route) {
             let rest = chosen.filter { $0 != route }
-            direction = way(with: rest)
-            chosen = rest
+            if let way = way(with: rest) {
+                direction = way
+                chosen = rest
+            } else {
+                // Those that would turn the other way without it are let go
+                chosen = keeping(rest, going: direction)
+            }
         } else {
             direction = chosen.isEmpty ? Change(stationID: station.id, routes: [route]).suggestedDirection(for: selection)
-                : way(with: chosen + [route])
+                : way(with: chosen + [route]) ?? direction
             chosen.append(route)
         }
     }
 
     /// The way chosen, with `routes` chosen in place of the lines chosen now:
     /// as it is, or the other where that keeps those still chosen going as
-    /// they do. A line that runs the other way to the rest on its platform
-    /// goes by the other N or S with them, and by its own alone
-    /// (`Platform.direction(_:of:with:)`), as the G does with the A and C at
-    /// Hoyt-Schermerhorn Sts.
-    private func way(with routes: [String]) -> Direction {
-        let current = Change(stationID: station.id, routes: chosen, direction: direction)
+    /// they do; nil where neither does. A line that runs the other way to the
+    /// rest on its platform goes by the other N or S with them, and by its
+    /// own alone (`Platform.direction(_:of:with:)`), as the G does with the A
+    /// and C at Hoyt-Schermerhorn Sts.
+    private func way(with routes: [String]) -> Direction? {
         let kept = chosen.filter(routes.contains)
-        return [direction, direction.opposite].first { way in
-            let changed = Change(stationID: station.id, routes: routes, direction: way)
-            return kept.allSatisfy {
-                changed.departureDirection(of: $0, for: selection) == current.departureDirection(of: $0, for: selection)
-            }
-        } ?? direction
+        return [direction, direction.opposite].first { keeping(routes, going: $0) == kept }
+    }
+
+    /// Those of the lines chosen now that, with `routes` chosen in their place
+    /// going `way`, are among them and go as they do.
+    private func keeping(_ routes: [String], going way: Direction) -> [String] {
+        let current = Change(stationID: station.id, routes: chosen, direction: direction)
+        let changed = Change(stationID: station.id, routes: routes, direction: way)
+        return chosen.filter { route in
+            routes.contains(route)
+                && changed.departureDirection(of: route, for: selection) == current.departureDirection(of: route, for: selection)
+        }
     }
 
     /// The lines chosen that go `way` from here.
@@ -412,6 +427,11 @@ private struct ChangeLinesStep: View {
                         LineToggle(route: route, isOn: chosen.contains(route)) {
                             toggle(route)
                         }
+                    } else if way(with: chosen + [route]) == nil {
+                        // Would turn a line chosen the other way
+                        LineBullet(route: route, size: 46)
+                            .opacity(0.3)
+                            .accessibilityLabel("\(Lines.spokenName(of: route)), which goes the other way to the lines chosen")
                     } else {
                         // Ends its run here going the way chosen
                         LineBullet(route: route, size: 46)

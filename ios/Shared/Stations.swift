@@ -66,8 +66,14 @@ struct Platform: Codable, Hashable, Identifiable, Sendable {
 
     /// The MTA's name for where `route`'s trains going `direction` from here
     /// are headed: its name for the other way where the line is `reversed`.
+    /// Where that's "Manhattan" and the line never gets there, it's another
+    /// line's, as the A's is for the H at Beach 90 St, so it's where the line
+    /// ends that way, "Broad Channel", or none where that's here.
     func directionName(_ direction: Direction, of route: String) -> String {
-        directionName(side(of: route, going: direction))
+        let name = directionName(side(of: route, going: direction))
+        guard name == "Manhattan", !Lines.servesManhattan(route),
+              let end = StationDirectory.end(of: route, going: direction) else { return name }
+        return end.id == id ? "" : end.short
     }
 
     /// The side `route`'s trains going `direction` stop on here, by the way
@@ -79,19 +85,31 @@ struct Platform: Codable, Hashable, Identifiable, Sendable {
     }
 
     /// The feeds' N or S for `route`'s trains here going `direction` with the
-    /// lines of `routes`, as a train or change of several lines goes:
-    /// `direction`, but the other where the line is `reversed` and some of
-    /// `routes` here aren't, so they all stop on the side `direction` names.
-    /// A line alone, or with only lines `reversed` like it, goes by its own.
+    /// lines of `routes`, as a train or change of several lines goes, so they
+    /// all stop on one side (`side(going:with:)`): `direction`, but the other
+    /// where the line is `reversed` and some of `routes` here aren't. A line
+    /// alone, or with only lines `reversed` like it, goes by its own, and
+    /// another line's train on their side by the other: going with the M
+    /// alone toward Manhattan from Flushing Av, a Z running local is S, the M N.
     func direction(_ direction: Direction, of route: String, with routes: [String]) -> Direction {
-        let named = routes.contains { self.routes.contains($0) && reversed?.contains($0) != true }
-        return named ? side(of: route, going: direction) : direction
+        guard routes.contains(where: self.routes.contains) else { return direction }
+        // The N or S of `route`'s trains on that side: the other where it's `reversed`
+        return side(of: route, going: side(going: direction, with: routes))
+    }
+
+    /// The side the lines of `routes` stop on here going `direction`
+    /// together, by the way whose name it has: `direction`, or where every
+    /// one of them here is `reversed`, as the M alone is at Marcy Av, the
+    /// other, so each goes by its own N or S.
+    func side(going direction: Direction, with routes: [String]) -> Direction {
+        let here = routes.filter(self.routes.contains)
+        return !here.isEmpty && here.allSatisfy { reversed?.contains($0) == true } ? direction.opposite : direction
     }
 
     /// Where the lines of `routes` call here going `direction` together
     /// (`direction(_:of:with:)`), as the feeds name it: "R31N"; going S from
     /// Marcy Av, the J's "M16S" and the M's "M16N", all toward Manhattan.
-    /// `direction`'s first, which other lines' trains go by.
+    /// `direction`'s first.
     func stops(of routes: [String], going direction: Direction) -> [String] {
         let ways = routes.filter(self.routes.contains).map { self.direction(direction, of: $0, with: routes) }
         return [direction, direction.opposite].filter { $0 == direction || ways.contains($0) }.map { id + $0.rawValue }
@@ -322,7 +340,8 @@ extension Station {
     }
 
     /// What each of `route`'s ways from here is called, given their trains.
-    /// In Manhattan, the MTA's name: "Uptown", "Downtown". From elsewhere,
+    /// In Manhattan, the MTA's name, cut to "Uptown" or "Downtown" where it
+    /// starts with one; the L's are "8 Av" and "Brooklyn". From elsewhere,
     /// "Manhattan" for the way there, and for the other the borough its trains
     /// are headed for, or with none to go by, where the line ends. A line that
     /// stays in one borough, like the Staten Island Railway, goes by where its

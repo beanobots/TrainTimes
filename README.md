@@ -87,9 +87,13 @@ single train) until you pick one.
 each time it refreshes and lists the closest stations, with how far each is and
 about how long it takes to walk there. Each line gets a row: its bullet, then the
 way toward Manhattan and its next train ("Now", "1 min", "12 min"), then the
-other way and its next train. In Manhattan the two ways are Uptown and Downtown;
-elsewhere the other way is the borough its trains are headed for, so the G from
-Brooklyn reads Queens and Brooklyn. A line that ends at the station has only the
+other way and its next train. In Manhattan each way goes by the MTA's name for
+it, cut to Uptown or Downtown where it starts with one, so most lines read
+Uptown and Downtown, but the L reads 8 Av and Brooklyn, the 7 Queens and
+34 St - Hudson Yards, and the J Brooklyn and Broad St. Elsewhere the other way
+is the borough its trains are headed for, so the G from Brooklyn reads Queens
+and Brooklyn, and a line that stays in one borough, like the Staten Island
+Railway, reads where its trains end up. A line that ends at the station has only the
 way it goes from there. Lines with no trains just now share a small row under
 the others, and a suspended line shows its alert instead of times. A station
 with more lines than fit shows its first four and "4 more lines ›". Tap a way

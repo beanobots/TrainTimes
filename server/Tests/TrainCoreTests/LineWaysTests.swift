@@ -273,9 +273,45 @@ import Testing
             }
         }
         #expect(Set(ends) == [
-            "C N at A09", "B N at D03", "B S at D40", "H N at H04", "6 S at 640", "G S at F27", "4 S at 250",
+            "C N at A09", "B N at D03", "B S at D40", "6 S at 640", "G S at F27", "4 S at 250",
             "C S at A55", "M N at G08", "R N at G08", "FS S at D26", "W S at R27",
         ])
+    }
+
+    @Test func aLineThatNeverGetsToManhattanIsntHeadedThere() throws {
+        // The Rockaway Park Shuttle's north from Beach 90 St, which the MTA names for the A, goes to Broad Channel
+        for id in ["H12", "H13", "H14", "H15"] {
+            let h = Selection(stationID: id, routes: ["H"], direction: .north)
+            #expect(h.heading == "Broad Channel")
+            #expect(h.caption == "Rockaway Park Shuttle Broad Channel")
+        }
+        #expect(Selection(stationID: "H12", routes: ["A", "H"], direction: .north).heading == "Manhattan or Broad Channel")
+        // and from Broad Channel, where it ends, it goes nowhere north
+        let broadChannel = try station("H04")
+        #expect(broadChannel.directions(of: ["H"]) == [.south])
+        #expect(broadChannel.directions(of: ["A", "H"]) == [.north, .south])
+        #expect(Selection(stationID: "H04", routes: ["H"], direction: .north).heading == "Northbound")
+        #expect(Selection(stationID: "H04", routes: ["A"], direction: .north).heading == "Manhattan")
+        // The G's north from Church Av, which the MTA names for the F, goes to Court Sq
+        let g = Selection(stationID: "F27", routes: ["G"], direction: .north)
+        #expect(g.heading == "Court Sq")
+        #expect(g.caption == "G Court Sq")
+        #expect(Selection(stationID: "F27", routes: ["F"], direction: .north).heading == "Manhattan")
+        // Names that also say where the line goes stay as the MTA has them
+        #expect(Selection(stationID: "F20", routes: ["G"], direction: .north).heading == "Manhattan - Queens")
+        #expect(Selection(stationID: "D26", routes: ["FS"], direction: .north).heading == "Manhattan & Franklin Av")
+
+        // Changing to the G there from an F toward Manhattan, it's not your way
+        let f = Selection(stationID: "F29", routes: ["F"], direction: .north)
+        let toG = Change(stationID: "F27", routes: ["G"])
+        #expect(toG.suggestedDirection(for: f) == .north)
+        #expect(toG.heading(for: f) == "Court Sq")
+        #expect(!toG.goesYourWay(from: f))
+        // From the shuttle to the A at Broad Channel, Manhattan is still the way it came from Rockaway Park
+        let h = Selection(stationID: "H12", routes: ["H"], direction: .north)
+        let toA = Change(stationID: "H04", routes: ["A"])
+        #expect(toA.suggestedDirection(for: h) == .north)
+        #expect(toA.heading(for: h) == "Manhattan")
     }
 
     @Test func aStopsStation() throws {

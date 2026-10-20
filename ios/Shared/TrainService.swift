@@ -173,30 +173,45 @@ enum TrainService {
         return Board(trains: trains, alerts: alerts, outages: await outages, connections: connections)
     }
 
-    /// The stations `selection`'s train calls at after yours, in order, for
-    /// choosing where to change: those of the running trip of its lines that
-    /// lists the most of them. Empty when none is running.
+    /// The stations `selection`'s train calls at after yours, for choosing
+    /// where to change, from its lines' feeds (`stations(after:in:)`). Empty
+    /// when none of its trains is running.
     static func stations(after selection: Selection) async throws -> [Station] {
         let feeds = Lines.feedURLs(sharingTracksWith: selection.routes)
+        return try stations(after: selection, in: try await data(from: feeds.own))
+    }
+
+    /// The stations `selection`'s train calls at after yours in `feeds`, its
+    /// lines' own: for each of its lines, those of its running trip that lists
+    /// the most of them, in order, so that where the lines part, each one's
+    /// are there. The longest list comes first, then each other's stations
+    /// not yet listed: toward Manhattan from Marcy Av, the M's on to Forest
+    /// Hills, then the J's Canal St, Chambers St and Fulton St.
+    static func stations(after selection: Selection, in feeds: [Data]) throws -> [Station] {
         // Each line from where it calls going its own way: toward Manhattan
         // from Marcy Av, the J from M16S and the M from M16N
-        var ways: [(origin: Set<String>, routes: Set<String>)] = []
+        var ways: [(origin: Set<String>, routes: [String])] = []
         for way in [selection.direction, selection.direction.opposite] {
             let routes = selection.routes.filter { selection.direction(of: $0) == way }
             let platforms = selection.station?.platforms(serving: routes) ?? []
-            if !routes.isEmpty { ways.append((Set(platforms.map { $0.id + way.rawValue }), Set(routes))) }
+            if !routes.isEmpty { ways.append((Set(platforms.map { $0.id + way.rawValue }), routes)) }
         }
-        var longest: [String] = []
-        for feed in try await data(from: feeds.own) {
+        var longest: [String: [String]] = [:]
+        for feed in feeds {
             for way in ways {
-                for stops in try SubwayFeed.stops(after: way.origin, on: way.routes, in: feed) where stops.count > longest.count {
-                    longest = stops
+                for route in way.routes {
+                    for stops in try SubwayFeed.stops(after: way.origin, on: [route], in: feed)
+                    where stops.count > longest[route, default: []].count {
+                        longest[route] = stops
+                    }
                 }
             }
         }
-        // A station once, where the trip first calls at it, and never yours
+        // A station once, where the first list with it calls at it, and never yours
         var seen = Set([selection.station?.id ?? ""])
-        return longest.compactMap { stop in
+        let lists = selection.routes.compactMap { longest[$0] }.enumerated()
+            .sorted { (-$0.element.count, $0.offset) < (-$1.element.count, $1.offset) }
+        return lists.flatMap(\.element).compactMap { stop in
             guard let station = StationDirectory.station(forStop: stop),
                   seen.insert(station.id).inserted else { return nil }
             return station

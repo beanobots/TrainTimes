@@ -157,7 +157,7 @@ POST
 | Status | Meaning |
 |---|---|
 | `204` | saved |
-| `400` | malformed, or a station or line that doesn't exist |
+| `400` | malformed; a station or line that doesn't exist; a `walkMinutes` outside 0-180; a `trip` over 256 bytes; or a `state` bigger than the app posts: its `trip`, `terminal` or `notice` over 256 bytes, its `route` over 16, more than 10 `following` trains or `followingRoutes`, or a line in `followingRoutes` over 16 bytes |
 | `401` | not signed, signed for something else, an old counter, a used challenge, or a key attested in an environment `ATTEST_ENVIRONMENT` no longer allows |
 | `403` | the token belongs to another key |
 | `503` | `MAX_REGISTRATIONS` reached (a key at `MAX_REGISTRATIONS_PER_KEY` still registers, dropping its oldest) |

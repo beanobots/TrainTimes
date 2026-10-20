@@ -316,4 +316,23 @@ import Testing
         #expect(try SubwayFeed.stops(after: ["R34N"], on: ["R"], in: feed) == [["R33N", "G08N"]])
         #expect(try SubwayFeed.stops(after: ["R34N"], on: ["R", "N"], in: feed) == [["R33N", "G08N"], ["R31N", "R01N"]])
     }
+
+    @Test func linesThatPartGoingTheSameWayEachHaveTheirStopsListed() throws {
+        // From 59 St in Brooklyn, the R goes on to Bay Ridge and the N to Coney Island
+        let feed = GTFSFeed.feed([
+            GTFSFeed.trip("R1", route: "R", stops: [FeedStop("R41S", at: 1), FeedStop("R42S", at: 3), FeedStop("R43S", at: 5),
+                                                    FeedStop("R44S", at: 7), FeedStop("R45S", arrival: 9)]),
+            GTFSFeed.trip("N1", route: "N", stops: [FeedStop("R41S", at: 2), FeedStop("N02S", at: 4), FeedStop("N03S", at: 6),
+                                                    FeedStop("N04S", at: 8), FeedStop("N10S", at: 14),
+                                                    FeedStop("D43S", arrival: 20)]),
+        ])
+        let nr = Selection(stationID: "R41", routes: ["N", "R"], direction: .south)
+        let names = try TrainService.stations(after: nr, in: [feed]).map(\.name)
+        #expect(names == ["8 Av", "Fort Hamilton Pkwy", "New Utrecht Av", "86 St", "Coney Island-Stillwell Av",
+                          "Bay Ridge Av", "77 St", "86 St", "Bay Ridge-95 St"])
+        // One line's are just its own
+        let r = Selection(stationID: "R41", routes: ["R"], direction: .south)
+        #expect(try TrainService.stations(after: r, in: [feed]).map(\.name) == ["Bay Ridge Av", "77 St", "86 St",
+                                                                                  "Bay Ridge-95 St"])
+    }
 }
