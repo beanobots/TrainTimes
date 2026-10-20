@@ -60,8 +60,9 @@ enum TrainActivityController {
 
     /// `widgetID` is the widget whose walk button asked for it, if one did.
     /// `trip` is the train to count down to, while it's still coming: on the
-    /// Transfers widget, the next that gets to the change, which needn't be
-    /// the next at your station; nil for the first you can catch.
+    /// Transfers widget, the first that gets to the change that you reach as
+    /// it gets in, which needn't be the next at your station; nil for the
+    /// first you reach as it gets in.
     ///
     /// It starts as soon as it has a train to count down to: from the times a
     /// widget saved for this train in the last few minutes, or else from the

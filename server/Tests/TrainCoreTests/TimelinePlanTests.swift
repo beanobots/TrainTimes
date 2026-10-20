@@ -161,6 +161,31 @@ import Testing
         #expect(TimelinePlan.reload(now: noon, fetched: nil, old: minute(10), runsOut: nil, switches: nil) == minute(2))
     }
 
+    @Test func aTapAfterATryFailsDoesntPutOffTheNext() throws {
+        let (noon, two) = (try newYork(hour: 12), try newYork(hour: 2))
+        let minute = { (minutes: Double) in noon.addingTimeInterval(minutes * 60) }
+        // A try at noon fails, with times 5 minutes old: the next is at 12:05
+        #expect(TimelinePlan.reload(now: noon, fetched: nil, old: minute(-5), runsOut: nil, switches: nil) == minute(5))
+        // A tap at 12:04 redraws the widget with them, and the next try is still at 12:05
+        #expect(TimelinePlan.reload(now: minute(4), fetched: nil, old: minute(-5), failed: noon, runsOut: nil,
+                                    switches: nil) == minute(5))
+        // Overnight too: not 15 minutes after the tap
+        let twoTen = two.addingTimeInterval(10 * 60)
+        #expect(TimelinePlan.reload(now: twoTen, fetched: nil, old: two.addingTimeInterval(-40 * 60), failed: two,
+                                    runsOut: nil, switches: nil) == two.addingTimeInterval(15 * 60))
+        // But never within a minute of the tap, nor long after it once that try's next is past
+        #expect(TimelinePlan.reload(now: minute(4.5), fetched: nil, old: minute(-5), failed: noon, runsOut: nil,
+                                    switches: nil) == minute(5.5))
+        #expect(TimelinePlan.reload(now: minute(30), fetched: nil, old: minute(-5), failed: noon, runsOut: nil,
+                                    switches: nil) == minute(31))
+        // And sooner as they run out of trains
+        #expect(TimelinePlan.reload(now: minute(2), fetched: nil, old: minute(-5), failed: noon, runsOut: minute(4),
+                                    switches: nil) == minute(4))
+        // A try that failed after now, before the clock was set back, failed now
+        #expect(TimelinePlan.reload(now: noon, fetched: nil, old: minute(-5), failed: minute(10), runsOut: nil,
+                                    switches: nil) == minute(5))
+    }
+
     @Test func savedTimesAreReusedOnlyWhenFreshOrAfterATap() {
         let some = { true }
         let none = { false }

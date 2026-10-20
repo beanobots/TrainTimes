@@ -104,6 +104,23 @@ import Testing
             == "Franklin Av Shuttle between Botanic Garden and Park Pl, 2 stops from Franklin Av")
     }
 
+    @Test func aStopTheFeedListsTwiceIsOneRow() throws {
+        // An H on its way from its own track at Broad Channel, H19S, to the platform there, H04S
+        let feed = GTFSFeed.feed([
+            GTFSFeed.trip("H1", route: "H", stops: [
+                FeedStop("H19S", at: -1), FeedStop("H04S", at: 0.5), FeedStop("H12S", at: 5), FeedStop("H13S", at: 7),
+                FeedStop("H15S", arrival: 10),
+            ]),
+        ])
+        let train = try #require(try SubwayFeed.arrivals(at: ["H13S"], in: feed, now: now).first)
+        let layout = try #require(StopLayout(train: train, now: now))
+        #expect(layout.rows.map(\.name) == ["Broad Channel", "Beach 90 St", "Beach 98 St"])
+        #expect(layout.trainRow == -0.5)
+        #expect(layout.label == "3 STOPS AWAY")
+        #expect(layout.spoken(clock: clock)
+            == "Rockaway Park Shuttle heading for Broad Channel, 3 stops from Beach 98 St")
+    }
+
     @Test func noStopsNoMap() {
         #expect(StopLayout(train: rTrain([]), now: now) == nil)
     }

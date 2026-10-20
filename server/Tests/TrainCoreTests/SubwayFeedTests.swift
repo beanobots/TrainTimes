@@ -132,6 +132,23 @@ import Testing
         #expect(arrivals.map { $0.place(now: now) } == [Arrival.Place.at(1), .approaching(0), .approaching(0)])
     }
 
+    @Test func aStopListedTwiceUnderTwoIdsIsThereOnce() throws {
+        // An H leaving Broad Channel: the feed lists its own track there, H19S, then the platform, H04S
+        let hTrip = GTFSFeed.trip("H1", route: "H", stops: [
+            FeedStop("H19S", at: -1), FeedStop("H04S", at: 0.5), FeedStop("H12S", at: 5), FeedStop("H13S", at: 7),
+            FeedStop("H15S", arrival: 10),
+        ])
+        let arrivals = try SubwayFeed.arrivals(at: ["H04S", "H12S"], in: GTFSFeed.feed([hTrip]), now: now)
+        #expect(arrivals.map { $0.approach.map(\.id) } == [["H04S"], ["H04S", "H12S"]])
+        #expect(arrivals.last?.approach.map(\.name) == ["Broad Channel", "Beach 90 St"])
+        #expect(arrivals.last?.approach.map(\.time) == [time(0.5), time(5)])
+        // Stopped on its own track, it's at Broad Channel
+        let feed = GTFSFeed.feed([hTrip, GTFSFeed.vehicle("H1", route: "H", at: "H19S", status: 1)])
+        let stopped = try #require(try SubwayFeed.arrivals(at: ["H12S"], in: feed, now: now).first)
+        #expect(stopped.position == Arrival.Position(stop: "H19S", isStopped: true))
+        #expect(stopped.place(now: now) == .at(0))
+    }
+
     @Test func fieldsItDoesntReadAreSkipped() throws {
         var entity = rTrip
         entity.fixed64(20, 42)

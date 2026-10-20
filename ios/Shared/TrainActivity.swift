@@ -167,9 +167,9 @@ struct ToggleCountdownIntent: LiveActivityIntent {
     @Parameter(title: "Service alerts", default: true)
     var serviceAlerts: Bool
 
-    /// The trip to count down to: on the Transfers widget, the next train
-    /// that gets to the change, which needn't be the next at your station.
-    /// Nil for the first you can catch.
+    /// The trip to count down to: on the Transfers widget, the first train
+    /// that gets to the change that you reach as it gets in, which needn't be
+    /// the next at your station. Nil for the first you reach as it gets in.
     @Parameter(title: "Trip")
     var trip: String?
 

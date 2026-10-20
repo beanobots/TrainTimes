@@ -104,8 +104,8 @@ struct Provider: AppIntentTimelineProvider {
                                    largeText: Self.hasRoom(context), widgetID: widgetID(configuration, context))
         // iOS rations how often widgets reload, so this may come later;
         // until it does, the entries step through the trains already known.
-        let reload = TimelinePlan.reload(now: .now, fetched: plan.fetched, old: plan.old, runsOut: plan.runsOut,
-                                         switches: switches)
+        let reload = TimelinePlan.reload(now: .now, fetched: plan.fetched, old: plan.old, failed: plan.failed,
+                                         runsOut: plan.runsOut, switches: switches)
         return Timeline(entries: plan.entries, policy: .after(reload))
     }
 
@@ -116,6 +116,9 @@ struct Provider: AppIntentTimelineProvider {
         var fetched: Date?
         /// Without new times, when the old ones it shows instead were fetched.
         var old: Date? = nil
+        /// And when the try for newer ones failed, as it may have before a
+        /// tap that redraws the widget with them; nil for just now.
+        var failed: Date? = nil
         /// The last entry's date, after which the widget knows of no train to show.
         var runsOut: Date?
     }
@@ -244,9 +247,10 @@ struct Provider: AppIntentTimelineProvider {
         let toCatch = change == nil ? trains : connections.map(\.first)
         let entries = [entry(now)]
             + TimelinePlan.dates(after: now, toCatch: toCatch, selection: selection, everyMinute: hasMap).map(entry)
-        // Without new times, it tries again soon, then less often as those it shows age
+        // Without new times, it tries again soon after the try that failed, then
+        // less often as those it shows age
         return Plan(entries: entries, fetched: updated ? board.fetched : nil, old: updated ? nil : board.fetched,
-                    runsOut: TimelinePlan.runsOut(toCatch, selection: selection))
+                    failed: updated ? nil : board.failed, runsOut: TimelinePlan.runsOut(toCatch, selection: selection))
     }
 
     /// Whether any of `saved`'s trains (with `change`, those that get there) is still to catch.
@@ -263,8 +267,9 @@ struct Provider: AppIntentTimelineProvider {
     /// the alert banner, those it already shows, however old; the widget
     /// reloads a minute later, as they're old. Should the last try for newer
     /// ones have failed, they're `old`: still said to be, and tried again as
-    /// times that couldn't be fetched are. Only the alerts and outages it can
-    /// mention, with `settings`, are fetched.
+    /// times that couldn't be fetched are, going by when that try failed
+    /// rather than by the tap. Only the alerts and outages it can mention,
+    /// with `settings`, are fetched.
     private static func board(for selection: Selection, change: Change?, taps: SharedStore.Taps,
                               settings: AppSettings) async throws -> (board: SharedStore.SavedBoard, old: Bool) {
         let now = Date.now

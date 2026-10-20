@@ -20,7 +20,9 @@ struct Arrival: Codable, Hashable, Sendable {
     var trip: String = ""
     /// The stops the trip still lists, up to and including this one: first the
     /// one it's at or heading for (sometimes the one it just left), or, before
-    /// it sets off, where it starts.
+    /// it sets off, where it starts. A stop listed twice in a row under two
+    /// ids, as an H leaving Broad Channel lists H19S then H04S, is there once,
+    /// as the second.
     var approach: [Stop] = []
     /// Where the feed says the train is; nil when it doesn't say.
     var position: Position? = nil
@@ -65,7 +67,8 @@ struct Arrival: Codable, Hashable, Sendable {
     func place(now: Date) -> Place? {
         guard !approach.isEmpty else { return nil }
         if !isLive { return .starting }
-        if let position, let index = approach.firstIndex(where: { $0.id == position.stop }) {
+        // Where it is can go by a stop's other id, which `approach` leaves out
+        if let position, let index = approach.firstIndex(where: { StationDirectory.isSameStop($0.id, position.stop) }) {
             return position.isStopped ? .at(index) : .approaching(index)
         }
         // Without a position, the first stop it isn't due at yet; due at them
@@ -270,9 +273,20 @@ enum SubwayFeed {
                 lastStop: lastStop,
                 isLive: isLive,
                 trip: trip,
-                approach: Array(stops[...match.at])
+                approach: once(stops[...match.at])
             )
         }
+    }
+
+    /// `stops`, with a stop listed again next under another id (H19S, then
+    /// H04S) kept only the second time, so the maps show it once.
+    private static func once(_ stops: ArraySlice<Arrival.Stop>) -> [Arrival.Stop] {
+        var kept: [Arrival.Stop] = []
+        for stop in stops {
+            if let last = kept.last, StationDirectory.isSameStop(last.id, stop.id) { kept.removeLast() }
+            kept.append(stop)
+        }
+        return kept
     }
 
     /// The trip a VehiclePosition is for, and the stop it's at or on its way to.

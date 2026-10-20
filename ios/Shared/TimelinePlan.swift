@@ -81,18 +81,23 @@ enum TimelinePlan {
     }
 
     /// When the widget reloads: `reloadInterval` after its times were
-    /// `fetched`, as they may be ones another widget fetched a while ago, or
-    /// in 2 minutes without new ones. Showing `old` ones instead, fetched
-    /// then, it waits as long as they're old, up to `reloadInterval`: the MTA
-    /// can be out of reach for a whole ride underground, and a widget's
-    /// reloads are budgeted by the day. Sooner if its entries run out of
-    /// trains first, rather than say there are none, or as commuting hours
-    /// start or end (`switches`), for the other train; and never within a
-    /// minute. Times fetched after `now`, before the clock was set back, are old.
-    static func reload(now: Date, fetched: Date?, old: Date? = nil, runsOut: Date?, switches: Date?) -> Date {
-        let retry = old.map { min(reloadInterval(at: now), max(2 * 60, now.timeIntervalSince($0))) } ?? 2 * 60
+    /// `fetched`, as they may be ones another widget fetched a while ago.
+    /// Without new ones, it goes by when the try for them `failed` (nil for
+    /// now), so a tap that redraws the widget after doesn't put the next try
+    /// off: 2 minutes after it, or showing `old` ones instead, fetched then,
+    /// as long after as they were old, up to `reloadInterval`, as the MTA can
+    /// be out of reach for a whole ride underground, and a widget's reloads
+    /// are budgeted by the day. Sooner if its entries run out of trains first,
+    /// rather than say there are none, or as commuting hours start or end
+    /// (`switches`), for the other train; and never within a minute. Times
+    /// fetched after `now`, before the clock was set back, are old; a try
+    /// that failed then is taken to have failed now.
+    static func reload(now: Date, fetched: Date?, old: Date? = nil, failed: Date? = nil, runsOut: Date?,
+                       switches: Date?) -> Date {
+        let tried = min(failed ?? now, now)
+        let retry = old.map { min(reloadInterval(at: tried), max(2 * 60, tried.timeIntervalSince($0))) } ?? 2 * 60
         var reload = fetched.map { $0 > now ? now : $0.addingTimeInterval(reloadInterval(at: now)) }
-            ?? now.addingTimeInterval(retry)
+            ?? tried.addingTimeInterval(retry)
         if let runsOut { reload = min(reload, runsOut) }
         if let switches { reload = min(reload, switches) }
         return max(reload, now.addingTimeInterval(60))
