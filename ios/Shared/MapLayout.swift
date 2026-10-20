@@ -294,7 +294,7 @@ struct TransferMapLayout {
             }
             let together = rows.dropFirst().filter(\.shared).map(\.name)
             if !together.isEmpty {
-                sentences.append("The \(line) stops at \(Self.list(together)) too.")
+                sentences.append("The \(line) stops at \(Lines.joined(together)) too.")
             }
         }
         return sentences.joined(separator: " ")
@@ -313,12 +313,6 @@ struct TransferMapLayout {
         // The change, the first row, is never folded
         let headed = rows[...ahead].last { $0.kind != .folded } ?? rows[0]
         return "on its way to \(headed.name)"
-    }
-
-    /// "36 St", "36 St and Pacific St", "36 St, 9 Av and Pacific St".
-    private static func list(_ names: [String]) -> String {
-        guard let last = names.last, names.count > 1 else { return names.first ?? "" }
-        return names.dropLast().joined(separator: ", ") + " and " + last
     }
 }
 

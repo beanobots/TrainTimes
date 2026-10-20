@@ -178,10 +178,11 @@ import Testing
         #expect(!TimelinePlan.reuses(saved: time(-20), refreshed: nil, toggled: time(10), anyToCatch: some, now: now))
     }
 
-    @Test func aWidgetWhoseTimesAreFromAfterNowReloadsAsThoughJustFetched() throws {
+    @Test func aWidgetWhoseTimesAreFromAfterNowReloadsAsOldOnesDo() throws {
         let noon = try newYork(hour: 12)
         let minute = { (minutes: Double) in noon.addingTimeInterval(minutes * 60) }
-        #expect(TimelinePlan.reload(now: noon, fetched: minute(60), runsOut: nil, switches: nil) == minute(5))
+        #expect(TimelinePlan.reload(now: noon, fetched: minute(60), runsOut: nil, switches: nil) == minute(1))
+        #expect(TimelinePlan.reload(now: noon, fetched: minute(0.5), runsOut: nil, switches: nil) == minute(1))
     }
 
     @Test func positionsFromAfterNowGoToo() {

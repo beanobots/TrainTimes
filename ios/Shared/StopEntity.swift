@@ -43,9 +43,14 @@ struct StopEntity: AppEntity {
     /// time, alerts). One set up when its platform was a station of its
     /// own is for the station it's part of.
     func selection(basedOn app: Selection) -> Selection {
+        selection(keeping: app).validated()
+    }
+
+    /// The selection this stands for, with `app`'s walking time and alerts,
+    /// before it's checked against the stations.
+    func selection(keeping app: Selection) -> Selection {
         Selection(stationID: stationID, routes: routes, direction: direction, elevatorAlerts: app.elevatorAlerts,
                   serviceAlerts: app.serviceAlerts, walkMinutes: app.walkMinutes)
-            .validated()
     }
 
     /// At `station`, both directions of each line on its own, of each platform's

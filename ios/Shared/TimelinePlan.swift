@@ -85,10 +85,9 @@ enum TimelinePlan {
     /// in 2 minutes without new ones; sooner if its entries run out of trains
     /// first, rather than say there are none, or as commuting hours start or
     /// end (`switches`), for the other train; and never within a minute.
-    /// Times fetched after `now`, before the clock was set back, count as
-    /// fetched now.
+    /// Times fetched after `now`, before the clock was set back, are old.
     static func reload(now: Date, fetched: Date?, runsOut: Date?, switches: Date?) -> Date {
-        var reload = fetched.map { min($0, now).addingTimeInterval(reloadInterval(at: now)) }
+        var reload = fetched.map { $0 > now ? now : $0.addingTimeInterval(reloadInterval(at: now)) }
             ?? now.addingTimeInterval(2 * 60)
         if let runsOut { reload = min(reload, runsOut) }
         if let switches { reload = min(reload, switches) }

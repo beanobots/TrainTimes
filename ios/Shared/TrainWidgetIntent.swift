@@ -76,8 +76,8 @@ struct TrainWidgetIntent: WidgetConfigurationIntent {
             return stop?.selection(basedOn: base)
         }
         guard let station = station?.station, let routes = line?.routes, let direction = direction?.direction else { return nil }
-        return Selection(stationID: station.id, routes: routes, direction: direction, elevatorAlerts: base.elevatorAlerts,
-                         serviceAlerts: base.serviceAlerts, walkMinutes: base.walkMinutes).validatedIfKnown()
+        return StopEntity(stationID: station.id, direction: direction, routes: routes).selection(keeping: base)
+            .validatedIfKnown()
     }
 }
 
