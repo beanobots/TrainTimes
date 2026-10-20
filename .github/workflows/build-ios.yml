@@ -17,10 +17,10 @@ on:
 permissions:
   contents: read
 
-# One run at a time for each kind of run and branch or pull request, so two
-# pushes to main can't publish at once; a push's build that's still waiting
-# gives way to a newer push's, never to a run started by hand. A newer push to
-# a pull request cancels its older run.
+# One build at a time for each kind of run and branch or pull request: a push's
+# build that's still waiting gives way to a newer push's, never to a run started
+# by hand, and a newer push to a pull request cancels its older run. Publishing
+# has a group of its own, shared by pushes and runs started by hand.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -37,8 +37,6 @@ env:
 jobs:
   build:
     runs-on: macos-latest
-    permissions:
-      contents: write # to publish the latest build as a release
     steps:
       - uses: actions/checkout@v4
 
@@ -116,14 +114,32 @@ jobs:
           path: |
             ios/TrainTimes.ipa
             ios/source.json
+            ios/icon.png
+
+  publish:
+    needs: build
+    # A push to main publishes, and so does a run started by hand on main
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # to publish the latest build as a release
+    # One publish at a time, whatever started it, so two can't interleave their
+    # uploads; one still waiting gives way to a newer one, which checks again
+    concurrency:
+      group: ${{ github.workflow }}-publish
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: TrainTimes-${{ env.VERSION }}
+          path: ios
 
       - name: Publish as the latest release
-        # A push to main publishes, and so does a run started by hand on main,
-        # but only while main has the same app and no newer build is out, so an
+        # Only while main has the same app and no newer build is out, so an
         # older run, or a re-run of one, can't replace a newer build
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           main=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
           if [ "$main" != "$GITHUB_SHA" ]; then

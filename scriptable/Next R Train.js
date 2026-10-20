@@ -22,6 +22,8 @@ const FEED_URL = "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2F
 const LINE_COLOR = "#FCCC0A";
 // The MTA makes its feed anew about every 30 seconds; one older than this has stopped updating
 const STALE_SECONDS = 3 * 60;
+// How fast the phone's clock may be before the feed looks stopped (as the app's SubwayFeed.clockAllowance)
+const CLOCK_ALLOWANCE_SECONDS = 7 * 60;
 // Where a train ends up, keyed by the last stop of its trip
 const TERMINALS = {
   R01N: "Astoria", G08N: "Forest Hills", G21N: "Queens Plaza", R27N: "Whitehall St",
@@ -68,7 +70,8 @@ async function upcomingTrains() {
 // for every trip that stops at stopId and goes on from it, its line, arrival
 // time, last stop and whether a train is assigned to it (live=true: a live
 // prediction; false: the MTA hasn't assigned a train yet, so the time is still
-// the timetable's). Throws if the feed says it was made over STALE_SECONDS ago.
+// the timetable's). Throws if the feed says it was made over STALE_SECONDS ago,
+// by the phone's clock with CLOCK_ALLOWANCE_SECONDS more.
 function arrivalsAt(stopId, bytes) {
   let pos = 0;
   const varint = () => {
@@ -153,7 +156,7 @@ function arrivalsAt(stopId, bytes) {
       },
     }),
   });
-  if (made && Date.now() / 1000 - made > STALE_SECONDS) {
+  if (made && Date.now() / 1000 - made > STALE_SECONDS + CLOCK_ALLOWANCE_SECONDS) {
     throw new Error(`The MTA's feed hasn't updated since ${clock(new Date(made * 1000), true)}`);
   }
   return arrivals.sort((a, b) => a.time - b.time);

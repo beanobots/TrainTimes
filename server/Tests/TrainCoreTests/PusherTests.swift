@@ -6,14 +6,15 @@ import Testing
 @Suite struct PusherTests {
     @Test func dropsOnlyTokensAPNsSaysAreGone() throws {
         let gone: [(Int, APNSError.ErrorReason)] = [
-            (410, .unregistered), (410, .expiredToken), (400, .badDeviceToken), (400, .deviceTokenNotForTopic),
+            (410, .unregistered), (410, .expiredToken), (400, .badDeviceToken),
         ]
         for (status, reason) in gone {
             #expect(APNSPusher.result(status: status, reason: reason) == .invalidToken("\(status) \(reason.reason)"))
         }
         // The server's own problems, or APNs's, aren't the token's
         let kept: [(Int, APNSError.ErrorReason?)] = [
-            (400, .topicDisallowed), (400, .badTopic), (403, .expiredProviderToken), (403, .invalidProviderToken),
+            (400, .topicDisallowed), (400, .badTopic), (400, .deviceTokenNotForTopic),
+            (403, .expiredProviderToken), (403, .invalidProviderToken),
             (429, .tooManyRequests), (500, .internalServerError), (503, .serviceUnavailable), (500, nil),
             (500, .unregistered),
         ]
@@ -24,7 +25,7 @@ import Testing
         // As APNSwift reads APNs's answer
         let response = try JSONDecoder().decode(APNSErrorResponse.self, from: Data(#"{"reason":"DeviceTokenNotForTopic"}"#.utf8))
         let error = APNSError(responseStatus: 400, apnsResponse: response)
-        #expect(APNSPusher.result(status: error.responseStatus, reason: error.reason) == .invalidToken("400 DeviceTokenNotForTopic"))
+        #expect(APNSPusher.result(status: error.responseStatus, reason: error.reason) == .failed("APNs 400 DeviceTokenNotForTopic"))
     }
 
     func push(event: Push.Event = .update, at timestamp: Date, staleDate: Date?) -> Push {

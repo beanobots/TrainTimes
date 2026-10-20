@@ -94,11 +94,12 @@ final class APNSPusher: Pusher {
     private static func unixSeconds(_ date: Date) -> Int { Int(saturating: date.timeIntervalSince1970) }
 
     /// What an APNs error means for the token. It's dropped only when APNs
-    /// doesn't know it, no longer does, or knows it as another app's; for
-    /// anything else (the server's key or topic, APNs busy) it's kept.
+    /// doesn't know it or no longer does; for anything else (the server's key
+    /// or topic, APNs busy) it's kept. As only the attested app registers,
+    /// a token that isn't for the topic means APNS_TOPIC is wrong.
     static func result(status: Int, reason: APNSError.ErrorReason?) -> PushResult {
         let description = "\(status) \(reason?.reason ?? "no reason given")"
-        let gone: [APNSError.ErrorReason] = [.badDeviceToken, .unregistered, .expiredToken, .deviceTokenNotForTopic]
+        let gone: [APNSError.ErrorReason] = [.badDeviceToken, .unregistered, .expiredToken]
         if [400, 410].contains(status), let reason, gone.contains(reason) {
             return .invalidToken(description)
         }

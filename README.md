@@ -227,7 +227,8 @@ It also copies the first two into the push server's resources, which can't
 link to them. `lines.json` keeps only the stops `stations.json` lists, so then follow the
 download steps at the top of `tools/make_lines.py` and run
 `python3 tools/make_lines.py gtfs ios/Shared/stations.json ios/Shared`. Push all
-three.
+five files: the three in `ios/Shared` and the server's copies in
+`server/Sources/TrainResources/Resources`, which the server's CI checks match.
 
 ## How it stays fresh
 
@@ -237,8 +238,11 @@ train when one leaves (a train held at the platform waits at 0:00) and has a
 refresh button (↻); the Scriptable one counts back up from 0:00 until iOS next
 refreshes it.
 
-When the MTA can't be reached, or its feed hasn't changed for over 3 minutes, a
-Next train or Transfers widget keeps the times it has while one of its trains is
+When the MTA can't be reached, or its feed has stopped updating (3 minutes
+behind the other lines' feeds read with it; for a line read from its own feed
+alone, such as the 1 to 7, the L and the SIR, or when every feed has stopped,
+10 minutes by the phone's clock, which may be fast), a Next train or Transfers
+widget keeps the times it has while one of its trains is
 still to catch, with no signal in place of ↻, and the Lock Screen's rectangular
 widget says "Not updated since 8:12". Only with none left does it say it
 couldn't reach the MTA. Trains near you keeps no old times: a line whose times

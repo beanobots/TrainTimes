@@ -58,6 +58,9 @@ rm -rf "$PREFIX/TrainTimesServer.new" "$PREFIX/$BUNDLE.new"
 install -o root -g wheel -m 755 "$BIN_DIR/TrainTimesServer" "$PREFIX/TrainTimesServer.new"
 cp -R "$BIN_DIR/$BUNDLE" "$PREFIX/$BUNDLE.new"
 chmod -R u=rwX,go=rX "$PREFIX/$BUNDLE.new"
+# A link or a directory left where the program goes (from when $PREFIX was
+# the service's) would take the new one somewhere else
+[[ -f $PREFIX/TrainTimesServer && ! -L $PREFIX/TrainTimesServer ]] || rm -rf "$PREFIX/TrainTimesServer"
 mv -f "$PREFIX/TrainTimesServer.new" "$PREFIX/TrainTimesServer"
 rm -rf "$PREFIX/$BUNDLE"
 mv "$PREFIX/$BUNDLE.new" "$PREFIX/$BUNDLE"
