@@ -4,8 +4,9 @@ on:
   push:
     branches: [main]
     # Only a change to the app, or to how it's built and published, makes a
-    # new version; run the workflow by hand on main to publish anyway. Changes
-    # to the server alone are built and tested on their pull requests.
+    # new version; run the workflow by hand on main to publish anyway. The
+    # publish step looks for the same paths in later commits. build-server.yml
+    # builds and tests the server.
     paths:
       - ios/**
       - tools/make_altstore_source.py
@@ -118,16 +119,31 @@ jobs:
 
       - name: Publish as the latest release
         # A push to main publishes, and so does a run started by hand on main,
-        # but only while it's main's newest commit and no newer build is out,
-        # so an older run, or a re-run of one, can't replace a newer build
+        # but only while main has the same app and no newer build is out, so an
+        # older run, or a re-run of one, can't replace a newer build
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           main=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
           if [ "$main" != "$GITHUB_SHA" ]; then
-            echo "main has moved on to ${main::7}; not publishing ${GITHUB_SHA::7}"
-            exit 0
+            # Commits after this one that leave the app alone start no build
+            # of their own, so this one publishes for them. One that changes
+            # the paths the push trigger has starts its own build, which
+            # publishes instead. A compare lists at most 300 files, so that
+            # many counts as a change.
+            later=$(gh api "repos/$GITHUB_REPOSITORY/compare/$GITHUB_SHA...$main" --jq '
+              [.status,
+               ([(.files // [])[] | (.filename, .previous_filename // empty)
+                 | select(startswith("ios/") or . == "tools/make_altstore_source.py" or . == ".github/workflows/build-ios.yml")]
+                | length),
+               (.files // [] | length)] | @tsv')
+            read -r status app files <<< "$later"
+            if [ "$status" != ahead ] || [ "$app" -gt 0 ] || [ "$files" -ge 300 ]; then
+              echo "main has changed the app again by ${main::7}; not publishing ${GITHUB_SHA::7}"
+              exit 0
+            fi
+            echo "main has moved on to ${main::7} without changing the app"
           fi
           if newest=$(gh release view latest --json name --jq '.name | split(".") | last' 2>/dev/null) &&
             [ "$newest" -gt "$BUILD" ] 2>/dev/null; then
@@ -145,9 +161,9 @@ jobs:
               --title "Train Times $VERSION" \
               --notes "Built from ${GITHUB_SHA::7}."
           fi
-          # Then the latest release takes its files in place, so the source's
-          # address always has one. Its tag stays where it was made, as this
-          # token may not move a tag past a change to the workflows.
+          # Then the latest release takes its files, each replaced in place,
+          # so the release itself is never gone. Its tag stays where it was
+          # made, as this token may not move a tag past a change to the workflows.
           notes="Build $BUILD, from ${GITHUB_SHA::7} (its own release is v$VERSION). In AltStore, add the source $RELEASE_URL/source.json, or install TrainTimes.ipa directly."
           if gh release view latest >/dev/null 2>&1; then
             gh release upload latest ios/source.json ios/icon.png ios/TrainTimes.ipa --clobber
@@ -158,16 +174,3 @@ jobs:
               --title "Train Times $VERSION" \
               --notes "$notes"
           fi
-
-  server:
-    # The server compiles eight of ios/Shared's files in Swift 6 mode, which the
-    # app's build doesn't. It needs macOS for SQLite.
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Build the server
-        run: swift build --package-path server
-
-      - name: Test the server
-        run: swift test --package-path server

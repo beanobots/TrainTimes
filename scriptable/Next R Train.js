@@ -10,6 +10,8 @@
 
 // ---- Settings ---------------------------------------------------------------
 const STOP_ID = "R34N"; // Prospect Av, Manhattan-bound ("R34S" is toward Bay Ridge)
+// The lines, as the feed names them: "GS", "FS" and "H" are the shuttles, and a
+// line's express runs ("6X") are shown with it
 const ROUTES = ["R"]; // add "N" to also show N trains when they run local
 const STATION = "Prospect Av";
 const HEADING = "to Manhattan";
@@ -34,6 +36,10 @@ const GREEN = new Color("#4CD964");
 const BACKGROUND = new Color("#111111");
 const DIM = new Color("#9A9A9A");
 const DOT = "\u00b7"; // written as an escape so the script stays plain ASCII
+// The express runs of the 5, 6, 7 and F are their own routes in the feeds ("6X")
+const line = (route) => route.replace(/^([567F])X$/, "$1");
+// What a line's bullet says: an S for the shuttles
+const label = (route) => (["GS", "FS", "H"].includes(route) ? "S" : route);
 
 const family = config.widgetFamily || "medium"; // run in the app: preview the medium size
 let widget;
@@ -59,7 +65,7 @@ async function upcomingTrains() {
 }
 
 // Decodes just enough of the GTFS-realtime protobuf (gtfs.org/realtime) to list,
-// for every trip that stops at stopId and goes on from it, its route, arrival
+// for every trip that stops at stopId and goes on from it, its line, arrival
 // time, last stop and whether a train is assigned to it (live=true: a live
 // prediction; false: the MTA hasn't assigned a train yet, so the time is still
 // the timetable's). Throws if the feed says it was made over STALE_SECONDS ago.
@@ -142,7 +148,7 @@ function arrivalsAt(stopId, bytes) {
         });
         // A trip that ends at stopId doesn't leave from it
         if (time && lastStop !== stopId) {
-          arrivals.push({ route, time: new Date(time * 1000), terminal: TERMINALS[lastStop], live });
+          arrivals.push({ route: line(route), time: new Date(time * 1000), terminal: TERMINALS[lastStop], live });
         }
       },
     }),
@@ -157,7 +163,7 @@ function arrivalsAt(stopId, bytes) {
 
 function trainWidget(trains) {
   if (trains.length === 0) {
-    const widget = messageWidget(`No ${ROUTES.join("/")} trains predicted`, "Check mta.info for service changes");
+    const widget = messageWidget(`No ${ROUTES.map(label).join("/")} trains predicted`, "Check mta.info for service changes");
     widget.refreshAfterDate = new Date(Date.now() + 5 * 60 * 1000);
     return widget;
   }
@@ -168,11 +174,11 @@ function trainWidget(trains) {
   widget.refreshAfterDate = new Date(Math.min(next.time.getTime() + 10 * 1000, Date.now() + 60 * 1000));
 
   if (family === "accessoryInline") {
-    widget.addText(`${next.route} ${[next, ...later.slice(0, 2)].map((t) => clock(t.time)).join(` ${DOT} `)}`);
+    widget.addText(`${label(next.route)} ${[next, ...later.slice(0, 2)].map((t) => clock(t.time)).join(` ${DOT} `)}`);
     return widget;
   }
   if (family === "accessoryRectangular" || family === "accessoryCircular") {
-    const title = widget.addText(family === "accessoryCircular" ? next.route : `${next.route} ${DOT} ${STATION}`);
+    const title = widget.addText(family === "accessoryCircular" ? label(next.route) : `${label(next.route)} ${DOT} ${STATION}`);
     title.font = Font.boldSystemFont(family === "accessoryCircular" ? 16 : 13);
     if (family === "accessoryCircular") title.centerAlignText();
     const timer = countdown(widget, next, 22);
@@ -303,9 +309,10 @@ function bullet(stack, route, size) {
   circle.cornerRadius = size / 2;
   circle.backgroundColor = BULLET;
   circle.centerAlignContent();
-  const letter = circle.addText(route);
+  const text = label(route);
+  const letter = circle.addText(text);
   // Two letters, as on the SI, are smaller
-  letter.font = Font.boldSystemFont(Math.round(size * (route.length > 1 ? 0.45 : 0.62)));
+  letter.font = Font.boldSystemFont(Math.round(size * (text.length > 1 ? 0.45 : 0.62)));
   letter.textColor = BULLET_LABEL;
 }
 

@@ -1,0 +1,35 @@
+name: Build the push server
+
+on:
+  push:
+    branches: [main]
+    # The server, and the app's files it builds with
+    paths:
+      - server/**
+      - ios/Shared/**
+      - .github/workflows/build-server.yml
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run at a time for each branch or pull request: a newer run cancels an
+# older one, whose changes it tests too.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server:
+    # The server compiles eight of ios/Shared's files in Swift 6 mode, which the
+    # app's build doesn't. It needs macOS for SQLite.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the server
+        run: swift build --package-path server
+
+      - name: Test the server
+        run: swift test --package-path server

@@ -155,11 +155,12 @@ publishes it as the [latest release](../../releases/tag/latest):
 Each build gets its own version number (1.0.N, where N is the build number), so
 AltStore can tell when there's a new one, and its own release, `v1.0.N`, which
 the source downloads it from, so a source AltStore read before the next build
-still gets the build it describes. A build that finishes after `main` has moved
-on, or after a newer build, isn't published. To publish without changing the
-app, run the workflow on `main` from the Actions tab (**Run workflow**). Pull
-requests are built too, but not published, and every run also builds and tests
-the push server in `server/`.
+still gets the build it describes. A build that finishes after `main` has
+changed the app again, or after a newer build, isn't published. To publish
+without changing the app, run the workflow on `main` from the Actions tab
+(**Run workflow**). Pull requests are built too, but not published. The push
+server in `server/` has its own workflow, which builds and tests it for every
+pull request and every push to `main` that changes it or the app's shared code.
 
 1. **Install AltStore** on your iPhone by following the official guide at
    [altstore.io](https://altstore.io). It needs AltServer running on your
@@ -236,7 +237,10 @@ refresh button (↻); the Scriptable one counts back up from 0:00 until iOS next
 refreshes it.
 
 When the MTA can't be reached, or its feed hasn't changed for over 3 minutes, a
-widget keeps the times it has while one of its trains is still to catch, with no
-signal in place of ↻, and the Lock Screen's rectangular widget says "Not updated
-since 8:12". Only with none left does it say it couldn't reach the MTA. In the
-app, a line whose times didn't come says "Couldn't load".
+Next train or Transfers widget keeps the times it has while one of its trains is
+still to catch, with no signal in place of ↻, and the Lock Screen's rectangular
+widget says "Not updated since 8:12". Only with none left does it say it
+couldn't reach the MTA. Trains near you keeps no old times: a line whose times
+it couldn't get shows "–", and with none at all it says "Couldn't reach the MTA"
+along its bottom. In the app, a line whose times didn't come says "Couldn't
+load".
