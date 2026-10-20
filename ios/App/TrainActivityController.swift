@@ -165,11 +165,14 @@ enum TrainActivityController {
 
     /// New times for `selection`'s running countdown from `board`, which the
     /// app fetched at `fetched` for the train's own page, rather than fetching
-    /// them again. Returns the train it counts down to then, if one's running.
+    /// them again; not for one with newer times already, from a refresh or a
+    /// start that fetched after the page did. Returns the train it counts
+    /// down to then, if one's running.
     static func update(for selection: Selection, from board: Board, fetched: Date) async -> Date? {
         let train = try? await inTurn { () async -> Date? in
             let settings = SharedStore.loadSettings()
-            for activity in running where activity.attributes.selection.trainID == selection.trainID {
+            for activity in running where activity.attributes.selection.trainID == selection.trainID
+                && activity.content.state.updated < fetched {
                 let state = activity.content.state.refreshed(for: activity.attributes.selection, board: board,
                                                              settings: settings, now: fetched)
                 await activity.update(content(state))

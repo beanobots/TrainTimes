@@ -172,7 +172,7 @@ struct TransferMapLayout {
     /// third stops, and past the last while it's on its way to it.
     let firstRow: CGFloat
     /// Where the train it meets would be on your train's way with as long to
-    /// go to the change; nil without one.
+    /// go to the change; nil without one, as where you stay on yours.
     let nextRow: CGFloat?
     /// Where the train it meets is, when it's further off than the map shows:
     /// "D at 9 Av", "D between 9 Av and 36 St".
@@ -211,9 +211,11 @@ struct TransferMapLayout {
         groups += foldBefore ? [Array(before.reversed())] : before.reversed().map { [$0] }
         if origin > 0 { groups.append([0]) }
 
+        // The train it meets: none where you stay on yours, which goes on as one of the lines changed to
+        let other = connection.staysOn ? nil : connection.next
         // Stations the train it meets calls at on its way, where the two share a platform
         let station = { (stop: String) in StationDirectory.station(forStop: stop)?.id }
-        let theirs = Set((connection.next?.approach ?? []).compactMap { station($0.id) })
+        let theirs = Set((other?.approach ?? []).compactMap { station($0.id) })
 
         let rows = groups.enumerated().map { (index, group) -> Row in
             if group.count > 1 {
@@ -231,7 +233,7 @@ struct TransferMapLayout {
 
         // The note as VoiceOver says it, naming a shuttle
         let spokenNote: String?
-        if let next = connection.next {
+        if let next = other {
             // Your train gets to the change at the top row's time; the train it
             // meets is where yours would be with as long to go
             let row = Self.row(at: connection.arrival.time.addingTimeInterval(-next.time.timeIntervalSince(now)), in: rows)

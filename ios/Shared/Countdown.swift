@@ -51,26 +51,29 @@ extension CountdownState {
 
     /// The countdown for `selection` from `trains`, mentioning `notice`, the
     /// label of an alert. When starting (`trip` nil), it's to the first train
-    /// you can catch. After that it's to the train with `trip` while that's
-    /// still coming, and once it has gone, to the first train due at or after
-    /// `last`, the one it counted down to, as it moves on by itself. You set
-    /// off when it started, so the walk isn't taken off again. Before anything
-    /// is known of that train, it's the first you can catch.
+    /// you can reach as it gets to the platform. After that it's to the train
+    /// with `trip` while that's still coming, and once it has gone, to the
+    /// first train due at or after `last`, the one it counted down to, as it
+    /// moves on by itself. You set off when it started, so the walk isn't
+    /// taken off again. Before anything is known of that train, it's the
+    /// first you can reach as it gets there.
     ///
     /// Trains go by when they reach the platform, which is what it counts down
-    /// to and moves on at, not when one held there leaves.
+    /// to and moves on at, not when one held there leaves. So it doesn't start
+    /// on one you'd reach only while it's held there: it would move on from
+    /// that train as it got in, with you still on your way.
     init?(for selection: Selection, trains: [Arrival], notice: String?, now: Date,
           following trip: String?, after last: Date?) {
         let upcoming = trains.filter { $0.time > now }
-        let catchable = selection.catchable(upcoming, now: now).first
+        let reachable = upcoming.first { selection.leaveTime(for: $0) > now }
         let target: Arrival?
         if let trip {
             // A trip without an id can't be told from another one, so that goes by its time
             let same = trip.isEmpty ? nil : upcoming.first { $0.trip == trip }
             let next = last.flatMap { last in upcoming.first { $0.time >= last.addingTimeInterval(-Self.leeway) } }
-            target = same ?? next ?? catchable
+            target = same ?? next ?? reachable
         } else {
-            target = catchable
+            target = reachable
         }
         guard let target else { return nil }
         let following = upcoming.filter { $0.time > target.time }.prefix(2)

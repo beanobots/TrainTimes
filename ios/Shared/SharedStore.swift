@@ -332,8 +332,9 @@ enum SharedStore {
         try? data.write(to: widgetsFile.appendingPathExtension("bad"), options: .atomic)
     }
 
-    /// Also leaves the default's train as the app's choice, which Siri, the
-    /// countdown and widgets set up before saved widgets go by.
+    /// Also leaves the default's train, as saved, in selection.json: what
+    /// `firstWidgets` makes the default of, for the widgets, Siri and the app,
+    /// when widgets.json is missing or can't be read.
     static func saveWidgets(_ saved: SavedWidgets) {
         save(saved.defaultWidget.selection)
         guard let widgetsFile, let data = try? JSONEncoder().encode(saved) else { return }

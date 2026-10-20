@@ -17,7 +17,7 @@ func testLimits() -> Limits {
 }
 
 func registrationBody(token: String = sampleToken, started: Date? = nil, selection: Selection = prospect,
-                      trip: String = "091200_R..N") throws -> [UInt8] {
+                      trip: String = "091200_R..N", state: ContentState? = nil) throws -> [UInt8] {
     var json: [String: Any] = [
         "token": token.uppercased(),
         "environment": "sandbox",
@@ -27,6 +27,7 @@ func registrationBody(token: String = sampleToken, started: Date? = nil, selecti
         "alertKinds": [0, 1],
     ]
     if let started { json["started"] = started.timeIntervalSinceReferenceDate }
+    if let state { json["state"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(state)) }
     return Array(try JSONSerialization.data(withJSONObject: json))
 }
 
@@ -130,6 +131,28 @@ func text(_ response: TestResponse) -> String {
                 #expect(response.status == .noContent)
             }
             #expect(await store.count == 0)
+        }
+    }
+
+    @Test func keepsTheAppsStateForTheFirstPushToMoveOnFrom() async throws {
+        let state = ContentState(train: now, trip: "091200_R..N", isLive: true, terminal: "Forest Hills",
+                                 following: [now.addingTimeInterval(240)], notice: "Delays", updated: now - 60,
+                                 route: "R", followingRoutes: ["R"])
+        try await withApp { (client, store) async throws in
+            try await client.execute(uri: "/activities", method: .post, headers: bearer,
+                                     body: ByteBuffer(bytes: try registrationBody(state: state))) { response in
+                #expect(response.status == .noContent)
+            }
+            let saved = try #require(await store.registration(for: sampleToken))
+            #expect(saved.lastState == state)
+            #expect(saved.lastPush == nil)
+
+            // Without one, as from an app that doesn't send it, there's none
+            try await client.execute(uri: "/activities", method: .post, headers: bearer,
+                                     body: ByteBuffer(bytes: try registrationBody())) { response in
+                #expect(response.status == .noContent)
+            }
+            #expect(await store.registration(for: sampleToken)?.lastState == nil)
         }
     }
 

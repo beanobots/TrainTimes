@@ -118,6 +118,33 @@ func testRegistration(token: String = sampleToken, owner: String = "key", starte
         #expect(pusher.pushes.last?.state.trip == "c")
     }
 
+    @Test func registeredAgainMidwayTheFirstPushMovesOnFromTheAppsState() async throws {
+        // A new push token, after the train the countdown started on has gone
+        // and the Lock Screen has moved on by itself: a, two minutes away, is
+        // still yours, though from home you couldn't reach it
+        var registration = testRegistration()
+        registration.selection.walkMinutes = 5
+        registration.trip = "gone"
+        let time = { (minutes: Double) in now.addingTimeInterval(minutes * 60) }
+        registration.lastState = ContentState(train: time(-1), trip: "gone", isLive: true, terminal: nil,
+                                              following: [time(2), time(6)], notice: nil, updated: time(-6))
+        let store = try Store(directory: nil)
+        _ = try await store.upsert(registration, maxTotal: 10, maxPerOwner: 5)
+        let pusher = FakePusher()
+        await poller(store, pusher).pass(at: now)
+        let first = try #require(pusher.pushes.first)
+        #expect(first.state.trip == "a")
+        #expect(first.priority == 10)
+
+        // Without the app's state, the first you can reach from now
+        let fresh = try Store(directory: nil)
+        registration.lastState = nil
+        _ = try await fresh.upsert(registration, maxTotal: 10, maxPerOwner: 5)
+        let other = FakePusher()
+        await poller(fresh, other).pass(at: now)
+        #expect(other.pushes.first?.state.trip == "b")
+    }
+
     @Test func noTrainsKeepsTheLastTrainAndNamesTheAlert() async throws {
         let store = try Store(directory: nil)
         try await registered(store)

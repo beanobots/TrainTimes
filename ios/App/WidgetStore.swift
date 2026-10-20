@@ -22,10 +22,14 @@ final class WidgetStore {
     @ObservationIgnored private var unsaved = false
     /// Whether they change what a widget draws, so the widgets redraw.
     @ObservationIgnored private var redraws = false
+    /// Whether `start()` has run.
+    @ObservationIgnored private var started = false
 
     /// How long the changes pause before they're saved.
     private static let pause: Duration = .seconds(0.6)
 
+    /// Loads them. What's done just once is `start()`'s: SwiftUI can make a
+    /// view's store, and throw it away, each time it makes the view anew.
     init() {
         let stored: SavedWidgets
         do {
@@ -43,6 +47,13 @@ final class WidgetStore {
         }
         self.stored = stored
         saved = stored.validated()
+    }
+
+    /// What the app's store does as the app starts, once: only the first call
+    /// does anything.
+    func start() {
+        guard !started else { return }
+        started = true
         SharedStore.removeOldFiles()
         // Each time the app starts, whether or not the Widgets tab is opened,
         // so a widget set up like one removed doesn't open on its map or alert

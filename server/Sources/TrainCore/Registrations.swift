@@ -24,7 +24,10 @@ struct Registration: Sendable, Equatable {
     /// New with every registration of the token, so a poll that began before
     /// it was registered again doesn't record its push against the new one.
     var revision: UUID
+    /// The state last pushed; before the first push, the app's own, where it
+    /// sent it (`RegistrationRequest.state`).
     var lastState: ContentState? = nil
+    /// Nil before the first push.
     var lastPush: Date? = nil
 
     var settings: AppSettings {
@@ -69,6 +72,11 @@ struct RegistrationRequest: Decodable, Sendable {
     var started: Date?
     /// `AppSettings.alertKinds`, as the app encodes it: `[0, 1, 2, 3]`.
     var alertKinds: ServiceAlert.KnownKinds?
+    /// The countdown's state as the app last posted it, so that the first
+    /// push moves on from the train it shows as every later one does, not
+    /// from `trip`, which may have gone, taking off the walk again: a
+    /// countdown is registered again with each new push token, as it runs.
+    var state: ContentState?
 }
 
 /// What a poll did to a registration, saved in one transaction per poll.

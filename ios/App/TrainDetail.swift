@@ -81,7 +81,8 @@ struct TrainDetail: View {
         // The walking time is a favorite's own
         .onChange(of: selection) { _, selection in favorites.update(selection) }
         .refreshable { await loadBoard(includingNotices: true) }
-        // New times every 30 seconds, and alerts every 10 minutes; a new walking time needs none
+        // New times every 30 seconds, and alerts every 10 minutes, or with the times while
+        // counting down; a new walking time needs none
         .task(id: selection.trainID) {
             while !Task.isCancelled {
                 await loadBoard()
@@ -326,14 +327,15 @@ struct TrainDetail: View {
 
     /// Times already shown stay up while new ones load, and if they don't come,
     /// saying how old they are. Alerts and outages come with them only when
-    /// `includingNotices`, or when the ones shown are 10 minutes old; otherwise
-    /// those shown stay.
+    /// `includingNotices`, or when the ones shown are 10 minutes old, or while
+    /// this train's countdown is running, which gets them too and would
+    /// otherwise lose a newer notice to them; otherwise those shown stay.
     private func loadBoard(includingNotices: Bool = false) async {
         if board == nil { loadState = .loading }
         now = .now
         countdownTrain = TrainActivityController.currentTrain(for: selection)
         let trainID = selection.trainID
-        let fetchesNotices = includingNotices || board == nil
+        let fetchesNotices = includingNotices || board == nil || countdownTrain != nil
             || noticesFetched.map { !$0.isWithin(10 * 60, before: now) } ?? true
         do {
             var fetched = try await TrainService.board(for: selection, includingAlerts: fetchesNotices,

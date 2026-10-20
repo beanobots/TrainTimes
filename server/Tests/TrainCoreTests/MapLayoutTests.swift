@@ -174,6 +174,27 @@ import Testing
         #expect(layout.spoken == "Your R train is between 25 St and Prospect Av.")
     }
 
+    @Test func stayingOnYourTrainThereIsNoOtherToDraw() throws {
+        // Your train goes on from the change as one of the lines changed to:
+        // no second train, and no platforms shared with one on the way
+        let soon = connection(leaves: 0.5, wait: nil)
+        let stayOn = Connection(first: soon.first, arrival: soon.arrival, next: soon.arrival)
+        #expect(stayOn.staysOn)
+        let layout = try #require(TransferMapLayout(connection: stayOn, selection: prospect, now: now, maxRows: 5))
+        #expect(layout.rows.map(\.shared) == [true, false, false, false, false])
+        #expect(layout.nextRow == nil)
+        #expect(layout.nextNote == nil)
+        #expect(layout.spoken == "Your R train is between 25 St and Prospect Av.")
+
+        // Further off than the map shows, no note of where it is either
+        let later = connection(leaves: 3, wait: nil)
+        let off = try #require(TransferMapLayout(
+            connection: Connection(first: later.first, arrival: later.arrival, next: later.arrival),
+            selection: prospect, now: now, maxRows: 5))
+        #expect(off.nextRow == nil)
+        #expect(off.nextNote == nil)
+    }
+
     @Test func trackPlacesTheChangeAtTheRight() {
         let track = TrackGeometry(width: 300, stops: 5)
         #expect(track.x(0) == 288)

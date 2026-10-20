@@ -117,16 +117,20 @@ struct Change: Codable, Hashable, Sendable {
     /// Lines no longer at the station, or that end their run there going this
     /// change's way, are dropped, as are `selection`'s own; nil when none are
     /// left, or the station is gone, is `selection`'s, or is behind it (by
-    /// `order`, as for `isAhead(of:order:)`).
+    /// `order`, as for `isAhead(of:order:)`). One saved before there was a
+    /// way, to lines that leave from there only the other way from your
+    /// train's, as the G does at Court Sq for a Flushing-bound 7, goes that way.
     func validated(for selection: Selection,
                    order: (String) -> [String]? = StationDirectory.stops(onLine:)) -> Change? {
         guard let station, station.id != selection.station?.id, isAhead(of: selection, order: order) else { return nil }
         var change = self
         change.stationID = station.id
-        let direction = departureDirection(for: selection)
-        change.routes = Self.lines(at: station).filter { route in
-            routes.contains(route) && !selection.routes.contains(route)
-                && Self.leaves(route, from: station, going: direction)
+        let kept = Self.lines(at: station).filter { routes.contains($0) && !selection.routes.contains($0) }
+        let leaving = { (direction: Direction) in kept.filter { Self.leaves($0, from: station, going: direction) } }
+        change.routes = leaving(departureDirection(for: selection))
+        if direction == nil, change.routes.isEmpty {
+            change.routes = leaving(selection.direction.opposite)
+            change.direction = selection.direction.opposite
         }
         return change.routes.isEmpty ? nil : change
     }
@@ -134,7 +138,10 @@ struct Change: Codable, Hashable, Sendable {
     /// Whether `selection`'s train gets here after its own station, by the order
     /// its lines stop in: `order` has each line's stops from its northern end
     /// south, by bullet label (lines.json's). Where that isn't known, as for a
-    /// train rerouted off its line, it's taken to.
+    /// train rerouted off its line, it's taken to. A trip's N or S is the same
+    /// at every stop, so a train going S runs down the list all the way: an M
+    /// toward Middle Village is S at Marcy Av too, though the MTA names the
+    /// ways there for the J, whose S there goes the other way.
     func isAhead(of selection: Selection, order: (String) -> [String]? = StationDirectory.stops(onLine:)) -> Bool {
         guard let station, let origin = selection.station else { return true }
         var known = false

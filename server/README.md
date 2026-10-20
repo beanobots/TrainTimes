@@ -120,13 +120,20 @@ The body is JSON, written by a plain `JSONEncoder`:
                 "elevatorAlerts":false,"serviceAlerts":true,"walkMinutes":0},
   "trip": "<ContentState.trip>",
   "started": 814058304.3,
-  "alertKinds": [0, 1, 2, 3]
+  "alertKinds": [0, 1, 2, 3],
+  "state": {"train":814058484.0,"trip":"091200_R..N","isLive":true,
+            "following":[814058844.0],"updated":814058304.3}
 }
 ```
 
 `selection` is `JSONEncoder().encode(selection)`. `started` is optional, and
 so is `alertKinds` (`AppSettings.alertKinds`). `environment` is APNs's
-environment, not App Attest's.
+environment, not App Attest's. `state` is optional too: the countdown's
+`ContentState` as the app last posted it, `JSONEncoder().encode(state)`. With
+it, the first push moves on from the train the countdown shows, as every
+later push does; without it, the first push is to `trip`, or once that has
+gone, to the first train you can reach from now. A countdown registered again
+with a new push token is often past its first train, so send it then.
 
 Headers:
 
@@ -179,8 +186,8 @@ and the body is empty, so its hash is
    2. Encode the body.
    3. Build `clientData` and call `generateAssertion`.
    4. `POST /activities`.
-3. **When the push token changes**, do step 2 again with the new token, then
-   DELETE the old one.
+3. **When the push token changes**, do step 2 again with the new token and
+   the countdown's state as it is now, then DELETE the old one.
 4. **When the countdown ends:**
    1. Get a challenge.
    2. Sign `DELETE /activities/<token>` with an empty body.
@@ -207,7 +214,7 @@ curl -X DELETE "https://$HOST/activities/$TOKEN" -H "Authorization: Bearer $API_
 The database holds only what pushing needs:
 
 - **Each countdown:** its push token, station and lines, trip, start time and
-  last pushed state, and which key registered it. Its row is deleted when the
+  last state (pushed, or as the app sent it), and which key registered it. Its row is deleted when the
   countdown ends (8 h), is deleted by the app, or APNs says the token is gone.
 - **Each attest key:** its ID, public key, counter, environment, and when it
   was made and last used. It's deleted after 90 days unused, along with

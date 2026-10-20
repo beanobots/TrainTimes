@@ -204,7 +204,8 @@ enum HTTPRoutes {
                 // Not before what iOS would allow, nor in the future
                 started: min(max(registration.started ?? now, now - ActivityState.lifetime), now),
                 alertKinds: registration.alertKinds?.kinds,
-                revision: UUID()
+                revision: UUID(),
+                lastState: registration.state
             )
             switch try await services.store.upsert(entry, maxTotal: services.limits.maxRegistrations,
                                                    maxPerOwner: services.limits.maxRegistrationsPerKey) {

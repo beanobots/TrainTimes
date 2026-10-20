@@ -74,13 +74,17 @@ import Testing
         let saved = SavedWidgets(widgets: [
             SavedWidget(selection: prospect, change: Change(stationID: "D24", routes: ["R", "N"])),
             // The G only ends its run at Court Sq going the 7's way
-            SavedWidget(selection: seven, change: Change(stationID: "G22", routes: ["G"]),
+            SavedWidget(selection: seven, change: Change(stationID: "G22", routes: ["G"], direction: .north),
                         commute: CommutingHours(selection: seven, change: Change(stationID: "G22", routes: ["G"],
                                                                                    direction: .south))),
+            // Saved before there was a way, it goes the way the G does leave
+            SavedWidget(selection: seven, change: Change(stationID: "G22", routes: ["G"])),
         ]).validated()
         #expect(saved.widgets[0].change?.routes == ["N"])
         #expect(saved.widgets[1].change == nil)
         #expect(saved.widgets[1].commute?.change?.routes == ["G"])
+        #expect(saved.widgets[2].change?.routes == ["G"])
+        #expect(saved.widgets[2].change?.direction == .south)
     }
 
     @Test func commutingHoursShowTheirTrainAndChange() {

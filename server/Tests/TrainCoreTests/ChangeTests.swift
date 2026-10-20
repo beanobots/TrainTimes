@@ -207,6 +207,37 @@ import Testing
         #expect(j.isAllAcross(from: m))
     }
 
+    @Test func theFeedsNameEachTripsWayAlongItsWholeLine() {
+        // As the live feeds have them, an M toward Middle Village calls at D21S,
+        // M18S, M16S and on to M01S, and one toward Forest Hills at M16N, M18N
+        // and D21N: its own way all along, though the MTA names the ways at
+        // Delancey St and Marcy Av for the J, whose S there is toward Manhattan
+        let toMiddleVillage = Selection(stationID: "M16", routes: ["M"], direction: .south)
+        #expect(Change(stationID: "M11", routes: ["J", "Z"]).validated(for: toMiddleVillage)?.routes == ["J", "Z"])
+        #expect(Change(stationID: "M08", routes: ["L"]).validated(for: toMiddleVillage)?.routes == ["L"])
+        #expect(Change(stationID: "M18", routes: ["J"]).validated(for: toMiddleVillage) == nil)
+        let toForestHills = Selection(stationID: "M16", routes: ["M"], direction: .north)
+        #expect(Change(stationID: "M18", routes: ["J", "Z"]).validated(for: toForestHills)?.routes == ["J", "Z"])
+        #expect(Change(stationID: "D21", routes: ["B", "D", "F"]).validated(for: toForestHills)?.routes
+            == ["B", "D", "F"])
+        #expect(Change(stationID: "M11", routes: ["J", "Z"]).validated(for: toForestHills) == nil)
+        // A G toward Church Av is S at Hoyt-Schermerhorn Sts too
+        let g = Selection(stationID: "A42", routes: ["G"], direction: .south)
+        #expect(Change(stationID: "F27", routes: ["F"]).validated(for: g)?.routes == ["F"])
+        #expect(Change(stationID: "G29", routes: ["L"]).validated(for: g) == nil)
+
+        // So an M from W 4 St toward Brooklyn is found at Delancey St-Essex St by its S
+        let fromW4 = Selection(stationID: "D20", routes: ["M"], direction: .south)
+        let jz = Change(stationID: "M18", routes: ["J", "Z"], direction: .north)
+        #expect(jz.arrivalStops(for: fromW4) == ["M18S"])
+        let connections = jz.connections(
+            for: [train("M", 2, trip: "m1", at: "D20S", lastStop: "M01S")],
+            atChange: [train("M", 6, trip: "m1", at: "M18S", lastStop: "M01S")],
+            departures: [train("J", 10, trip: "j1", at: "M18N", lastStop: "G05N")],
+            selection: fromW4)
+        #expect(connections.map { $0.next?.trip } == ["j1"])
+    }
+
     @Test func aLineThatOnlyEndsHereYourWayGoesTheOtherWayOrNotAtAll() throws {
         // A Flushing-bound 7 at Court Sq: the G only leaves toward Brooklyn
         let seven = Selection(stationID: "720", routes: ["7"], direction: .north)
@@ -216,18 +247,28 @@ import Testing
         #expect(Change.leaves("G", from: station, going: .south))
         let g = Change(stationID: "G22", routes: ["G"])
         #expect(g.suggestedDirection(for: seven) == .south)
-        // Saved going the 7's way, it's paired with Gs ending their run, so it's dropped
-        #expect(g.validated(for: seven) == nil)
+        // Saved going the 7's way, it would be paired with Gs ending their run, so it's dropped
+        #expect(Change(stationID: "G22", routes: ["G"], direction: .north).validated(for: seven) == nil)
         var toBrooklyn = g
         toBrooklyn.direction = .south
         #expect(toBrooklyn.validated(for: seven)?.routes == ["G"])
         #expect(toBrooklyn.departureStops(for: seven) == ["G22S"])
+        // Saved before there was a way, it goes the one way the G leaves
+        #expect(g.validated(for: seven) == toBrooklyn.validated(for: seven))
 
         // The 42 St shuttle only leaves Times Sq for Grand Central
         let one = Selection(stationID: "128", routes: ["1"], direction: .north)
         let shuttle = Change(stationID: "127", routes: ["GS"])
         #expect(shuttle.suggestedDirection(for: one) == .south)
-        #expect(shuttle.validated(for: one) == nil)
+        #expect(Change(stationID: "127", routes: ["GS"], direction: .north).validated(for: one) == nil)
+        let repointed = try #require(shuttle.validated(for: one))
+        #expect(repointed.routes == ["GS"])
+        #expect(repointed.direction == .south)
+
+        // Where some of the lines leave your train's way, the rest are just dropped
+        let gAndSeven = try #require(Change(stationID: "G22", routes: ["G", "E"]).validated(for: seven))
+        #expect(gAndSeven.routes == ["E"])
+        #expect(gAndSeven.direction == nil)
     }
 
     @Test func aChangeCanBeToAStationJoinedToYours() throws {

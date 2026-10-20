@@ -43,6 +43,24 @@ import Testing
         #expect(state.following.count == 2)
     }
 
+    @Test func startsOnATrainYouReachAsItGetsInNotOneYoudCatchOnlyWhileItsHeld() throws {
+        // Due in 3 minutes and held till 6: with a 5-minute walk you'd still
+        // catch it, but the countdown would move on from it as it got in
+        var selection = prospect
+        selection.walkMinutes = 5
+        var held = arrival(3, trip: "held")
+        held.departure = minutes(6)
+        let board = Board(trains: [held, arrival(12, trip: "next"), arrival(20, trip: "later")], alerts: [], outages: [])
+        #expect(selection.catchable(board.trains, now: now).first?.trip == "held")
+        let state = try #require(ContentState(for: selection, board: board, settings: all, now: now,
+                                              following: nil, after: nil))
+        #expect(state.trip == "next")
+        #expect(state.train == minutes(12))
+        // So getting there at 5 minutes, it and the Lock Screen still agree
+        #expect(state.movedOn(at: minutes(5)).train == minutes(12))
+        #expect(state.refreshed(for: selection, board: board, settings: all, now: minutes(5)).trip == "next")
+    }
+
     @Test func followsTheSameTripEvenIfItCantBeCaughtAnyMore() throws {
         var selection = prospect
         selection.walkMinutes = 5
