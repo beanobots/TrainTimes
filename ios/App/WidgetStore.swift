@@ -32,6 +32,9 @@ final class WidgetStore {
         self.stored = stored
         saved = stored.validated()
         SharedStore.removeOldFiles()
+        // Each time the app starts, whether or not the Widgets tab is opened,
+        // so a widget set up like one removed doesn't open on its map or alert
+        Task { await countPlaced() }
     }
 
     var defaultWidget: SavedWidget { saved.defaultWidget }

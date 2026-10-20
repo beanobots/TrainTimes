@@ -8,7 +8,6 @@ struct TrainDetail: View {
     @Environment(FavoritesStore.self) private var favorites
     @Environment(SettingsStore.self) private var settings
     @Environment(\.accessibilityDifferentiateWithoutColor) private var withoutColor
-    @Environment(\.openURL) private var openURL
     @State private var selection: Selection
     @State private var board: Board?
     @State private var loadState = LoadState.loading
@@ -289,10 +288,10 @@ struct TrainDetail: View {
                 .frame(height: 240)
                 .listRowInsets(EdgeInsets())
             Button {
-                let place = walkingDestination(station)
-                if let url = URL(string: "https://maps.apple.com/?daddr=\(place.latitude),\(place.longitude)&dirflg=w") {
-                    openURL(url)
-                }
+                // Named, so Maps says the station rather than the street address
+                let item = MKMapItem(placemark: MKPlacemark(coordinate: walkingDestination(station)))
+                item.name = station.name
+                item.openInMaps(launchOptions: [MKLaunchOptionsDirectionsModeKey: MKLaunchOptionsDirectionsModeWalking])
             } label: {
                 Label("Walking directions in Maps", systemImage: "figure.walk")
             }
