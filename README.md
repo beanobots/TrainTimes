@@ -138,8 +138,8 @@ There are two versions:
 
 - `ios/`: a native app and widget. You pick any station and line in the app, and
   the widget moves on to the next train by itself and has refresh and walk
-  buttons (and, on the medium widget, the map button). Each lights up in the
-  line's colour: ↻ as new times come in, the others while they're on. It's built
+  buttons (and, on the medium widget, the map button). Each flashes in the
+  line's colour when you tap it. It's built
   on GitHub's Mac servers, so you don't need a Mac.
 - `scriptable/`: a script for the free Scriptable app, set up for the R train at
   Prospect Av. For another stop or line, change the settings at the top: the
