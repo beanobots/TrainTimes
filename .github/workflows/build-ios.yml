@@ -35,24 +35,6 @@ env:
   BUILD_URL: https://github.com/${{ github.repository }}/releases/download/v1.0.${{ github.run_number }}
 
 jobs:
-  # Temporary: build-server.yml can't run until it's on main
-  server:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Check the server's copies of the station lists
-        run: |
-          cmp ios/Shared/stations.json server/Sources/TrainResources/Resources/stations.json
-          cmp ios/Shared/equipment.json server/Sources/TrainResources/Resources/equipment.json
-          cmp ios/Shared/lines.json server/Sources/TrainResources/Resources/lines.json
-
-      - name: Build the server
-        run: swift build --package-path server
-
-      - name: Test the server
-        run: swift test --package-path server
-
   build:
     runs-on: macos-latest
     steps:
