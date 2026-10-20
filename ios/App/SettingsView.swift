@@ -41,11 +41,12 @@ struct SettingsView: View {
     @Environment(WidgetStore.self) private var widgets
     @Environment(\.accessibilityDifferentiateWithoutColor) private var withoutColor
 
-    /// Saved widgets at stations with elevators that don't mention their outages.
+    /// Saved widgets that don't mention elevator outages, though elevators
+    /// serve their platforms: not one whose station's elevators all go to
+    /// other platforms, which has none to mention.
     private var widgetsWithoutElevators: [SavedWidget] {
         widgets.saved.widgets.filter { widget in
-            guard let station = widget.selection.station else { return false }
-            return !widget.selection.elevatorAlerts && EquipmentDirectory.hasEquipment(atComplex: station.complex)
+            !widget.selection.elevatorAlerts && EquipmentDirectory.hasEquipment(serving: widget.selection.platforms)
         }
     }
 

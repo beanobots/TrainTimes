@@ -11,7 +11,10 @@ struct Change: Codable, Hashable, Sendable {
     var routes: [String]
     /// Which way they go; nil, as for a change saved before there was a choice,
     /// for your train's way. The feeds' N and S are each line's own, so from
-    /// the L's N at Broadway Junction, toward Manhattan, it's the J's S.
+    /// the L's N at Broadway Junction, toward Manhattan, it's the J's S. Lines
+    /// that run opposite ways on one platform go together as a train's do
+    /// (`Selection.direction`): toward Brooklyn at Delancey St-Essex St, the J's
+    /// N and the M's S.
     var direction: Direction?
     /// The longest wait, in minutes, that the large widget highlights.
     var quickMinutes: Int
@@ -53,14 +56,30 @@ struct Change: Codable, Hashable, Sendable {
         direction ?? selection.direction
     }
 
+    /// The feeds' N or S for trains of `route`, one of the lines changed to,
+    /// going their way from `selection`'s train: `departureDirection(for:)`,
+    /// but the other where the line runs the other way to another changed to
+    /// on its platform (`Platform.direction(_:of:with:)`).
+    func departureDirection(of route: String, for selection: Selection) -> Direction {
+        let way = departureDirection(for: selection)
+        return departurePlatforms.first { $0.routes.contains(route) }?.direction(way, of: route, with: routes) ?? way
+    }
+
     /// The station's platforms that `selection`'s train stops at.
     private func arrivalPlatforms(for selection: Selection) -> [Platform] {
         station?.platforms(serving: selection.routes) ?? []
     }
 
-    /// Where `selection`'s train calls here, as the feeds name it: "R31N".
+    /// Where `selection`'s train calls here, as the feeds name it: "R31N". Each
+    /// of its lines goes by its own N or S all along (`Selection.direction(of:)`),
+    /// so from Marcy Av toward Manhattan, the J's "M18S" and the M's "M18N".
     func arrivalStops(for selection: Selection) -> [String] {
-        arrivalPlatforms(for: selection).map { $0.id + selection.direction.rawValue }
+        arrivalPlatforms(for: selection).flatMap { platform in
+            let ways = selection.routes.filter(platform.routes.contains).map { selection.direction(of: $0) }
+            return [selection.direction, selection.direction.opposite]
+                .filter { $0 == selection.direction || ways.contains($0) }
+                .map { platform.id + $0.rawValue }
+        }
     }
 
     /// The platforms of the lines changed to, here or at a station joined to it.
@@ -73,7 +92,17 @@ struct Change: Codable, Hashable, Sendable {
     /// the L at Broadway Junction toward Manhattan, the J's "J27S".
     func departureStops(for selection: Selection) -> [String] {
         let direction = departureDirection(for: selection)
-        return departurePlatforms.map { $0.id + direction.rawValue }
+        return departurePlatforms.flatMap { $0.stops(of: routes, going: direction) }
+    }
+
+    /// Whether `train`, here, is one of the lines changed to going their way,
+    /// each by its own N or S (`departureDirection(of:for:)`): toward Brooklyn
+    /// at Delancey St-Essex St, a J at "M18N" or an M at "M18S".
+    func departs(_ train: Arrival, for selection: Selection) -> Bool {
+        let way = departureDirection(for: selection)
+        return routes.contains(train.route) && departurePlatforms.contains { platform in
+            train.stop == platform.id + platform.direction(way, of: train.route, with: routes).rawValue
+        }
     }
 
     /// Where the lines changed to go: "Manhattan".
@@ -81,13 +110,29 @@ struct Change: Codable, Hashable, Sendable {
         Station.directionLabel(departureDirection(for: selection), on: departurePlatforms, routes: routes)
     }
 
-    /// Whether `route` stops, going `selection`'s train's way, at every platform
-    /// the train does here, so changing to it is across the platform whichever
-    /// of its lines you're on.
+    /// Whether `route` stops, going this change's way, at every platform the
+    /// train does here, on the side it does (`Platform.side(of:going:)`), so
+    /// changing to it is across the platform whichever of its lines you're on.
     func isAcross(_ route: String, from selection: Selection) -> Bool {
         let platforms = arrivalPlatforms(for: selection)
-        return departureDirection(for: selection) == selection.direction && !platforms.isEmpty
-            && platforms.allSatisfy { $0.routes.contains(route) }
+        let way = departureDirection(for: selection)
+        return !platforms.isEmpty && platforms.allSatisfy { platform in
+            platform.routes.contains(route) && Self.isAcross(routes, going: way, at: platform, from: selection)
+        }
+    }
+
+    /// Whether `selection`'s train stops at `platform` on the side the lines of
+    /// `routes` there do going `direction` together (`Platform.direction(_:of:with:)`),
+    /// each of its own lines going its own way: across the platform from them.
+    /// Not where it or none of them stop. An M toward Manhattan is across from
+    /// a J toward Broad St at Delancey St-Essex St, though one is N and the other S.
+    static func isAcross(_ routes: [String], going direction: Direction, at platform: Platform,
+                         from selection: Selection) -> Bool {
+        let theirs = routes.filter(platform.routes.contains)
+        let yours = selection.routes.filter(platform.routes.contains)
+        let sides = Set(theirs.map { platform.side(of: $0, going: platform.direction(direction, of: $0, with: routes)) }
+                        + yours.map { platform.side(of: $0, going: selection.direction(of: $0)) })
+        return !theirs.isEmpty && !yours.isEmpty && sides.count == 1
     }
 
     /// Whether every line changed to is across the platform.
@@ -103,9 +148,17 @@ struct Change: Codable, Hashable, Sendable {
     }
 
     /// Whether `departure`, a train changed to, stops across the platform from
-    /// `arrival`, your train here: on the same side of the same platform.
+    /// `arrival`, your train here: on the same side of the same platform
+    /// (`Platform.side(of:going:)`), which is under the other N or S where one
+    /// line runs the other way to the other there, as an M going N and a J
+    /// going S do at Delancey St-Essex St.
     func isAcross(from arrival: Arrival, to departure: Arrival) -> Bool {
-        arrival.stop == departure.stop
+        let id = String(departure.stop.dropLast())
+        guard String(arrival.stop.dropLast()) == id, let platform = departurePlatforms.first(where: { $0.id == id }),
+              let arriving = Direction(ofStop: arrival.stop), let leaving = Direction(ofStop: departure.stop) else {
+            return arrival.stop == departure.stop
+        }
+        return platform.side(of: arrival.route, going: arriving) == platform.side(of: departure.route, going: leaving)
     }
 
     /// How long it takes to get from `arrival`, your train here, to `departure`,
@@ -126,7 +179,9 @@ struct Change: Codable, Hashable, Sendable {
         var change = self
         change.stationID = station.id
         let kept = Self.lines(at: station).filter { routes.contains($0) && !selection.routes.contains($0) }
-        let leaving = { (direction: Direction) in kept.filter { Self.leaves($0, from: station, going: direction) } }
+        let leaving = { (direction: Direction) in
+            kept.filter { Self.leaves($0, from: station, going: direction, with: kept) }
+        }
         change.routes = leaving(departureDirection(for: selection))
         if direction == nil, change.routes.isEmpty {
             change.routes = leaving(selection.direction.opposite)
@@ -139,21 +194,22 @@ struct Change: Codable, Hashable, Sendable {
     /// its lines stop in: `order` has each line's stops from its northern end
     /// south, by bullet label (lines.json's). Where that isn't known, as for a
     /// train rerouted off its line, it's taken to. A trip's N or S is the same
-    /// at every stop, so a train going S runs down the list all the way: an M
-    /// toward Middle Village is S at Marcy Av too, though the MTA names the
-    /// ways there for the J, whose S there goes the other way.
+    /// at every stop, so a train going S runs down the list all the way, each
+    /// line by its own (`Selection.direction(of:)`): an M toward Middle Village
+    /// is S at Marcy Av too, though the MTA names the ways there for the J,
+    /// whose S there goes the other way.
     func isAhead(of selection: Selection, order: (String) -> [String]? = StationDirectory.stops(onLine:)) -> Bool {
         guard let station, let origin = selection.station else { return true }
         var known = false
-        for label in selection.routes.map({ LineStyle.of($0).label }) {
-            guard let stops = order(label) else { continue }
+        for route in selection.routes {
+            guard let stops = order(LineStyle.of(route).label) else { continue }
             let position = Dictionary(stops.enumerated().map { ($0.element, $0.offset) }, uniquingKeysWith: min)
             // A station comes where the first of the train's platforms there does
             let place = { (station: Station) in
                 station.platforms(serving: selection.routes).compactMap { position[$0.id] }.min()
             }
             guard let here = place(station), let start = place(origin) else { continue }
-            if selection.direction == .north ? here < start : here > start { return true }
+            if selection.direction(of: route) == .north ? here < start : here > start { return true }
             known = true
         }
         return !known
@@ -167,12 +223,12 @@ struct Change: Codable, Hashable, Sendable {
     func suggestedDirection(for selection: Selection) -> Direction {
         guard let station else { return selection.direction }
         let ways = [selection.direction, selection.direction.opposite].filter { way in
-            routes.contains { Self.leaves($0, from: station, going: way) }
+            routes.contains { Self.leaves($0, from: station, going: way, with: routes) }
         }
         guard ways.count > 1 else { return ways.first ?? selection.direction }
         let arriving = arrivalPlatforms(for: selection)
-        let onward = Self.places(selection.direction, on: arriving, for: selection.routes)
-        let back = Self.places(selection.direction.opposite, on: arriving, for: selection.routes)
+        let onward = Self.places(of: selection, on: arriving)
+        let back = Self.places(of: selection, on: arriving, back: true)
         let platforms = departurePlatforms
         let named = { (way: Direction) in Self.places(way, on: platforms, for: routes) }
         return ways.first { !named($0).isDisjoint(with: onward) }
@@ -184,7 +240,7 @@ struct Change: Codable, Hashable, Sendable {
     /// where `selection`'s train goes on to from here, so it's plainly the way
     /// to go, as from the R to the D at Atlantic Av, both toward Manhattan.
     func goesYourWay(from selection: Selection) -> Bool {
-        let onward = Self.places(selection.direction, on: arrivalPlatforms(for: selection), for: selection.routes)
+        let onward = Self.places(of: selection, on: arrivalPlatforms(for: selection))
         let names = Station.directionNames(departureDirection(for: selection), on: departurePlatforms, routes: routes)
         return !names.isEmpty && names.allSatisfy { !Self.places([$0], for: routes).isDisjoint(with: onward) }
     }
@@ -193,6 +249,19 @@ struct Change: Codable, Hashable, Sendable {
     /// `direction` from `platforms` list for them (`places(_:for:)`).
     private static func places(_ direction: Direction, on platforms: [Platform], for routes: [String]) -> Set<String> {
         places(Station.directionNames(direction, on: platforms, routes: routes), for: routes)
+    }
+
+    /// The places the MTA's names for where `selection`'s train goes on to
+    /// from `platforms`, or with `back` where it comes from, list for its
+    /// lines: each line's name for its own way (`Selection.direction(of:)`).
+    private static func places(of selection: Selection, on platforms: [Platform], back: Bool = false) -> Set<String> {
+        let names = platforms.flatMap { platform in
+            selection.routes.filter(platform.routes.contains).map { route in
+                let way = selection.direction(of: route)
+                return platform.directionName(back ? way.opposite : way, of: route)
+            }
+        }
+        return places(names, for: selection.routes)
     }
 
     /// The places directions' names list for the lines of `routes`: "Uptown &
@@ -222,25 +291,31 @@ struct Change: Codable, Hashable, Sendable {
     }
 
     /// The lines you can change to at `station` from `selection`'s train: those
-    /// across the platform from it, and the rest, on other platforms or at a
-    /// station joined to it. Lines that leave from there neither way are left out.
+    /// across the platform from it, going the way that is, and the rest, on
+    /// other platforms or at a station joined to it. Lines that leave from
+    /// there neither way are left out.
     static func lines(at station: Station, from selection: Selection) -> (across: [String], others: [String]) {
         let all = Self.lines(at: station).filter { route in
             !selection.routes.contains(route) && Direction.allCases.contains { leaves(route, from: station, going: $0) }
         }
-        let here = Change(stationID: station.id, routes: all)
-        let across = all.filter {
-            leaves($0, from: station, going: selection.direction) && here.isAcross($0, from: selection)
+        let platforms = station.platforms(serving: selection.routes)
+        let across = all.filter { route in
+            !platforms.isEmpty && Direction.allCases.contains { way in
+                leaves(route, from: station, going: way)
+                    && platforms.allSatisfy { $0.routes.contains(route) && isAcross([route], going: way, at: $0, from: selection) }
+            }
         }
         return (across, all.filter { !across.contains($0) })
     }
 
     /// Whether trains of `route` leave `station`, or a station joined to it,
-    /// going `direction`, rather than end their run there (by day).
-    static func leaves(_ route: String, from station: Station, going direction: Direction) -> Bool {
+    /// going `direction` with the lines of `routes` (`Platform.direction(_:of:with:)`),
+    /// rather than end their run there (by day).
+    static func leaves(_ route: String, from station: Station, going direction: Direction, with routes: [String] = []) -> Bool {
         StationDirectory.stations(inComplexOf: station).contains { stop in
-            stop.routes.contains(route) && !stop.directionName(direction, of: route).isEmpty
-                && !StationDirectory.line(route, endsAt: stop, going: direction)
+            let way = stop.direction(direction, of: route, with: routes)
+            return stop.routes.contains(route) && !stop.directionName(way, of: route).isEmpty
+                && !StationDirectory.line(route, endsAt: stop, going: way)
         }
     }
 
@@ -259,11 +334,10 @@ struct Change: Codable, Hashable, Sendable {
         for arrival in atChange where !arrival.trip.isEmpty && byTrip[arrival.trip] == nil {
             byTrip[arrival.trip] = arrival
         }
-        let leaving = Set(departureStops(for: selection))
         return trains.compactMap { train in
             guard !train.trip.isEmpty, let arrival = byTrip[train.trip], arrival.time >= train.time else { return nil }
             // An N running local on the R goes on from the change as an N: you stay on it
-            if routes.contains(train.route) && leaving.contains(arrival.stop) && !arrival.endsHere {
+            if departs(arrival, for: selection) && !arrival.endsHere {
                 return Connection(first: train, arrival: arrival, next: arrival)
             }
             let next = departures.first { departure in

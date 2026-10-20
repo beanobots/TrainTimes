@@ -208,6 +208,99 @@ import Testing
         let m = Selection(stationID: "M16", routes: ["M"], direction: .north)
         #expect(m.heading == "Manhattan")
         #expect(Change(stationID: "M18", routes: ["J"]).suggestedDirection(for: m) == .south)
+        // and is across the platform from it, though one is N and the other S
+        #expect(Change(stationID: "M18", routes: ["J"], direction: .south).isAllAcross(from: m))
+    }
+
+    @Test func aLineRunningTheOtherWayToYoursCanStillBeAcrossThePlatform() throws {
+        // An M from Marcy Av toward Manhattan is N, and the J and Z it meets at
+        // Delancey St-Essex St going its way are S, on the same side
+        let m = Selection(stationID: "M16", routes: ["M"], direction: .north)
+        let delancey = try #require(StationDirectory.station(id: "M18"))
+        let lines = Change.lines(at: delancey, from: m)
+        #expect(lines.across == ["J", "Z"])
+        #expect(lines.others == ["F"])
+        var jz = Change(stationID: "M18", routes: lines.across)
+        #expect(jz.suggestedDirection(for: m) == .south)
+        // Toward Jamaica, they're on the other side
+        #expect(!jz.isAllAcross(from: m))
+        jz.direction = .south
+        #expect(jz.isAllAcross(from: m))
+        #expect(jz.arrivalStops(for: m) == ["M18N"])
+        #expect(jz.departureStops(for: m) == ["M18S"])
+        // So the J is no walk away
+        let connections = jz.connections(
+            for: [train("M", 2, trip: "m1", at: "M16N", lastStop: "G08N")],
+            atChange: [train("M", 6, trip: "m1", at: "M18N", lastStop: "G08N")],
+            departures: [train("J", 7, trip: "j1", at: "M18S", lastStop: "M23S")],
+            selection: m)
+        #expect(connections.first?.next?.trip == "j1")
+        #expect(connections.first?.walk == 0)
+        #expect(connections.first?.waitLabel == "1 min")
+        let arriving = train("M", 6, trip: "m1", at: "M18N", lastStop: "G08N")
+        #expect(!jz.isAcross(from: arriving, to: train("J", 7, trip: "j2", at: "M18N", lastStop: "G05N")))
+
+        // A G toward Church Av is S, and at Hoyt-Schermerhorn Sts it's across
+        // the platform from the A and C toward Manhattan, N
+        let g = Selection(stationID: "G36", routes: ["G"], direction: .south)
+        let hoyt = try #require(StationDirectory.station(id: "A42"))
+        #expect(Change.lines(at: hoyt, from: g).across == ["A", "C"])
+        #expect(Change(stationID: "A42", routes: ["A", "C"]).suggestedDirection(for: g) == .north)
+        let ac = Change(stationID: "A42", routes: ["A", "C"], direction: .north)
+        #expect(ac.isAllAcross(from: g))
+        #expect(ac.isExpress(for: g))
+        #expect(ac.heading(for: g) == "Manhattan - Church Av")
+        #expect(!Change(stationID: "A42", routes: ["A", "C"], direction: .south).isAllAcross(from: g))
+    }
+
+    @Test func linesRunningOppositeWaysOnAPlatformGoTogether() throws {
+        // From the downtown F at Delancey St-Essex St, the J, Z and M toward
+        // Brooklyn: the J and Z N, and the M S
+        let downtownF = Selection(stationID: "F14", routes: ["F"], direction: .south)
+        let jzm = Change(stationID: "F15", routes: ["J", "Z", "M"])
+        #expect(jzm.suggestedDirection(for: downtownF) == .north)
+        let toBrooklyn = Change(stationID: "F15", routes: ["J", "Z", "M"], direction: .north)
+        #expect(toBrooklyn.heading(for: downtownF) == "Brooklyn")
+        #expect(toBrooklyn.goesYourWay(from: downtownF))
+        #expect(toBrooklyn.departureStops(for: downtownF) == ["M18N", "M18S"])
+        #expect(toBrooklyn.departureDirection(of: "M", for: downtownF) == .south)
+        #expect(toBrooklyn.departureDirection(of: "J", for: downtownF) == .north)
+        #expect(toBrooklyn.departs(train("J", 5, trip: "j1", at: "M18N", lastStop: "G05N"), for: downtownF))
+        #expect(toBrooklyn.departs(train("M", 6, trip: "m1", at: "M18S", lastStop: "M01S"), for: downtownF))
+        #expect(!toBrooklyn.departs(train("M", 7, trip: "m2", at: "M18N", lastStop: "G08N"), for: downtownF))
+        #expect(!toBrooklyn.departs(train("J", 8, trip: "j2", at: "M18S", lastStop: "M23S"), for: downtownF))
+        // The M alone goes by its own way
+        #expect(Change(stationID: "F15", routes: ["M"], direction: .north).departureStops(for: downtownF) == ["M18N"])
+        #expect(Change(stationID: "F15", routes: ["M"]).suggestedDirection(for: downtownF) == .south)
+
+        // From the A toward Brooklyn at Jay St-MetroTech, the C and G across the
+        // platform at Hoyt-Schermerhorn Sts: the C S, and the G N, toward Court Sq
+        let a = Selection(stationID: "A41", routes: ["A"], direction: .south)
+        let hoyt = try #require(StationDirectory.station(id: "A42"))
+        #expect(Change.lines(at: hoyt, from: a).across == ["C", "G"])
+        let cg = Change(stationID: "A42", routes: ["C", "G"])
+        #expect(cg.suggestedDirection(for: a) == .south)
+        #expect(cg.isAllAcross(from: a))
+        #expect(cg.heading(for: a) == "Euclid Av & Queens - Court Sq")
+        #expect(cg.departureStops(for: a) == ["A42S", "A42N"])
+        #expect(cg.validated(for: a) == cg)
+    }
+
+    @Test func aTrainOfLinesRunningOppositeWaysFindsChangesAlongEachLine() {
+        // The J, Z and M from Marcy Av toward Manhattan: the M, N, goes on to
+        // Broadway-Lafayette St, and the J and Z, S, to Fulton St
+        let jzm = Selection(stationID: "M16", routes: ["J", "Z", "M"], direction: .south)
+        #expect(Change(stationID: "D21", routes: ["B", "D", "F"]).validated(for: jzm)?.routes == ["B", "D", "F"])
+        #expect(Change(stationID: "M22", routes: ["A", "C"]).validated(for: jzm)?.routes == ["A", "C"])
+        // Myrtle-Wyckoff Avs, where the M comes from, is behind it
+        #expect(Change(stationID: "M08", routes: ["L"]).validated(for: jzm) == nil)
+        // Each line arrives by its own way
+        #expect(Change(stationID: "M18", routes: ["F"]).arrivalStops(for: jzm) == ["M18S", "M18N"])
+        // Toward Jamaica and Middle Village, the other way round
+        var away = jzm
+        away.direction = .north
+        #expect(Change(stationID: "D21", routes: ["B", "D", "F"]).validated(for: away) == nil)
+        #expect(Change(stationID: "M08", routes: ["L"]).validated(for: away)?.routes == ["L"])
     }
 
     @Test func theFeedsNameEachTripsWayAlongItsWholeLine() {

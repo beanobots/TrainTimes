@@ -165,7 +165,7 @@ enum TrainService {
         let trains = Self.trains(for: selection, in: arrivals.filter { origin.contains($0.stop) }, now: now)
         // Your train can end at the change, but the one changed to has to leave from it
         let departures = arrivals
-            .filter { leaving.contains($0.stop) && change.routes.contains($0.route) && !$0.endsHere && $0.leaves > now }
+            .filter { change.departs($0, for: selection) && !$0.endsHere && $0.leaves > now }
             .oncePerTrip()
         let connections = change.connections(for: trains, atChange: arrivals.filter { arriving.contains($0.stop) },
                                              departures: departures, selection: selection)
@@ -178,12 +178,20 @@ enum TrainService {
     /// lists the most of them. Empty when none is running.
     static func stations(after selection: Selection) async throws -> [Station] {
         let feeds = Lines.feedURLs(sharingTracksWith: selection.routes)
-        let origin = Set(selection.stopIDs)
-        let routes = Set(selection.routes)
+        // Each line from where it calls going its own way: toward Manhattan
+        // from Marcy Av, the J from M16S and the M from M16N
+        var ways: [(origin: Set<String>, routes: Set<String>)] = []
+        for way in [selection.direction, selection.direction.opposite] {
+            let routes = selection.routes.filter { selection.direction(of: $0) == way }
+            let platforms = selection.station?.platforms(serving: routes) ?? []
+            if !routes.isEmpty { ways.append((Set(platforms.map { $0.id + way.rawValue }), Set(routes))) }
+        }
         var longest: [String] = []
         for feed in try await data(from: feeds.own) {
-            for stops in try SubwayFeed.stops(after: origin, on: routes, in: feed) where stops.count > longest.count {
-                longest = stops
+            for way in ways {
+                for stops in try SubwayFeed.stops(after: way.origin, on: way.routes, in: feed) where stops.count > longest.count {
+                    longest = stops
+                }
             }
         }
         // A station once, where the trip first calls at it, and never yours

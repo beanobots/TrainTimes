@@ -253,7 +253,7 @@ struct TrainDetail: View {
             } else if let platform = platforms.first {
                 Label(platform.accessibility ?? "No step-free access", systemImage: stepFreeSymbol(platform))
             }
-            if EquipmentDirectory.hasEquipment(atComplex: station.complex) {
+            if EquipmentDirectory.hasEquipment(serving: platforms) {
                 let outages = board?.outages ?? []
                 if loadState == .loaded, let board {
                     if board.outages == nil {
@@ -267,6 +267,9 @@ struct TrainDetail: View {
                 ForEach(outages) { outage in
                     OutageRow(outage: outage)
                 }
+            } else if EquipmentDirectory.hasEquipment(atComplex: station.complex) {
+                // The station's go to other platforms: Canal St's to the 6's, not the R's
+                Text("No elevators or escalators for the \(Lines.list(selection.routes))").foregroundStyle(.secondary)
             } else {
                 Text("No elevators or escalators at this station").foregroundStyle(.secondary)
             }

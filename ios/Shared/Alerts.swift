@@ -154,13 +154,16 @@ enum AlertsFeed {
     /// those whose trains from there are changed further along.
     static func alerts(for selection: Selection, in entries: [Entry], now: Date = Date()) -> [ServiceAlert] {
         let time = now.timeIntervalSince1970
-        let direction = selection.direction == .north ? 0 : 1
-        // An alert names a platform by its id, or by its id plus N or S
-        let stops = Set(selection.platforms.map(\.id) + selection.stopIDs)
+        let platforms = selection.platforms.map(\.id)
         func matches(_ informed: Informed) -> Bool {
-            guard let route = informed.route_id, selection.routes.contains(Lines.normalized(route)) else { return false }
-            if let stop = informed.stop_id, !stops.contains(stop) { return false }
-            if let informedDirection = informed.direction_id, informedDirection != direction { return false }
+            guard let route = informed.route_id.map(Lines.normalized), selection.routes.contains(route) else { return false }
+            // Each line going its own way: toward Manhattan from Marcy Av, the J is S and the M N
+            let direction = selection.direction(of: route)
+            // An alert names a platform by its id, or by its id plus N or S
+            if let stop = informed.stop_id, !platforms.contains(where: { stop == $0 || stop == $0 + direction.rawValue }) {
+                return false
+            }
+            if let informedDirection = informed.direction_id, informedDirection != (direction == .north ? 0 : 1) { return false }
             return true
         }
         let alerts: [ServiceAlert] = entries.compactMap { entry in

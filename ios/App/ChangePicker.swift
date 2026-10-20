@@ -66,8 +66,7 @@ private struct ChangeStationStep: View {
                             pick(station)
                         } label: {
                             ChangeStationRow(station: station, across: lines.across, others: lines.others,
-                                             isExpress: !lines.across.isEmpty
-                                                 && Change(stationID: station.id, routes: lines.across).isExpress(for: selection),
+                                             isExpress: isExpress(lines.across, at: station),
                                              isSelected: station.id == chosenID)
                         }
                         .accessibilityAddTraits(station.id == chosenID ? .isSelected : [])
@@ -98,6 +97,15 @@ private struct ChangeStationStep: View {
         .task {
             if stations == nil { await load() }
         }
+    }
+
+    /// Whether `across`, the lines across the platform from your train at
+    /// `station`, are an express for it, going the way they'd start out
+    /// chosen: for a line that runs the other way to yours there, the other N or S.
+    private func isExpress(_ across: [String], at station: Station) -> Bool {
+        var change = Change(stationID: station.id, routes: across)
+        change.direction = change.suggestedDirection(for: selection)
+        return !across.isEmpty && change.isExpress(for: selection)
     }
 
     private func load() async {
@@ -210,9 +218,11 @@ private struct ChangeLinesStep: View {
         var every = Change(stationID: station.id, routes: lines)
         let usual = every.suggestedDirection(for: selection)
         every.direction = usual
-        let bothWays = Direction.allCases.allSatisfy { way in lines.contains { Change.leaves($0, from: station, going: way) } }
+        let bothWays = Direction.allCases.allSatisfy { way in
+            lines.contains { Change.leaves($0, from: station, going: way, with: lines) }
+        }
         offersBothWays = bothWays && (direction != usual || !every.goesYourWay(from: selection)
-            || lines.contains { !Change.leaves($0, from: station, going: usual) })
+            || lines.contains { !Change.leaves($0, from: station, going: usual, with: lines) })
     }
 
     /// In the order of the lines.
@@ -268,32 +278,59 @@ private struct ChangeLinesStep: View {
         }
     }
 
+    /// The lines on `platform` that go the way chosen together: those chosen
+    /// there, or with none chosen there, all it has to change to.
+    private func linesTogether(on platform: Platform) -> [String] {
+        let chosenHere = chosen.filter(platform.routes.contains)
+        return chosenHere.isEmpty ? lines.filter(platform.routes.contains) : chosenHere
+    }
+
     /// Whether your train stops at `platform` too, on the side the lines
-    /// chosen go from.
+    /// chosen go from, which for a line that runs the other way to yours
+    /// there is under the other N or S.
     private func isAcross(_ platform: Platform) -> Bool {
-        direction == selection.direction && station.platforms(serving: selection.routes).contains(platform)
+        Change.isAcross(linesTogether(on: platform), going: direction, at: platform, from: selection)
     }
 
     /// Whether `route` can be chosen: it goes the way chosen, or with none
     /// chosen yet, either way, as the first line chosen sets the way.
     private func canChoose(_ route: String) -> Bool {
-        chosen.isEmpty || Change.leaves(route, from: station, going: direction)
+        let routes = chosen.contains(route) ? chosen : chosen + [route]
+        return chosen.isEmpty || Change.leaves(route, from: station, going: way(with: routes), with: routes)
     }
 
     private func toggle(_ route: String) {
         if chosen.contains(route) {
-            chosen.removeAll { $0 == route }
+            let rest = chosen.filter { $0 != route }
+            direction = way(with: rest)
+            chosen = rest
         } else {
-            if chosen.isEmpty {
-                direction = Change(stationID: station.id, routes: [route]).suggestedDirection(for: selection)
-            }
+            direction = chosen.isEmpty ? Change(stationID: station.id, routes: [route]).suggestedDirection(for: selection)
+                : way(with: chosen + [route])
             chosen.append(route)
         }
     }
 
+    /// The way chosen, with `routes` chosen in place of the lines chosen now:
+    /// as it is, or the other where that keeps those still chosen going as
+    /// they do. A line that runs the other way to the rest on its platform
+    /// goes by the other N or S with them, and by its own alone
+    /// (`Platform.direction(_:of:with:)`), as the G does with the A and C at
+    /// Hoyt-Schermerhorn Sts.
+    private func way(with routes: [String]) -> Direction {
+        let current = Change(stationID: station.id, routes: chosen, direction: direction)
+        let kept = chosen.filter(routes.contains)
+        return [direction, direction.opposite].first { way in
+            let changed = Change(stationID: station.id, routes: routes, direction: way)
+            return kept.allSatisfy {
+                changed.departureDirection(of: $0, for: selection) == current.departureDirection(of: $0, for: selection)
+            }
+        } ?? direction
+    }
+
     /// The lines chosen that go `way` from here.
     private func chosenLines(going way: Direction) -> [String] {
-        chosen.filter { Change.leaves($0, from: station, going: way) }
+        chosen.filter { Change.leaves($0, from: station, going: way, with: chosen) }
     }
 
     /// Where the lines chosen go `way`, or that none of them do.
@@ -341,7 +378,7 @@ private struct ChangeLinesStep: View {
     private func platformCard(_ platform: Platform) -> some View {
         let routes = platform.routes.filter { lines.contains($0) || selection.routes.contains($0) }
         // Where the lines to change to go from it, each of their names
-        let heading = Station.directionNames(direction, on: [platform], routes: routes.filter(lines.contains))
+        let heading = Station.directionNames(direction, on: [platform], routes: linesTogether(on: platform))
             .joined(separator: " or ")
         return VStack(alignment: .leading, spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {

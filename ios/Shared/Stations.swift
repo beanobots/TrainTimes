@@ -9,6 +9,12 @@ enum Direction: String, Codable, CaseIterable, Sendable {
 
     /// "Northbound" or "Southbound": what it's called where the MTA gives it no name.
     var compassName: String { self == .north ? "Northbound" : "Southbound" }
+
+    /// The way a stop on a train's way is for, by the N or S the feeds add to
+    /// its platform's id: "R31N" is north. Nil for a platform's id alone.
+    init?(ofStop stop: String) {
+        self.init(rawValue: String(stop.suffix(1)))
+    }
 }
 
 /// One of a station's sets of tracks, as the MTA lists them: the D N R at
@@ -60,13 +66,42 @@ struct Platform: Codable, Hashable, Identifiable, Sendable {
     /// The MTA's name for where `route`'s trains going `direction` from here
     /// are headed: its name for the other way where the line is `reversed`.
     func directionName(_ direction: Direction, of route: String) -> String {
-        directionName(reversed?.contains(route) == true ? direction.opposite : direction)
+        directionName(side(of: route, going: direction))
+    }
+
+    /// The side `route`'s trains going `direction` stop on here, by the way
+    /// whose name it has: the other way where the line is `reversed`. An M
+    /// going N at Marcy Av stops on the side named S, "Manhattan", as a J
+    /// going S does. Trains on one side are across the platform from each other.
+    func side(of route: String, going direction: Direction) -> Direction {
+        reversed?.contains(route) == true ? direction.opposite : direction
+    }
+
+    /// The feeds' N or S for `route`'s trains here going `direction` with the
+    /// lines of `routes`, as a train or change of several lines goes:
+    /// `direction`, but the other where the line is `reversed` and some of
+    /// `routes` here aren't, so they all stop on the side `direction` names.
+    /// A line alone, or with only lines `reversed` like it, goes by its own.
+    func direction(_ direction: Direction, of route: String, with routes: [String]) -> Direction {
+        let named = routes.contains { self.routes.contains($0) && reversed?.contains($0) != true }
+        return named ? side(of: route, going: direction) : direction
+    }
+
+    /// Where the lines of `routes` call here going `direction` together
+    /// (`direction(_:of:with:)`), as the feeds name it: "R31N"; going S from
+    /// Marcy Av, the J's "M16S" and the M's "M16N", all toward Manhattan.
+    /// `direction`'s first, which other lines' trains go by.
+    func stops(of routes: [String], going direction: Direction) -> [String] {
+        let ways = routes.filter(self.routes.contains).map { self.direction(direction, of: $0, with: routes) }
+        return [direction, direction.opposite].filter { $0 == direction || ways.contains($0) }.map { id + $0.rawValue }
     }
 
     /// The one way a partly accessible platform is step-free, where `adaNotes`
     /// names it alone: "Downtown only", "Manhattan-bound only", "Southbound
     /// Only". Nil for any other platform, and where the notes name neither
     /// way or both, or only some of its trains ("Uptown & The Bronx local only").
+    /// It's the way the MTA's names go by, which is every line's here:
+    /// make_stations.py won't list a line as `reversed` on a partly accessible platform.
     var stepFreeWay: Direction? {
         guard ada == 2 else { return nil }
         let notes = adaNotes.lowercased()
@@ -170,9 +205,9 @@ struct Station: Hashable, Identifiable, Sendable {
         routes.filter(platform.routes.contains)
     }
 
-    /// Where the lines of `routes` go in `direction`: "Manhattan", or "Northbound"
-    /// where the MTA gives no name. Platforms that name it differently are all named:
-    /// "Coney Island - Bay Ridge or Flatbush - New Lots".
+    /// Where the lines of `routes` go in `direction` together: "Manhattan", or
+    /// "Northbound" where the MTA gives no name. Platforms that name it
+    /// differently are all named: "Coney Island - Bay Ridge or Flatbush - New Lots".
     func directionLabel(_ direction: Direction, routes: [String]) -> String {
         Self.directionLabel(direction, on: platforms(serving: routes), routes: routes)
     }
@@ -181,6 +216,11 @@ struct Station: Hashable, Identifiable, Sendable {
     /// "Uptown & The Bronx"; empty at the end of the line.
     func directionName(_ direction: Direction, of route: String) -> String {
         platforms(serving: [route]).lazy.map { $0.directionName(direction, of: route) }.first { !$0.isEmpty } ?? ""
+    }
+
+    /// As `Platform.direction(_:of:with:)`, at the platform here `route` stops at.
+    func direction(_ direction: Direction, of route: String, with routes: [String]) -> Direction {
+        platforms(serving: [route]).first?.direction(direction, of: route, with: routes) ?? direction
     }
 
     /// The ways the lines of `routes` go from here: those the MTA names, or
@@ -198,7 +238,9 @@ struct Station: Hashable, Identifiable, Sendable {
     func onwardDirections(of routes: [String]) -> [Direction] {
         let named = directions(of: routes)
         let onward = named.filter { direction in
-            routes.contains { !StationDirectory.line($0, endsAt: self, going: direction) }
+            routes.contains {
+                !StationDirectory.line($0, endsAt: self, going: self.direction(direction, of: $0, with: routes))
+            }
         }
         return onward.isEmpty ? named : onward
     }
@@ -211,13 +253,14 @@ struct Station: Hashable, Identifiable, Sendable {
     }
 
     /// The MTA's names for `direction` at `platforms`, each once: at each, for
-    /// the lines of `routes` that stop there, or without any, as it names it.
+    /// the lines of `routes` that stop there, going that way together
+    /// (`Platform.direction(_:of:with:)`), or without any, as it names it.
     static func directionNames(_ direction: Direction, on platforms: [Platform], routes: [String]? = nil) -> [String] {
         var names: [String] = []
         for platform in platforms {
             let own = routes?.filter(platform.routes.contains) ?? []
             let named = own.isEmpty ? [platform.directionName(direction)]
-                : own.map { platform.directionName(direction, of: $0) }
+                : own.map { platform.directionName(platform.direction(direction, of: $0, with: own), of: $0) }
             for name in named where !name.isEmpty && !names.contains(name) {
                 names.append(name)
             }

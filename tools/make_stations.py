@@ -11,9 +11,9 @@
 Each station keeps its GTFS stop id (the real-time feeds name platforms by adding
 N or S to it), the lines that serve it as real-time route ids, the labels the MTA
 gives its two directions, where it is and where its entrances are, and how
-accessible it is. The labels are for the station's first line, and the feeds
-give each trip one direction all along its line, so a line whose trains run
-the other way to the first one's there, by the GTFS schedule, is listed as
+accessible it is. The labels are for most of the station's lines, and the
+feeds give each trip one direction all along its line, so a line whose trains
+run the other way to theirs there, by the GTFS schedule, is listed as
 reversed: at Marcy Av, whose south is "Manhattan" for the J, the M's
 southbound trains are on their way to Middle Village. A track the feeds name
 that the list doesn't, such as the one at Broad Channel where the Rockaway
@@ -99,9 +99,10 @@ def reversed_routes(gtfs_dir, stations):
     """The lines at each stop, by its id, whose southbound trains there head the
     way the MTA's north label names, and northbound ones its south: by the GTFS
     schedule, those whose southbound trips there go more than 120 degrees away
-    from the stop's first line's (lines bend and part at a stop, but not that
-    much). Only where the MTA names both ways: at the end of a line, trains come
-    in from wherever their lines do."""
+    from those of most of the stop's lines, or with as many each way, its first
+    line's (lines bend and part at a stop, but not that much). Only where the
+    MTA names both ways: at the end of a line, trains come in from wherever
+    their lines do."""
     where = {s["id"]: (s["lon"] * math.cos(math.radians(s["lat"])), s["lat"]) for s in stations}
     routes = {s["id"]: s["routes"] for s in stations}
     with open(f"{gtfs_dir}/trips.txt", encoding="utf-8-sig", newline="") as file:
@@ -134,14 +135,25 @@ def reversed_routes(gtfs_dir, stations):
         return (a[0] * b[0] + a[1] * b[1]) / (math.hypot(*a) * math.hypot(*b) or 1)
 
     turned = {}
+    even = []
     for station in stations:
-        first = heading.get((station["id"], station["routes"][0]))
-        if not (first and station["north"] and station["south"]):
+        ways = [(route, heading[(station["id"], route)]) for route in station["routes"]
+                if (station["id"], route) in heading]
+        if not (ways and station["north"] and station["south"]):
             continue
-        for route in station["routes"][1:]:
-            way = heading.get((station["id"], route))
-            if way and cos(first, way) < -0.5:
+        # The labels are taken to be for the larger group of lines that head
+        # one way, so a list that gives another line first can't turn them all
+        # round: at Marcy Av the J and Z's, not the M's. Where as many head each
+        # way, they're for the list's first line, as at Flushing Av.
+        agreeing = [sum(cos(way, other) > 0 for _, other in ways) for _, way in ways]
+        reference = ways[agreeing.index(max(agreeing))][1]
+        if max(agreeing) * 2 == len(ways):
+            even.append(station["id"])
+        for route, way in ways:
+            if cos(reference, way) < -0.5:
                 turned.setdefault(station["id"], []).append(route)
+    if even:
+        print(f"As many lines head each way at {', '.join(sorted(even))}: their labels are taken to be the first line's")
     return turned
 
 
@@ -234,6 +246,11 @@ def main(source, entrances_path, equipment_path, gtfs_dir, target_dir):
     for station in stations:
         if station["id"] in turned:
             station["reversed"] = turned[station["id"]]
+            # A partly accessible one's notes name the step-free way by the
+            # labels, which the app takes to be every line's (Platform.stepFreeWay)
+            if station["ada"] == 2:
+                sys.exit(f"{station['id']} is partly accessible and has lines named the other way round "
+                         f"({', '.join(turned[station['id']])}), so which way is step-free for them isn't known")
         if station["id"] in ALIASES:
             station["aliases"] = ALIASES[station["id"]]
     print(f"Named the other way round: {', '.join(f'{route} at {stop}' for stop, routes in turned.items() for route in routes)}")

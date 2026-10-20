@@ -7,6 +7,9 @@ struct Selection: Codable, Hashable, Sendable {
     var stationID: String
     /// One or more real-time route ids, in the order of `Station.routes`.
     var routes: [String]
+    /// The feeds' N or S for the chosen lines. Where some run the other way to
+    /// the rest on their platform, as the M does to the J at Marcy Av, it's the
+    /// rest's, and theirs is the other (`direction(of:at:)`).
     var direction: Direction
     /// Whether the widget mentions an elevator out at the station (the app always lists them).
     var elevatorAlerts: Bool
@@ -89,9 +92,13 @@ struct Selection: Codable, Hashable, Sendable {
     /// Trains of the chosen lines, and of any line that doesn't usually stop at
     /// their platform, which must be running on one of them: an N running local
     /// on the R. Lines that do usually stop there are left out unless chosen.
+    /// Each goes its own way (`direction(of:at:)`): toward Manhattan from Marcy
+    /// Av, a J at "M16S" or an M at "M16N", not the other way round.
     func shows(_ train: Arrival) -> Bool {
+        let platform = self.platform(of: train)
+        if let platform, train.stop != platform.id + direction(of: train.route, at: platform).rawValue { return false }
         if routes.contains(train.route) { return true }
-        let usual = platform(of: train)?.routes ?? station?.routes
+        let usual = platform?.routes ?? station?.routes
         return !(usual?.contains(train.route) ?? true)
     }
 
@@ -135,21 +142,39 @@ struct Selection: Codable, Hashable, Sendable {
     /// ones, like the N and the 2 at Atlantic Av-Barclays Ctr.
     var platforms: [Platform] { station?.platforms(serving: routes) ?? [] }
 
-    /// Where the chosen lines' trains stop, as the feeds name it: "R31N".
-    var stopIDs: [String] { platforms.map { $0.id + direction.rawValue } }
+    /// The feeds' N or S for trains of `route` at `platform`, one of the chosen
+    /// lines' platforms: `direction`, but the other where the line runs the
+    /// other way to another chosen there (`Platform.direction(_:of:with:)`),
+    /// so they all go the way `heading` names. Toward Manhattan from Marcy Av,
+    /// the J and Z are S and the M N; the M alone goes by its own, N.
+    func direction(of route: String, at platform: Platform) -> Direction {
+        platform.direction(direction, of: route, with: routes)
+    }
+
+    /// The feeds' N or S for trains of `route`, one of the chosen lines, as
+    /// `direction(of:at:)` has it at its platform: the same all along its line.
+    func direction(of route: String) -> Direction {
+        station?.direction(direction, of: route, with: routes) ?? direction
+    }
+
+    /// Where the chosen lines' trains stop, as the feeds name it: "R31N", or
+    /// where they run opposite ways on a platform, both of its: toward
+    /// Manhattan from Marcy Av, the J's "M16S" and the M's "M16N".
+    var stopIDs: [String] { platforms.flatMap { $0.stops(of: routes, going: direction) } }
 
     /// Where the chosen lines go: "Manhattan".
     var heading: String { station?.directionLabel(direction, routes: routes) ?? "" }
 
-    /// Where `train` goes from its platform, which is just one of `heading`'s names
-    /// where the chosen lines' platforms name the direction differently.
+    /// Where `train` goes from its platform, by its own line's way: just one of
+    /// `heading`'s names where the chosen lines' platforms name the direction differently.
     func heading(of train: Arrival) -> String {
-        guard let platform = platform(of: train) else { return heading }
-        return Station.directionLabel(direction, on: [platform], routes: [train.route])
+        guard let platform = platform(of: train), let way = Direction(ofStop: train.stop) else { return heading }
+        return Station.directionLabel(way, on: [platform], routes: [train.route])
     }
 
     private func platform(of train: Arrival) -> Platform? {
-        station?.platforms.first { $0.id + direction.rawValue == train.stop }
+        let id = String(train.stop.dropLast())
+        return station?.platforms.first { $0.id == id }
     }
 
     /// A saved choice that no longer matches the station list falls back to the

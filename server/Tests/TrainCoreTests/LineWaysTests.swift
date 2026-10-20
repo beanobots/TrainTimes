@@ -156,7 +156,8 @@ import Testing
         #expect(marcy.directionLabel(.south, routes: ["J"]) == "Manhattan")
         #expect(marcy.directionLabel(.south, routes: ["M"]) == "Jamaica - Middle Village")
         #expect(marcy.directionLabel(.north, routes: ["M"]) == "Manhattan")
-        #expect(marcy.directionLabel(.south, routes: ["J", "M"]) == "Manhattan or Jamaica - Middle Village")
+        // With the J, the M goes the way it's named, which for the M is N
+        #expect(marcy.directionLabel(.south, routes: ["J", "M"]) == "Manhattan")
         let m = marcy.ways(of: "M", trains: [:], now: now)
         #expect(m.map { $0?.direction } == [.north, .south])
         #expect(labels(m) == ["Manhattan", "Queens"])
@@ -165,6 +166,8 @@ import Testing
         #expect(labels(j) == ["Manhattan", "Queens"])
         // Each train goes by its own line's
         let both = Selection(stationID: "M16", routes: ["J", "M"], direction: .south)
+        #expect(both.heading(of: Arrival(route: "M", time: now, stop: "M16N", lastStop: "G08N", isLive: true))
+            == "Manhattan")
         #expect(both.heading(of: Arrival(route: "M", time: now, stop: "M16S", lastStop: "M01S", isLive: true))
             == "Jamaica - Middle Village")
         #expect(both.heading(of: Arrival(route: "J", time: now, stop: "M16S", lastStop: "M23S", isLive: true))
