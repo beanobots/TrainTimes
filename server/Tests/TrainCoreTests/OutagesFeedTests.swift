@@ -112,8 +112,8 @@ import Testing
         let machines = try JSONDecoder().decode([String: EquipmentDirectory.Machine].self, from: Data(json.utf8))
         #expect(machines["EL100"]?.stops == nil)
         #expect(machines["EL218"]?.stops == ["L03", "R20"])
-        // The one built into the app has them
-        #expect(EquipmentDirectory.all["EL218"]?.stops == ["L03", "R20"])
+        // The one built into the app has them: here, only the L's
+        #expect(EquipmentDirectory.all["EL218"]?.stops == ["L03"])
     }
 
     @Test func oneWhoseStopsArentKnownMightServeAnyPlatform() {
@@ -138,21 +138,49 @@ import Testing
         })
     }
 
+    /// What's out, of `data`'s equipment, for `routes` at `stationID`, as
+    /// `TrainService.outages(for:in:)` has it.
+    func outages(_ stationID: String, _ routes: [String], in data: Data) -> [String]? {
+        TrainService.outages(for: Selection(stationID: stationID, routes: routes, direction: .north), in: data)?
+            .map { String($0.id.dropLast("06/10/2026 08:30:00 AM".count)) } // each id ends with its start
+    }
+
     @Test func aSelectionGetsOnlyThoseThatServeItsLinesPlatforms() throws {
         // At Canal St, EL324 and EL325 go only to the 6's platforms; at 14
         // St-Union Sq, EL218 goes to the L's and EL219 the N Q R W's (the MTA
-        // gives both for each)
+        // lists both stops for each, but only the line each one serves)
         let data = try feed(["EL324", "EL325", "EL218", "EL219"])
-        func outages(_ stationID: String, _ routes: [String]) -> [String]? {
-            TrainService.outages(for: Selection(stationID: stationID, routes: routes, direction: .north), in: data)?
-                .map { String($0.id.prefix(5)) }
-        }
-        #expect(outages("R23", ["R"]) == [])
-        #expect(outages("R23", ["6"]) == ["EL324", "EL325"])
-        #expect(outages("R23", ["R", "6"]) == ["EL324", "EL325"])
-        #expect(outages("R20", ["L"]) == ["EL218", "EL219"])
-        #expect(outages("R20", ["R"]) == ["EL218", "EL219"])
-        #expect(outages("R20", ["4"]) == [])
+        #expect(outages("R23", ["R"], in: data) == [])
+        #expect(outages("R23", ["6"], in: data) == ["EL324", "EL325"])
+        #expect(outages("R23", ["R", "6"], in: data) == ["EL324", "EL325"])
+        #expect(outages("R20", ["L"], in: data) == ["EL218"])
+        #expect(outages("R20", ["R"], in: data) == ["EL219"])
+        #expect(outages("R20", ["L", "R"], in: data) == ["EL218", "EL219"])
+        #expect(outages("R20", ["4"], in: data) == [])
+    }
+
+    @Test func notAnotherLinesElevatorInTheSameComplex() throws {
+        let data = try feed(["EL332", "EL290X", "EL738", "EL135"])
+        // EL332 goes to Bleecker St's 6, not Broadway-Lafayette St's B D F M
+        #expect(outages("D21", ["B", "D", "F", "M"], in: data) == [])
+        #expect(outages("637", ["6"], in: data) == ["EL332"])
+        // EL290X, to 42 St-Port Authority's A C E, not Times Sq's N Q R W
+        #expect(outages("R16", ["N", "Q", "R", "W"], in: data) == [])
+        #expect(outages("A27", ["A", "C", "E"], in: data) == ["EL290X"])
+        // EL738, to New Utrecht Av's N, not 62 St's D
+        #expect(outages("B16", ["D"], in: data) == [])
+        #expect(outages("N04", ["N"], in: data) == ["EL738"])
+        // EL135, to 161 St-Yankee Stadium's B D, not its 4
+        #expect(outages("414", ["4"], in: data) == [])
+        #expect(outages("D11", ["B", "D"], in: data) == ["EL135"])
+    }
+
+    @Test func everyLineAnElevatorServes() throws {
+        // The MTA lists only the 7's stop for Queensboro Plaza's elevators,
+        // which serve the N W too
+        let data = try feed(["EL478", "EL479", "EL791X"])
+        #expect(outages("R09", ["N", "W"], in: data) == ["EL478", "EL479", "EL791X"])
+        #expect(outages("718", ["7"], in: data) == ["EL478", "EL479", "EL791X"])
     }
 
     @Test func noneToFetchAtAStationWithoutElevatorsOrEscalators() {

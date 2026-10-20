@@ -14,8 +14,8 @@ struct Outage: Identifiable, Hashable, Sendable {
     let isPlanned: Bool
     /// The MTA's advice for getting around it, when it's an elevator.
     let alternative: String
-    /// The GTFS stops whose platforms it serves, e.g. ["L03", "R20"] at 14 St-Union
-    /// Sq; nil where the MTA doesn't say.
+    /// The GTFS stops whose platforms it serves, e.g. ["718", "R09"], Queensboro
+    /// Plaza's 7 and N W; nil where the MTA doesn't say.
     var stops: [String]? = nil
 
     /// Whether it serves one of `platforms`, or might: one whose stops the MTA
@@ -34,8 +34,8 @@ enum EquipmentDirectory {
         let ada: Bool
         let serving: String
         let alternative: String
-        /// The GTFS stops whose platforms it serves, e.g. ["L03", "R20"] at 14 St-Union
-        /// Sq; nil in a list made before there were these.
+        /// The GTFS stops whose platforms it serves, e.g. ["718", "R09"], Queensboro
+        /// Plaza's 7 and N W; nil in a list made before there were these.
         var stops: [String]? = nil
     }
 

@@ -13,7 +13,8 @@ accessible it is. The MTA lists a station's sets of platforms apart, such as
 Atlantic Av-Barclays Ctr's D N R, B Q and 2 3 4 5; the app joins those with the
 same name in the same complex into one station. The equipment list ties each elevator and escalator to its
 station complex, so the outage feed, which names only the equipment, can be
-matched to a station, and to the stops whose platforms it serves.
+matched to a station, and to the stops whose platforms it serves: those where
+the lines it serves stop.
 """
 import csv
 import json
@@ -65,12 +66,36 @@ def entrances_by_stop(path):
     return entrances
 
 
-def equipment(path, complexes):
+def served_lines(text):
+    """"N/W/7" -> {"N", "W", "7"}: the lines an elevator or escalator serves, as
+    real-time route ids. "S" could be any of the three shuttles; "LIRR" and
+    "METRO-NORTH" are no subway platform's."""
+    lines = set()
+    for token in (text or "").split("/"):
+        token = token.strip()
+        if token == "S":
+            lines |= {"GS", "FS", "H"}
+        elif token == "SIR":
+            lines.add("SI")
+        elif token:
+            lines.add(token)
+    return lines
+
+
+def equipment(path, stations):
     """The elevators and escalators at subway stations, by id, including those a
     building owner runs rather than the MTA (they're in the outage feed too).
-    Each lists the GTFS stops whose platforms it serves, where the MTA says."""
+    Each lists the GTFS stops whose platforms it serves: those of its complex
+    (or listed for it) where the lines it serves stop. The MTA's own list of
+    its stops mostly names every one in the complex, and at Queensboro Plaza
+    leaves out the N W's, so it's gone by only where none of those lines stop,
+    as for the LIRR's elevators at 61 St-Woodside."""
     with open(path, encoding="utf-8") as file:
         rows = json.load(file)
+    routes = {station["id"]: set(station["routes"]) for station in stations}
+    complexes = {}
+    for station in stations:
+        complexes.setdefault(station["complex"], []).append(station["id"])
     machines = {}
     for row in sorted(rows, key=lambda row: row["equipmentno"]):
         if row["stationcomplexid"] not in complexes:
@@ -82,8 +107,11 @@ def equipment(path, complexes):
             "serving": row["serving"],
             "alternative": (row.get("alternativeroute") or "").strip(),
         }
-        # "L03/R20": 14 St-Union Sq's L and its N Q R W
-        stops = [stop.strip() for stop in (row.get("elevatorsgtfsstopid") or "").split("/") if stop.strip()]
+        # "L03/R20", 14 St-Union Sq's L and its N Q R W, even for an elevator to the L alone
+        listed = [stop.strip() for stop in (row.get("elevatorsgtfsstopid") or "").split("/") if stop.strip()]
+        lines = served_lines(row.get("linesservedbyelevator"))
+        candidates = set(complexes[row["stationcomplexid"]] + listed)
+        stops = sorted(stop for stop in candidates if routes.get(stop, set()) & lines) or listed
         if stops:
             machine["stops"] = stops
         machines[row["equipmentno"]] = machine
@@ -129,7 +157,7 @@ def main(source, entrances_path, equipment_path, target_dir):
         file.write("[\n" + ",\n".join(json.dumps(s, ensure_ascii=False) for s in stations) + "\n]\n")
     print(f"{len(stations)} stations, {sum(len(s['entrances']) for s in stations)} entrances -> {target}")
 
-    machines = equipment(equipment_path, {station["complex"] for station in stations})
+    machines = equipment(equipment_path, stations)
     target = f"{target_dir}/equipment.json"
     with open(target, "w", encoding="utf-8") as file:
         file.write("{\n" + ",\n".join(f"{json.dumps(k)}: {json.dumps(v, ensure_ascii=False)}" for k, v in machines.items()) + "\n}\n")

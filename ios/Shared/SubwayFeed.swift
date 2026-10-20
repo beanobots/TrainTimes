@@ -327,7 +327,7 @@ enum SubwayFeed {
 
 enum FeedError: Error {
     case malformed
-    /// Made too long ago to go by (`SubwayFeed.staleAfter`).
+    /// Made too long ago to go by (`SubwayFeed.isStale`).
     case stale
 }
 
