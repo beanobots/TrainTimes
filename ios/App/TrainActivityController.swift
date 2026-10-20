@@ -67,7 +67,7 @@ enum TrainActivityController {
     /// widget saved for this train in the last few minutes, or else from the
     /// chosen lines' own feed alone. Then it fetches everything, the alert and
     /// rerouted trains too, and updates the countdown with them. The widgets
-    /// are told after that, so any that redraw for it find those times saved
+    /// reload after that, so any that redraw for it find those times saved
     /// rather than fetching them too.
     private static func startNow(for selection: Selection, widgetID: String? = nil, trip: String? = nil) async throws -> Date {
         guard ActivityAuthorizationInfo().areActivitiesEnabled else { throw Problem.notAllowed }
@@ -106,16 +106,22 @@ enum TrainActivityController {
         await endActivities(except: activity.id)
         let countdown = SharedStore.Countdown(trainID: selection.trainID, ends: now.addingTimeInterval(CountdownState.lifetime),
                                               widgetID: widgetID)
+        // Saved at once, so a walk button stops it even should iOS end the
+        // app before the times below come in
+        let old = record(countdown)
         // It's up; now the alert and any rerouted trains, for the same train
         guard fullBoard == nil, let board = try? await fetchAll(for: selection) else {
-            tellWidgets(countdown, tapped: widgetID)
+            reloadWidgets(from: old, to: countdown, tapped: widgetID)
             return state.train
         }
-        tellWidgets(countdown, tapped: widgetID)
+        reloadWidgets(from: old, to: countdown, tapped: widgetID)
         let settings = SharedStore.loadSettings()
         let fetched = Date.now
+        // To the trip asked for, should the chosen lines' own feed have missed
+        // it (another line's, running on yours); else the same train, or once
+        // that has gone, the next
         let same = CountdownState(for: selection, board: board, settings: settings, now: fetched,
-                                  following: state.trip, after: state.train)
+                                  following: trip ?? state.trip, after: state.train)
         // Unless the chosen lines' own feed missed a sooner one, of another line
         // running on yours; not when it's for a train that gets to a change
         let sooner = fromOwnLines && trip == nil
@@ -220,14 +226,27 @@ enum TrainActivityController {
         }
     }
 
-    /// Lets the widgets know whose countdown is running. After a tap on
-    /// a widget's (`tapped`), iOS reloads that widget, so the others reload
-    /// only if one of them showed the countdown before or does now. Trains
-    /// near you doesn't show it.
+    /// Lets the widgets know whose countdown is running: `record`, then
+    /// `reloadWidgets`.
     private static func tellWidgets(_ countdown: SharedStore.Countdown?, tapped: String? = nil) {
+        reloadWidgets(from: record(countdown), to: countdown, tapped: tapped)
+    }
+
+    /// Saves whose countdown is running, for the widgets and their walk
+    /// buttons, and returns whose was before.
+    private static func record(_ countdown: SharedStore.Countdown?) -> SharedStore.Countdown? {
         let old = SharedStore.loadCountdown()
+        if old != countdown { SharedStore.saveCountdown(countdown) }
+        return old
+    }
+
+    /// Reloads the widgets for a countdown that was `old` and is now
+    /// `countdown`. After a tap on a widget's (`tapped`), iOS reloads that
+    /// widget, so the others reload only if one of them showed the countdown
+    /// before or does now. Trains near you doesn't show it.
+    private static func reloadWidgets(from old: SharedStore.Countdown?, to countdown: SharedStore.Countdown?,
+                                      tapped: String?) {
         guard old != countdown else { return }
-        SharedStore.saveCountdown(countdown)
         let onlyTapped = { (countdown: SharedStore.Countdown?) in
             countdown.map { $0.widgetID != nil && $0.widgetID == tapped } ?? true
         }
