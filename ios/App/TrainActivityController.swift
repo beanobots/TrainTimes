@@ -92,10 +92,13 @@ enum TrainActivityController {
         }
         if state == nil {
             // None on the chosen lines' own feed, or it failed: maybe a rerouted train
+            let started = Date.now
             let board = try await fetchAll(for: selection)
             fullBoard = board
             state = CountdownState(for: selection, board: board, settings: SharedStore.loadSettings(), now: .now,
                                    following: trip, after: nil)
+            // Updated as the fetch began, as a refresh's and the page's times are
+            state?.updated = started
         }
         guard let state else { throw Problem.noTrains }
         let attributes = TrainActivityAttributes(
@@ -113,6 +116,7 @@ enum TrainActivityController {
         // app before the times below come in
         let old = record(countdown)
         // It's up; now the alert and any rerouted trains, for the same train
+        let started = Date.now
         guard fullBoard == nil, let board = try? await fetchAll(for: selection) else {
             reloadWidgets(from: old, to: countdown, tapped: widgetID)
             return state.train
@@ -130,7 +134,8 @@ enum TrainActivityController {
         let sooner = fromOwnLines && trip == nil
             ? CountdownState(for: selection, board: board, settings: settings, now: fetched, following: nil, after: nil)
             : nil
-        guard let full = [same, sooner].compactMap({ $0 }).min(by: { $0.train < $1.train }) else { return state.train }
+        guard var full = [same, sooner].compactMap({ $0 }).min(by: { $0.train < $1.train }) else { return state.train }
+        full.updated = started
         await activity.update(content(full))
         return full.train
     }
@@ -166,9 +171,10 @@ enum TrainActivityController {
     }
 
     /// New times for `selection`'s running countdown from `board`, which the
-    /// app fetched at `fetched` for the train's own page, rather than fetching
-    /// them again; not for one with newer times already, from a refresh or a
-    /// start that fetched after the page did. Times after now, fetched before
+    /// app began fetching at `fetched` for the train's own page, rather than
+    /// fetching them again; not for one with newer times already, from a
+    /// refresh or a start whose fetch began after the page's did (each stamps
+    /// its times with when its fetch began). Times after now, fetched before
     /// the clock was set back, are old. Returns the train it counts down to
     /// then, if one's running.
     static func update(for selection: Selection, from board: Board, fetched: Date) async -> Date? {
