@@ -2,6 +2,40 @@
 
 A review of the whole repository at commit `9be9058` (19 October 2026): the iOS app, widgets and Live Activity, the shared feed code, the push server, the Python tools, the Scriptable script and CI. It looks for duplicated code, bugs, optimizations, and related problems with robustness, accessibility, tests and docs.
 
+## Status after fixing (20 October 2026)
+
+The fixes are on branch `claude/codebase-review-jsby0y`. Each group of fixes was reviewed by a second agent told to find what it broke, and the branch then had four more review rounds; each finding was checked by two more agents, one reproducing it and one trying to refute it. The server's tests (356 now, up from 85) pass on Linux with Swift 6.2.1, and CI built the app and widget after every merge.
+
+**171 of the 174 issues are fixed.** The other three:
+
+- [#102](#102-skipped-stops-and-cancelled-trips-in-the-feed-are-not-recognised) (skipped stops and cancelled trips) is unchanged. None of the 45 captured MTA feeds has one, so there was nothing to check a fix against.
+- [#107](#107-dimmed-screen-countdown-handling-exists-only-for-lock-screen-accessories-not-the-small-widget-in-standby-or-the-live-activity-on-the-always-on-lock-screen) (the countdown on a dimmed screen in StandBy and the Live Activity) is unchanged. It needs a device to see what iOS does there.
+- [#136](#136-line-bullets-and-their-letters-never-scale-with-dynamic-type-app-station-rows-direction-step-widgets) is partly fixed. The bullets in the train and change pickers and the Transfers header grow with Dynamic Type. The widgets' other bullets keep their size, because the layouts around them are measured to fit.
+
+**Bugs found while fixing**, which the review missed:
+
+- The server bundled its station lists as symlinks, which SwiftPM copies as links that don't resolve, so on macOS the server loaded no stations at all. It now keeps copies, which `tools/make_stations.py` and `make_lines.py` write and CI checks.
+- The MTA names a station's two directions once for all its lines. On the Broadway el (M11–M18) those are the J's, and the M runs the other way there, so choosing the M toward Manhattan at Marcy Av showed trains to Middle Village. The same goes for the G at Hoyt-Schermerhorn Sts. `stations.json` now lists which lines run the other way. The M is named by its own trains, and the J, Z and M can be chosen together toward Manhattan.
+- The H ends at H19, Broad Channel's shuttle platform, which the station list lacked. Its trains ending there were listed as leaving, headed "Manhattan".
+- The server reworked each alert's text for every countdown on every pass, about 6.5 s a pass at 10,000 countdowns. It now does it once a pass.
+- Platforms that no elevator serves still fetched the outage feed and could say "Couldn't load elevators".
+
+**Changes riders will notice:**
+
+- "Now" shows in every column.
+- Shuttles are spoken by name.
+- The app's Nearby rows are ordered and named as the Trains near you widget's are.
+- The countdown's notice uses each alert kind's symbol.
+- The widget buttons flash when tapped rather than staying lit.
+- Lines that never reach Manhattan are headed for where they go.
+- Add a Change lists the stops of every chosen line.
+
+**CI and release:**
+
+- A push to `main` builds a new version only when it changes the app or how it's published. Running the workflow by hand publishes too.
+- Each build gets its own release, `v1.0.N`. The `latest` release takes its files, but its tag isn't moved.
+- The server builds and tests in `build-server.yml`.
+
 ## How it was done
 
 - **Finding.** Sixteen reviewers each took one slice of the code or one cross-cutting lens: duplication within the app, duplication across app, server and tools, concurrency and time, and performance and robustness. A completeness critic then sent five more reviewers after areas nobody had covered.
