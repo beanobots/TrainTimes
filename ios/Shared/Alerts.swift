@@ -119,6 +119,25 @@ enum AlertsFeed {
         fileprivate let header: String
         fileprivate let details: String
         fileprivate let period: String?
+        /// Its text as shown, worked out ahead by `prepared(_:)`; nil to work
+        /// it out each time it's shown.
+        fileprivate var text: Text? = nil
+
+        /// The header and details as `readable` and `marked` make them, and the
+        /// header's lines and direction.
+        fileprivate struct Text: Sendable {
+            let header: String
+            let details: String
+            let markedHeader: String
+            let brief: AlertBrief?
+
+            init(_ entry: Entry) {
+                header = AlertsFeed.readable(entry.header)
+                details = AlertsFeed.readable(entry.details)
+                markedHeader = AlertsFeed.marked(entry.header)
+                brief = AlertBrief(header: entry.header)
+            }
+        }
 
         /// Whether it's in effect at some moment from `start` to `end`.
         fileprivate func isActive(from start: TimeInterval, to end: TimeInterval) -> Bool {
@@ -149,16 +168,27 @@ enum AlertsFeed {
         }
     }
 
+    /// `entries` with their text made readable now, once, not each time one is
+    /// shown: for the server, which shows the same alerts to thousands of
+    /// countdowns each pass. The app shows few, so it leaves it till then.
+    static func prepared(_ entries: [Entry]) -> [Entry] {
+        entries.map { entry in
+            var entry = entry
+            entry.text = Entry.Text(entry)
+            return entry
+        }
+    }
+
     /// The alerts in effect at `now` that affect `selection`'s lines at their
     /// platforms and direction, most important first: those about there, and
     /// those whose trains from there are changed further along.
     static func alerts(for selection: Selection, in entries: [Entry], now: Date = Date()) -> [ServiceAlert] {
         let time = now.timeIntervalSince1970
         let platforms = selection.platforms.map(\.id)
+        // Each line going its own way: toward Manhattan from Marcy Av, the J is S and the M N
+        let ways = Dictionary(selection.routes.map { ($0, selection.direction(of: $0)) }, uniquingKeysWith: { first, _ in first })
         func matches(_ informed: Informed) -> Bool {
-            guard let route = informed.route_id.map(Lines.normalized), selection.routes.contains(route) else { return false }
-            // Each line going its own way: toward Manhattan from Marcy Av, the J is S and the M N
-            let direction = selection.direction(of: route)
+            guard let route = informed.route_id.map(Lines.normalized), let direction = ways[route] else { return false }
             // An alert names a platform by its id, or by its id plus N or S
             if let stop = informed.stop_id, !platforms.contains(where: { stop == $0 || stop == $0 + direction.rawValue }) {
                 return false
@@ -172,15 +202,16 @@ enum AlertsFeed {
             var kind = kind(of: entry.type)
             // Suspended further along, trains still run from here
             if !isHere, kind == .suspended { kind = .serviceChange }
+            let text = entry.text ?? Entry.Text(entry)
             return ServiceAlert(
                 id: entry.id,
                 kind: kind,
                 type: entry.type,
-                header: readable(entry.header),
-                details: readable(entry.details),
+                header: text.header,
+                details: text.details,
                 period: entry.period,
-                brief: kind == .delays ? AlertBrief(header: entry.header) : nil,
-                markedHeader: marked(entry.header)
+                brief: kind == .delays ? text.brief : nil,
+                markedHeader: text.markedHeader
             )
         }
         return alerts.sorted { $0.kind < $1.kind }

@@ -237,6 +237,7 @@ final class Poller: Service {
     /// when they couldn't be had.
     static func boards(for selections: [Selection], trains: [String: [Arrival]], alerts entries: [AlertsFeed.Entry]?,
                        outages outagesFeed: Data?, now: Date) -> [Selection: Board] {
+        let entries = entries.map(AlertsFeed.prepared)
         var outagesByPlatforms: [[String]: [Outage]?] = [:]
         var boards: [Selection: Board] = [:]
         for selection in Set(selections) {

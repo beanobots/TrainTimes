@@ -95,8 +95,15 @@ struct Selection: Codable, Hashable, Sendable {
     /// Each goes its own way (`direction(of:at:)`): toward Manhattan from Marcy
     /// Av, a J at "M16S" or an M at "M16N", not the other way round.
     func shows(_ train: Arrival) -> Bool {
-        let platform = self.platform(of: train)
-        if let platform, train.stop != platform.id + direction(of: train.route, at: platform).rawValue { return false }
+        shows(train, at: station)
+    }
+
+    /// `shows(_:)`, with `station` looked up once for many trains.
+    func shows(_ train: Arrival, at station: Station?) -> Bool {
+        let platform = station?.platforms.first { $0.id == train.stop.dropLast() }
+        // Only where a line runs the other way do the chosen lines' trains stop at both letters
+        if let platform, platform.reversed != nil,
+           !train.stop.hasSuffix(direction(of: train.route, at: platform).rawValue) { return false }
         if routes.contains(train.route) { return true }
         let usual = platform?.routes ?? station?.routes
         return !(usual?.contains(train.route) ?? true)
@@ -173,8 +180,7 @@ struct Selection: Codable, Hashable, Sendable {
     }
 
     private func platform(of train: Arrival) -> Platform? {
-        let id = String(train.stop.dropLast())
-        return station?.platforms.first { $0.id == id }
+        station?.platforms.first { $0.id == train.stop.dropLast() }
     }
 
     /// A saved choice that no longer matches the station list falls back to the

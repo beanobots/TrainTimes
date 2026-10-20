@@ -288,8 +288,9 @@ enum TrainService {
     /// their stop and go on from it, soonest first and each trip once: what a
     /// board lists.
     static func trains(for selection: Selection, in arrivals: [Arrival], now: Date) -> [Arrival] {
-        arrivals
-            .filter { !$0.endsHere && $0.leaves > now && selection.shows($0) }
+        let station = selection.station
+        return arrivals
+            .filter { !$0.endsHere && $0.leaves > now && selection.shows($0, at: station) }
             .sorted { $0.time < $1.time }
             .oncePerTrip()
     }

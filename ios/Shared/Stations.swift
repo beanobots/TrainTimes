@@ -29,7 +29,8 @@ struct Platform: Codable, Hashable, Identifiable, Sendable {
     /// Real-time route ids of the lines that stop here.
     let routes: [String]
     /// The MTA's names for the two directions; empty at the end of a line.
-    /// They're the way its first line goes: see `reversed`.
+    /// They're the way most of its lines go (its first line's, where as many
+    /// go each way): see `reversed`.
     let north: String
     let south: String
     /// Lines whose trains here go N the way `south` names, and S the way

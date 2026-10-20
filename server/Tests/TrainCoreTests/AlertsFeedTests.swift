@@ -112,6 +112,15 @@ import Testing
         #expect(AlertsFeed.alerts(for: prospect, in: notice, now: now).first?.brief == nil)
     }
 
+    @Test func theSameWordsWorkedOutAhead() throws {
+        let header = "[N][R] trains are running with delays [accessibility icon]"
+        let entries = try AlertsFeed.entries(in: feed([alert("1", header: header), alert("2", type: "Station Notice")]), now: now)
+        let prepared = AlertsFeed.prepared(entries)
+        #expect(AlertsFeed.alerts(for: prospect, in: prepared, now: now) == AlertsFeed.alerts(for: prospect, in: entries, now: now))
+        #expect(AlertsFeed.alerts(for: prospect, in: prepared, now: now).map(\.header)
+                == ["N and R trains are running with delays", "R trains are delayed."])
+    }
+
     @Test func notTheFeedItWas() {
         #expect(throws: DecodingError.self) { try AlertsFeed.entries(in: Data(#"{"entity":{}}"#.utf8), now: now) }
     }
