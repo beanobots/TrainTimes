@@ -161,6 +161,19 @@ import Testing
         #expect(new.notice == "Service change")
     }
 
+    @Test func noTrainsDoesntPutAnElevatorOutInPlaceOfWhy() {
+        var selection = prospect
+        selection.elevatorAlerts = true
+        var board = fixtureBoard()
+        board.trains = []
+        let last = state(train: -3)
+        #expect(last.refreshed(for: selection, board: board, settings: all, now: minutes(1)).notice == "Service change")
+
+        board.alerts = []
+        #expect(last.refreshed(for: selection, board: board, settings: all, now: minutes(1)).notice
+                == "No trains predicted")
+    }
+
     @Test func staleAsTheTrainIsDue() {
         let countdown = state(train: 4)
         #expect(countdown.staleDate == minutes(4))

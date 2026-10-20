@@ -63,7 +63,9 @@ struct TrainLiveActivity: Widget {
                     .foregroundStyle(shownState(context).isLive ? Color.liveGreen : .white)
                     .accessibilityValue(status(context))
             } minimal: {
+                // No room for the countdown; VoiceOver says when the train is due
                 LineBullet(route: trainRoute(context), size: 20)
+                    .accessibilityValue("\(status(context)), \(Spoken.clock(shownState(context).train))")
             }
             .keylineTint(Color(hex: LineStyle.of(trainRoute(context)).color))
         }

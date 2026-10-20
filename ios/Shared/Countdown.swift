@@ -97,17 +97,19 @@ extension CountdownState {
 
     /// New times for the running countdown from `board`: the same train while
     /// it's still coming, the next one once it has gone. With no train at all,
-    /// it stays on its last one and says so, or names the alert that's why.
+    /// it stays on its last one and says so, or names the service alert that's
+    /// why: not an elevator out, which the notice would otherwise put first.
     func refreshed(for selection: Selection, board: Board, settings: AppSettings, now: Date) -> CountdownState {
-        let notice = board.notice(for: selection, settings: settings)?.label
-        if let state = CountdownState(for: selection, trains: board.trains, notice: notice, now: now,
+        if let state = CountdownState(for: selection, board: board, settings: settings, now: now,
                                       following: trip, after: train) {
             return state
         }
+        let alert = board.notice(includingElevators: false, includingAlerts: selection.serviceAlerts,
+                                 kinds: settings.alertKinds)
         var state = self
         state.following = []
         state.followingRoutes = []
-        state.notice = notice ?? "No trains predicted"
+        state.notice = alert?.label ?? "No trains predicted"
         state.updated = now
         return state
     }
