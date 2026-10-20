@@ -8,12 +8,16 @@ final class FakePusher: Pusher, @unchecked Sendable {
     private var sent: [Push] = []
     private var inFlight = 0
     private var peak = 0
+    private var gaveUp = false
     let result: PushResult
     let delay: Duration?
+    /// Each push waits until this many have been in flight at once.
+    let gate: Int?
 
-    init(result: PushResult = .sent, delay: Duration? = nil) {
+    init(result: PushResult = .sent, delay: Duration? = nil, gate: Int? = nil) {
         self.result = result
         self.delay = delay
+        self.gate = gate
     }
 
     func send(_ push: Push) async -> PushResult {
@@ -23,13 +27,34 @@ final class FakePusher: Pusher, @unchecked Sendable {
             peak = max(peak, inFlight)
         }
         if let delay { try? await Task.sleep(for: delay) }
+        if let gate { await waitForPeak(gate) }
         lock.withLock { inFlight -= 1 }
         return result
+    }
+
+    /// Until `count` pushes have been in flight at once. After 10 seconds
+    /// none waits any more, so pushes made fewer at a time fail a test
+    /// rather than hang it.
+    private func waitForPeak(_ count: Int) async {
+        let deadline = ContinuousClock.now + .seconds(10)
+        while lock.withLock({ peak < count && !gaveUp }) {
+            if ContinuousClock.now >= deadline { lock.withLock { gaveUp = true } }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
     }
 
     func shutdown() async {}
     var pushes: [Push] { lock.withLock { sent } }
     var maxInFlight: Int { lock.withLock { peak } }
+}
+
+/// Counts from any task.
+final class Counter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    func increment() { lock.withLock { count += 1 } }
+    var value: Int { lock.withLock { count } }
 }
 
 func testRegistration(token: String = sampleToken, owner: String = "key", started: Date = now) -> Registration {
@@ -114,14 +139,97 @@ func testRegistration(token: String = sampleToken, owner: String = "key", starte
         #expect(second.state.notice == "Service change")
     }
 
+    @Test func noTrainsSaysSoOnceThenOnlyRefreshes() async throws {
+        let store = try Store(directory: nil)
+        try await registered(store)
+        let pusher = FakePusher()
+        let poller = Poller(store: store, pusher: pusher, interval: 30) { selections, time in
+            var board = fixtureBoard()
+            board.alerts = []
+            if time > now { board.trains = [] }
+            return Dictionary(selections.map { ($0, board) }, uniquingKeysWith: { a, _ in a })
+        }
+        await poller.pass(at: now)
+        await poller.pass(at: now.addingTimeInterval(30))
+        let noTrains = try #require(pusher.pushes.last)
+        #expect(pusher.pushes.count == 2)
+        #expect(noTrains.state.notice == "No trains predicted")
+        #expect(noTrains.priority == 10)
+
+        await poller.pass(at: now.addingTimeInterval(60))
+        #expect(pusher.pushes.count == 2)
+        await poller.pass(at: now.addingTimeInterval(330))
+        #expect(pusher.pushes.count == 3)
+        #expect(pusher.pushes.last?.priority == 5)
+        #expect(pusher.pushes.last?.state.notice == "No trains predicted")
+    }
+
+    @Test func withNothingPushedYetAndNoTrainsTheAppsOwnStateStands() async throws {
+        let store = try Store(directory: nil)
+        try await registered(store)
+        let pusher = FakePusher()
+        var board = fixtureBoard()
+        board.trains = []
+        let stats = await poller(store, pusher, board: board).pass(at: now)
+        #expect(stats == Poller.Stats(registrations: 1))
+        #expect(pusher.pushes.isEmpty)
+        #expect(await store.registration(for: sampleToken)?.lastState == nil)
+    }
+
     @Test func keepsTheLastStateWithoutFeeds() async throws {
         let store = try Store(directory: nil)
         try await registered(store)
         let pusher = FakePusher()
-        let stats = await poller(store, pusher, board: nil).pass(at: now)
+        await poller(store, pusher).pass(at: now)
+        let pushed = try #require(await store.registration(for: sampleToken))
+        #expect(pushed.lastState != nil)
+        // Long enough after that a refresh would be due
+        let stats = await poller(store, pusher, board: nil).pass(at: now.addingTimeInterval(400))
         #expect(stats.withoutFeeds == 1)
-        #expect(pusher.pushes.isEmpty)
-        #expect(await store.count == 1)
+        #expect(pusher.pushes.count == 1)
+        let kept = try #require(await store.registration(for: sampleToken))
+        #expect(kept.lastState == pushed.lastState)
+        #expect(kept.lastPush == pushed.lastPush)
+    }
+
+    @Test func keepsAnAlertWhileTheAlertsCantBeHad() async throws {
+        let store = try Store(directory: nil)
+        try await registered(store)
+        let pusher = FakePusher()
+        var board = fixtureBoard()
+        await poller(store, pusher, board: board).pass(at: now)
+        #expect(pusher.pushes.last?.state.notice == "Service change")
+
+        board.alerts = nil
+        await poller(store, pusher, board: board).pass(at: now.addingTimeInterval(30))
+        #expect(pusher.pushes.count == 1)
+        #expect(await store.registration(for: sampleToken)?.lastState?.notice == "Service change")
+        // Once they're had again and it's over, it goes
+        board.alerts = []
+        await poller(store, pusher, board: board).pass(at: now.addingTimeInterval(60))
+        #expect(pusher.pushes.count == 2)
+        #expect(pusher.pushes.last?.state.notice == nil)
+    }
+
+    @Test func keepsAnElevatorOutWhileTheOutagesCantBeHad() async throws {
+        let store = try Store(directory: nil)
+        var registration = testRegistration()
+        registration.selection.elevatorAlerts = true
+        _ = try await store.upsert(registration, maxTotal: 10, maxPerOwner: 5)
+        let pusher = FakePusher()
+        var board = fixtureBoard()
+        await poller(store, pusher, board: board).pass(at: now)
+        #expect(pusher.pushes.last?.state.notice == "Elevator out")
+
+        board.outages = nil
+        await poller(store, pusher, board: board).pass(at: now.addingTimeInterval(30))
+        #expect(pusher.pushes.count == 1)
+        // With the trains gone, though, it's not an elevator the countdown names
+        board.trains = []
+        board.alerts = []
+        await poller(store, pusher, board: board).pass(at: now.addingTimeInterval(60))
+        #expect(pusher.pushes.count == 2)
+        #expect(pusher.pushes.last?.state.notice == "No trains predicted")
     }
 
     @Test func dropsTokensAPNsNoLongerKnows() async throws {
@@ -156,14 +264,55 @@ func testRegistration(token: String = sampleToken, owner: String = "key", starte
         #expect(await store.count == 0)
     }
 
-    @Test func aRegistrationReplacedDuringAPassIsntOverwritten() async throws {
+    @Test func forgetsOneNeverPushedOnceItWouldHaveEnded() async throws {
+        let store = try Store(directory: nil)
+        try await registered(store, started: now.addingTimeInterval(-ActivityState.lifetime - 1))
+        let pusher = FakePusher()
+        let stats = await poller(store, pusher).pass(at: now)
+        #expect(stats.ended == 1)
+        // There's nothing on the phone to end
+        #expect(pusher.pushes.isEmpty)
+        #expect(await store.count == 0)
+    }
+
+    @Test func forgetsOneWhoseEndFailsAndCountsEveryFailedPush() async throws {
+        let store = try Store(directory: nil)
+        func register(_ i: Int, started: Date) async throws {
+            _ = try await store.upsert(testRegistration(token: String(format: "%064x", i + 1), owner: "k\(i)",
+                                                        started: started), maxTotal: 100, maxPerOwner: 5)
+        }
+        for i in 0..<12 {
+            try await register(i, started: now.addingTimeInterval(-ActivityState.lifetime + 10))
+        }
+        await poller(store, FakePusher()).pass(at: now)
+        for i in 12..<15 {
+            try await register(i, started: now)
+        }
+        // 12 ends and 3 first pushes, more than there are error lines for
+        let failing = FakePusher(result: .failed("APNs 500"))
+        let stats = await poller(store, failing).pass(at: now.addingTimeInterval(10))
+        #expect(failing.pushes.filter { $0.event == .end }.count == 12)
+        #expect(stats.ended == 12)
+        #expect(stats.failed == 15)
+        #expect("\(stats)" == "15 countdowns, 0 updates, 0 refreshes, 12 ended, 0 dropped, 15 failed, 0 without feeds")
+        #expect(await store.count == 3)
+    }
+
+    @Test(arguments: [PushResult.sent, .invalidToken("410 Unregistered")])
+    func aRegistrationReplacedDuringAPassIsntOverwritten(result: PushResult) async throws {
         let store = try Store(directory: nil)
         try await registered(store)
         let old = try #require(await store.registration(for: sampleToken))
-        try await registered(store)
-        try await store.apply([.pushed(token: sampleToken, revision: old.revision, state: state(train: 3), at: now),
-                               .drop(token: sampleToken, revision: old.revision)])
-        #expect(await store.registration(for: sampleToken)?.lastState == nil)
+        // The app registers it again while the pass fetches the feeds
+        let poller = Poller(store: store, pusher: FakePusher(result: result), interval: 30) { selections, _ in
+            _ = try? await store.upsert(testRegistration(), maxTotal: 10, maxPerOwner: 5)
+            return Dictionary(selections.map { ($0, fixtureBoard()) }, uniquingKeysWith: { a, _ in a })
+        }
+        let stats = await poller.pass(at: now)
+        #expect(stats.updates + stats.dropped == 1)
+        let new = try #require(await store.registration(for: sampleToken))
+        #expect(new.revision != old.revision)
+        #expect(new.lastState == nil)
         #expect(await store.count == 1)
     }
 
@@ -173,15 +322,11 @@ func testRegistration(token: String = sampleToken, owner: String = "key", starte
             _ = try await store.upsert(testRegistration(token: String(format: "%064x", i + 1), owner: "k\(i)"),
                                        maxTotal: 100, maxPerOwner: 5)
         }
-        let pusher = FakePusher(delay: .milliseconds(20))
-        let start = ContinuousClock.now
+        // Each push waits for 8 to be in flight at once: as many as there can be, and no more
+        let pusher = FakePusher(gate: 8)
         let stats = await poller(store, pusher, concurrency: 8).pass(at: now)
-        let elapsed = ContinuousClock.now - start
         #expect(stats.updates == 40)
-        #expect(pusher.maxInFlight <= 8)
-        #expect(pusher.maxInFlight >= 4)
-        // 40 at 20 ms, 8 at a time, is about 100 ms; one at a time would be 800
-        #expect(elapsed < .milliseconds(600))
+        #expect(pusher.maxInFlight == 8)
         #expect(await store.all.allSatisfy { $0.lastState != nil })
     }
 
@@ -224,6 +369,38 @@ func testRegistration(token: String = sampleToken, owner: String = "key", starte
         #expect(Poller.schedule(elapsed: 30, interval: 30) == (30, 1))
         #expect(Poller.schedule(elapsed: 45, interval: 30) == (15, 1))
         #expect(Poller.schedule(elapsed: 95, interval: 30) == (25, 3))
+    }
+
+    @Test(.timeLimit(.minutes(1))) func runsPassesAndPurgesHourlyUntilCancelled() async throws {
+        let store = try Store(directory: nil)
+        let started = Date.now
+        func key(_ id: String) -> AttestKey {
+            let lastUsed = started.addingTimeInterval(-91 * 86400)
+            return AttestKey(id: id, publicKey: Data(repeating: 4, count: 65), counter: 0, environment: .production,
+                             created: lastUsed, lastUsed: lastUsed)
+        }
+        #expect(try await store.addKey(key("old")))
+        _ = try await store.upsert(testRegistration(started: started), maxTotal: 10, maxPerOwner: 5)
+        let passes = Counter()
+        let poller = Poller(store: store, pusher: FakePusher(), interval: 0.01) { selections, _ in
+            passes.increment()
+            return Dictionary(selections.map { ($0, Board(trains: [])) }, uniquingKeysWith: { a, _ in a })
+        }
+        let run = Task { try await poller.run() }
+        while passes.value < 3 { try await Task.sleep(for: .milliseconds(5)) }
+        // Purged after the first pass, and not again within the hour
+        #expect(try await store.key(id: "old") == nil)
+        #expect(try await store.addKey(key("older")))
+        let after = passes.value
+        while passes.value < after + 2 { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(try await store.key(id: "older") != nil)
+
+        run.cancel()
+        try await run.value
+        let last = passes.value
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(passes.value == last)
+        #expect(await store.count == 1)
     }
 
     @Test func timesOutAHungPush() async {

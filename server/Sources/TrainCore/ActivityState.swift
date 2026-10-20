@@ -42,4 +42,35 @@ enum ActivityState {
         if new.following.count != last.following.count || new.followingRoutes != last.followingRoutes { return true }
         return zip(new.following, last.following).contains { abs($0.timeIntervalSince($1)) >= followingThreshold }
     }
+
+    /// The notice of a countdown with no trains and no alert that's why
+    /// (`ContentState.refreshed(for:board:settings:now:)`).
+    static let noTrains = "No trains predicted"
+
+    /// `new`, made from `board`, with `last`'s notice where that may still
+    /// hold but `board` can't say: it hasn't the alerts, or the outages, that
+    /// `selection` asks for, which isn't the same as there being none. The
+    /// notice would otherwise go, and come back with the next pass, a push
+    /// each time. An alert's stays unless an elevator out is now known to
+    /// come before it; an elevator's, unless the trains have gone, when the
+    /// notice names only an alert.
+    static func keepingNotice(of last: ContentState, in new: ContentState, board: Board,
+                              selection: Selection) -> ContentState {
+        guard let notice = last.notice, notice != new.notice else { return new }
+        let alerts = Set(ServiceAlert.Kind.allCases.map(\.label))
+        func isElevator(_ label: String?) -> Bool {
+            guard let label else { return false }
+            return label != noTrains && !alerts.contains(label)
+        }
+        let mayHold: Bool
+        if alerts.contains(notice) {
+            mayHold = selection.serviceAlerts && board.alerts == nil && !isElevator(new.notice)
+        } else {
+            mayHold = isElevator(notice) && selection.elevatorAlerts && board.outages == nil && new.notice != noTrains
+        }
+        guard mayHold else { return new }
+        var state = new
+        state.notice = notice
+        return state
+    }
 }

@@ -68,14 +68,21 @@ final class Poller: Service {
         }
     }
 
-    struct Stats: Equatable, Sendable {
+    struct Stats: Equatable, Sendable, CustomStringConvertible {
         var registrations = 0
         var updates = 0
         var refreshes = 0
         var ended = 0
         var dropped = 0
+        /// Pushes that failed: updates and refreshes, tried again next pass, and ends.
         var failed = 0
         var withoutFeeds = 0
+
+        /// The pass's line in the log.
+        var description: String {
+            "\(registrations) countdowns, \(updates) updates, \(refreshes) refreshes, \(ended) ended, "
+                + "\(dropped) dropped, \(failed) failed, \(withoutFeeds) without feeds"
+        }
     }
 
     private struct Job: Sendable {
@@ -88,11 +95,13 @@ final class Poller: Service {
 
     /// One round: ends countdowns that iOS would have ended, fetches each feed
     /// once for all the rest, and pushes to those that changed, `concurrency`
-    /// at a time. What happened is saved in one transaction.
+    /// at a time. What happened is saved in one transaction, and its totals
+    /// logged, even when there was nothing to do.
     @discardableResult
     func pass(at now: Date) async -> Stats {
         let all = await store.all
         var stats = Stats(registrations: all.count)
+        defer { Log.info("pass: \(stats)") }
         guard !all.isEmpty else { return stats }
 
         var jobs: [Job] = []
@@ -125,8 +134,10 @@ final class Poller: Service {
                 // As the app refreshes it (Shared/Countdown.swift)
                 let state: ContentState
                 if let last = registration.lastState {
-                    state = last.refreshed(for: registration.selection, board: board, settings: registration.settings,
-                                           now: now)
+                    let refreshed = last.refreshed(for: registration.selection, board: board,
+                                                   settings: registration.settings, now: now)
+                    state = ActivityState.keepingNotice(of: last, in: refreshed, board: board,
+                                                        selection: registration.selection)
                 } else if let new = ContentState(for: registration.selection, board: board, settings: registration.settings,
                                                  now: now, following: registration.trip, after: nil) {
                     state = new
@@ -160,9 +171,12 @@ final class Poller: Service {
             let registration = job.registration
             switch (job.kind, result) {
             case (.end, let result):
-                if case .failed(let reason) = result, errorLines < 10 {
-                    errorLines += 1
-                    Log.error("end \(registration.tokenPrefix) failed: \(reason)")
+                if case .failed(let reason) = result {
+                    stats.failed += 1
+                    if errorLines < 10 {
+                        errorLines += 1
+                        Log.error("end \(registration.tokenPrefix) failed: \(reason)")
+                    }
                 }
                 stats.ended += 1
                 outcomes.append(.drop(token: registration.token, revision: registration.revision))
@@ -196,8 +210,6 @@ final class Poller: Service {
         } catch {
             Log.error("couldn't save the pass: \(error)")
         }
-        Log.info("pass: \(stats.registrations) countdowns, \(stats.updates) updates, \(stats.refreshes) refreshes, "
-            + "\(stats.ended) ended, \(stats.dropped) dropped, \(stats.failed) failed")
         return stats
     }
 
@@ -210,12 +222,21 @@ final class Poller: Service {
     /// feeds didn't come, or are out of date, is left out.
     @Sendable
     static func liveBoards(for selections: [Selection], now: Date) async -> [Selection: Board] {
-        async let alertEntries = TrainService.alertEntries()
+        // Read afresh each pass, not as the app reuses them for 30 seconds
+        async let alertEntries = TrainService.alertEntries(reusingFor: 0)
         async let outageData = selections.contains(where: \.elevatorAlerts)
             ? TrainService.optionalData(from: OutagesFeed.url) : nil
         let trains = await TrainService.trains(for: selections, now: now)
         let (entries, outagesFeed) = await (alertEntries, outageData)
+        return boards(for: selections, trains: trains, alerts: entries, outages: outagesFeed, now: now)
+    }
 
+    /// `liveBoards(for:now:)` once the feeds are read: `trains` has each
+    /// selection's by `Selection.trainID`, and none for one whose own lines'
+    /// feeds didn't come; `alerts` and `outages` are those feeds as read, nil
+    /// when they couldn't be had.
+    static func boards(for selections: [Selection], trains: [String: [Arrival]], alerts entries: [AlertsFeed.Entry]?,
+                       outages outagesFeed: Data?, now: Date) -> [Selection: Board] {
         var outagesByPlatforms: [[String]: [Outage]?] = [:]
         var boards: [Selection: Board] = [:]
         for selection in Set(selections) {

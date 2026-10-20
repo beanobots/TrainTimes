@@ -211,7 +211,9 @@ enum TrainService {
             let urls = feedURLs(for: selection, includingOtherLines: includingOtherLines, ownLinesOnly: ownLinesOnly)
             guard urls.own.allSatisfy({ byStop[$0] != nil }) else { continue }
             let stopIDs = selection.stopIDs
-            let arrivals = (urls.own + urls.others).flatMap { url in stopIDs.flatMap { byStop[url]?[$0] ?? [] } }
+            // Typed a piece at a time: as one expression it's near too much for the type checker
+            let all: [URL] = urls.own + urls.others
+            let arrivals = all.flatMap { (url: URL) -> [Arrival] in stopIDs.flatMap { byStop[url]?[$0] ?? [] } }
             trains[selection.trainID] = Self.trains(for: selection, in: arrivals, now: now)
         }
         return trains
@@ -263,12 +265,14 @@ enum TrainService {
     private static let alertLists = InFlight<[AlertsFeed.Entry]>()
 
     /// The MTA's alerts, decoded once for every board (and the Nearby widget)
-    /// that asks within 30 seconds: each widget would otherwise decode all of
-    /// the feed's 1 MB itself. What's kept is the small part of it in effect
-    /// around now. Nil when not wanted or the feed couldn't be had.
-    static func alertEntries(if wanted: Bool = true) async -> [AlertsFeed.Entry]? {
+    /// that asks within `window` seconds: each widget would otherwise decode
+    /// all of the feed's 1 MB itself. What's kept is the small part of it in
+    /// effect around now. Nil when not wanted or the feed couldn't be had.
+    /// The push server, which asks once a pass, keeps none (0): a pass due
+    /// 30 seconds after the last would otherwise get that one's alerts.
+    static func alertEntries(if wanted: Bool = true, reusingFor window: TimeInterval = 30) async -> [AlertsFeed.Entry]? {
         guard wanted else { return nil }
-        return try? await alertLists.value(for: AlertsFeed.url, reusingFor: 30) {
+        return try? await alertLists.value(for: AlertsFeed.url, reusingFor: window) {
             try AlertsFeed.entries(in: try await data(from: AlertsFeed.url))
         }
     }

@@ -9,12 +9,22 @@ indirect enum CBORValue {
     case bytes([UInt8]), text(String), array([CBORValue]), map([(String, CBORValue)]), unsigned(UInt64)
 
     var encoded: [UInt8] {
+        /// The last `count` bytes of `value`, most significant first. A loop:
+        /// as one expression it's near too much for the type checker.
+        func bigEndian(_ value: UInt64, count: Int) -> [UInt8] {
+            var bytes: [UInt8] = []
+            for byte in (0..<count).reversed() {
+                bytes.append(UInt8(truncatingIfNeeded: value >> UInt64(8 * byte)))
+            }
+            return bytes
+        }
         func head(_ major: UInt8, _ value: UInt64) -> [UInt8] {
             switch value {
             case 0..<24: return [major << 5 | UInt8(value)]
             case 24..<256: return [major << 5 | 24, UInt8(value)]
             case 256..<65536: return [major << 5 | 25, UInt8(value >> 8), UInt8(value & 0xff)]
-            default: return [major << 5 | 26] + (0..<4).reversed().map { UInt8((value >> (8 * UInt64($0))) & 0xff) }
+            case 65536...UInt64(UInt32.max): return [major << 5 | 26] + bigEndian(value, count: 4)
+            default: return [major << 5 | 27] + bigEndian(value, count: 8)
             }
         }
         switch self {
