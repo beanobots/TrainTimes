@@ -4,7 +4,7 @@ A review of the whole repository at commit `9be9058` (19 October 2026): the iOS 
 
 ## Status after fixing (20 October 2026)
 
-The fixes are on branch `claude/codebase-review-jsby0y`. Each group of fixes was reviewed by a second agent told to find what it broke. The branch then had further review rounds until they turned up nothing new, with each finding checked by two more agents, one reproducing it and one trying to refute it. The server's tests (359 now, up from 85) pass on Linux with Swift 6.2.1, in a copy of the package given a module map for SQLite3, which only macOS's SDK provides. CI built the app and widget after every merge.
+The fixes are on branch `claude/codebase-review-jsby0y`. Each group of fixes was reviewed by a second agent told to find what it broke. The branch then had further review rounds until they turned up nothing new, with each finding checked by two more agents, one reproducing it and one trying to refute it. The server's tests (362 now, up from 85) pass on macOS in CI and on Linux with Swift 6.2.1, in a copy of the package given a module map for SQLite3, which only macOS's SDK provides. CI built the app and widget after every merge.
 
 **170 of the 174 issues are fixed.** The other four:
 
@@ -34,7 +34,7 @@ The fixes are on branch `claude/codebase-review-jsby0y`. Each group of fixes was
 
 - A push to `main` builds a new version only when it changes the app or how it's published. Running the workflow by hand publishes too.
 - Each build gets its own release, `v1.0.N`. The `latest` release takes its files, but its tag isn't moved.
-- The server builds and tests on macOS in `build-server.yml`, for pull requests and pushes to `main`. It hasn't run yet: GitHub runs a workflow only once it's on `main`, or for a pull request.
+- The server builds and tests on macOS in `build-server.yml`, for pull requests and pushes to `main`. It hasn't run as itself yet: GitHub runs a workflow only once it's on `main`, or for a pull request. Its steps were run, with the same results, from a temporary job in the iOS workflow.
 
 ## How it was done
 

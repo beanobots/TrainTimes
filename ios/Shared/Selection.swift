@@ -159,7 +159,7 @@ struct Selection: Codable, Hashable, Sendable {
     /// other way to another chosen there (`Platform.direction(_:of:with:)`),
     /// so they all go the way `heading` names. Toward Manhattan from Marcy Av,
     /// the J and Z are S and the M N; the M alone goes by its own, N, as an F
-    /// running on it does, and a Z running local by the J's, S.
+    /// running on it does. At Flushing Av, a Z running local goes by the J's, S.
     func direction(of route: String, at platform: Platform) -> Direction {
         platform.direction(direction, of: route, with: routes)
     }
