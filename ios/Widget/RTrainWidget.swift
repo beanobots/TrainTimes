@@ -180,7 +180,8 @@ struct Provider: AppIntentTimelineProvider {
     /// the next that gets there. The medium and large widgets also get one a
     /// minute, for their later trains' minutes to go and their maps. When the
     /// MTA can't be reached, the times last fetched, while any of them is
-    /// still to catch, said to be old.
+    /// still to catch, said to be old. The Transfers widget without a change
+    /// has just the one entry, with no trains.
     private static func plan(for selection: Selection, change: Change?, transfers: Bool, family: WidgetFamily,
                              largeText: Bool, widgetID: String) async -> Plan {
         let countdown = SharedStore.loadCountdown().flatMap { $0.ends > .now ? $0 : nil }
@@ -189,6 +190,21 @@ struct Provider: AppIntentTimelineProvider {
         let showsMap = hasMap && SharedStore.showsMap(for: selection.trainID, in: widgetID)
         let showsAlert = (family == .systemSmall || hasMap) && SharedStore.showsAlert(for: selection.alertID, in: widgetID)
         let settings = SharedStore.loadSettings()
+        // The Transfers widget without a change just says how to add one, with
+        // any alert it mentions; the app reloads it once one's added
+        if transfers && change == nil {
+            var notice: Notice?
+            if selection.serviceAlerts || selection.elevatorAlerts {
+                notice = await TrainService.notices(for: selection, includingOutages: selection.elevatorAlerts)
+                    .notice(for: selection, settings: settings)
+            }
+            if notice == nil {
+                SharedStore.closeAlert(for: selection.alertID, in: widgetID)
+            }
+            let entry = TrainEntry(date: .now, selection: selection, trains: [], notice: notice, showsAlert: showsAlert,
+                                   widgetID: widgetID, largeText: largeText, settings: settings, transfers: true)
+            return Plan(entries: [entry], fetched: .now)
+        }
         let taps = SharedStore.loadTaps(for: widgetID)
         let board: SharedStore.SavedBoard
         let updated: Bool
@@ -371,6 +387,9 @@ struct TrainWidgetView: View {
     private var marksScheduled: Bool { entry.settings.marksScheduledTimes }
 
     private var next: Arrival? { entry.trains.first }
+    /// The train the widget counts down to: on the Transfers widget, the next
+    /// one that gets to the change, which needn't be the next at your station.
+    private var countedDown: Arrival? { entry.transfers ? entry.connections?.first?.first : next }
     private var later: ArraySlice<Arrival> { entry.trains.dropFirst() }
     /// With a walking time, the countdown is to when to leave.
     private var walking: Bool { entry.selection.walkMinutes > 0 }
@@ -981,8 +1000,11 @@ struct TrainWidgetView: View {
     private func transferList(_ change: Change, width: CGFloat, style: BoardStyle) -> some View {
         let connections = Array((entry.connections ?? []).prefix(2))
         let size: CGFloat = entry.largeText ? 24 : 21
-        let lead = connections.map { countdownWidth(to: $0.first, size: size) }.max() ?? 0
-        let columns = TransferColumns(connections: connections, lead: lead, width: width)
+        // A live or timetable mark after the countdown, as marked
+        let mark = connections.contains { isMarked($0.first) } ? Self.markWidth(size: size * 0.36) + 3 : 0
+        let lead = (connections.map { countdownWidth(to: $0.first, size: size) }.max() ?? 0) + mark
+        let columns = TransferColumns(connections: connections, lead: lead, width: width,
+                                      nextMark: nextMarkWidth(connections))
         let height: CGFloat = entry.largeText ? 28 : 25
         return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: style.headerSpacing) {
@@ -1020,11 +1042,17 @@ struct TrainWidgetView: View {
         VStack(alignment: .leading, spacing: spacing) {
             ForEach(Array(connections.enumerated()), id: \.offset) { _, connection in
                 transferRow(connection, change: change, columns: columns, height: height) {
-                    countdown(to: connection.first)
-                        .font(.system(size: size, weight: .bold, design: .rounded))
-                        .foregroundStyle(connection.first.statusColor)
-                        .liveAccent(connection.first)
-                        .multilineTextAlignment(.leading)
+                    HStack(spacing: 3) {
+                        countdown(to: connection.first)
+                            .font(.system(size: size, weight: .bold, design: .rounded))
+                            .foregroundStyle(connection.first.statusColor)
+                            .liveAccent(connection.first)
+                            .multilineTextAlignment(.leading)
+                            // A live countdown takes more room than its digits,
+                            // which would leave a gap before its mark
+                            .frame(maxWidth: countdownWidth(to: connection.first, size: size), alignment: .leading)
+                        statusMark(connection.first, size: size * 0.36)
+                    }
                 }
             }
         }
@@ -1037,8 +1065,11 @@ struct TrainWidgetView: View {
         let style = BoardStyle.large
         let connections = entry.connections ?? []
         let later = Array(connections.dropFirst().prefix(3))
-        let lead = later.map { "\(minutesToLeave($0.first)) min".width(in: style.timeUIFont) }.max() ?? 0
-        let columns = TransferColumns(connections: later, lead: max(lead, "THEN IN".width(in: Self.labelUIFont)), width: width)
+        // A live or timetable mark after the minutes, as marked
+        let mark = later.contains { isMarked($0.first) } ? Self.markWidth(size: style.timeBullet * 0.7) + 3 : 0
+        let lead = (later.map { "\(minutesToLeave($0.first)) min".width(in: style.timeUIFont) }.max() ?? 0) + mark
+        let columns = TransferColumns(connections: later, lead: max(lead, "THEN IN".width(in: Self.labelUIFont)), width: width,
+                                      nextMark: nextMarkWidth(later))
         return VStack(alignment: .leading, spacing: 0) {
             transferHeader(change)
             VStack(alignment: .leading, spacing: 0) {
@@ -1083,11 +1114,14 @@ struct TrainWidgetView: View {
         return VStack(alignment: .leading, spacing: 3) {
             ForEach(Array(connections.enumerated()), id: \.offset) { _, connection in
                 transferRow(connection, change: change, columns: columns, height: 28) {
-                    Text("\(minutesToLeave(connection.first)) min")
-                        .font(style.timeFont)
-                        .foregroundStyle(connection.first.statusColor)
-                        .liveAccent(connection.first)
-                        .fixedSize()
+                    HStack(spacing: 3) {
+                        Text("\(minutesToLeave(connection.first)) min")
+                            .font(style.timeFont)
+                            .foregroundStyle(connection.first.statusColor)
+                            .liveAccent(connection.first)
+                            .fixedSize()
+                        statusMark(connection.first, size: style.timeBullet * 0.7)
+                    }
                 }
             }
         }
@@ -1189,12 +1223,16 @@ struct TrainWidgetView: View {
                 .padding(.horizontal, 8)
             if let next = connection.next {
                 LineBullet(route: next.route, size: 20)
+                if isMarked(next) {
+                    statusMark(next, size: style.timeBullet * 0.7)
+                        .padding(.leading, 5)
+                }
                 Text(next.time.clock)
                     .font(style.timeFont)
                     .foregroundStyle(next.statusColor)
                     .liveAccent(next)
                     .fixedSize()
-                    .padding(.leading, 5)
+                    .padding(.leading, isMarked(next) ? 3 : 5)
             }
         }
         .monospacedDigit()
@@ -1202,10 +1240,12 @@ struct TrainWidgetView: View {
         .frame(height: 24)
     }
 
-    /// "across the platform", or the walk to another one.
+    /// "across the platform", or the walk to another one, by where the two
+    /// trains stop; or staying on a train that goes on as one changed to.
     private func howToChange(_ connection: Connection, change: Change) -> String {
         guard let next = connection.next else { return "none predicted yet" }
-        return change.isAcross(next.route, from: entry.selection) ? "across the platform" : "\(change.walkMinutes) min walk to it"
+        if connection.staysOn { return "no change: stay on it" }
+        return change.isAcross(from: connection.arrival, to: next) ? "across the platform" : "\(change.walkMinutes) min walk to it"
     }
 
     private static let labelUIFont = UIFont.systemFont(ofSize: UIFont.preferredFont(forTextStyle: .caption2).pointSize,
@@ -1305,15 +1345,21 @@ struct TrainWidgetView: View {
             }
             .widgetAccentable(quick)
             .fixedSize()
-            .accessibilityLabel(connection.waitMinutes.map { "\($0) minute wait" } ?? "No train to change to")
+            .accessibilityLabel(connection.staysOn ? "Stay on"
+                : connection.waitMinutes.map { "\($0) minute wait" } ?? "No train to change to")
     }
 
-    /// The train met at the change: its bullet, then its time, the times lined up.
+    /// The train met at the change: its bullet, then (where any is marked)
+    /// its live or timetable mark, then its time, the times lined up.
     private func nextCell(_ connection: Connection, columns: TransferColumns) -> some View {
         let style = BoardStyle.large
+        let markSize = style.timeBullet * 0.7
         return HStack(spacing: 5) {
             if let next = connection.next {
                 LineBullet(route: next.route, size: style.timeBullet)
+                if columns.nextMark > 0 {
+                    markSlot(next, size: markSize)
+                }
                 Text(next.time.clock)
                     .font(style.timeFont)
                     .monospacedDigit()
@@ -1323,6 +1369,9 @@ struct TrainWidgetView: View {
                     .frame(width: columns.nextTime, alignment: .trailing)
             } else {
                 Color.clear.frame(width: style.timeBullet, height: style.timeBullet)
+                if columns.nextMark > 0 {
+                    Color.clear.frame(width: Self.markWidth(size: markSize), height: 1)
+                }
                 Text("–")
                     .font(style.timeFont)
                     .foregroundStyle(Color.boardGray)
@@ -1331,6 +1380,35 @@ struct TrainWidgetView: View {
         }
         .lineLimit(1)
         .frame(width: columns.next, alignment: .leading)
+    }
+
+    /// Whether `train`'s time gets a live or timetable mark, as marked.
+    private func isMarked(_ train: Arrival) -> Bool {
+        marksLive && train.isLive || marksScheduled && !train.isLive
+    }
+
+    /// The room `nextCell` keeps for the marks of `connections`' trains met,
+    /// and the gap after it; none where none is marked.
+    private func nextMarkWidth(_ connections: [Connection]) -> CGFloat {
+        connections.contains { connection in connection.next.map { isMarked($0) } ?? false }
+            ? Self.markWidth(size: BoardStyle.large.timeBullet * 0.7) + 5 : 0
+    }
+
+    /// `train`'s mark, as marked, or for one without, the room for it, so the
+    /// times after it still line up.
+    private func markSlot(_ train: Arrival, size: CGFloat) -> some View {
+        let live = marksLive && train.isLive
+        let scheduled = marksScheduled && !train.isLive
+        // Both are there, so the slot's as wide as the wider
+        return ZStack {
+            LiveMark(size: size)
+                .opacity(live ? 1 : 0)
+                .accessibilityHidden(!live)
+            ScheduledMark(size: size)
+                .opacity(scheduled ? 1 : 0)
+                .accessibilityHidden(!scheduled)
+        }
+        .foregroundStyle(train.statusColor)
     }
 
     /// The row of buttons, sharing it equally: ↻; on the medium and large
@@ -1467,7 +1545,7 @@ struct TrainWidgetView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             Spacer(minLength: 4)
             HStack(spacing: 8) {
-                if let next {
+                if let next = countedDown {
                     HStack(spacing: 3) {
                         countdownLabel(to: next, size: style.isLarge ? 17 : 15, showsMark: false)
                         markAndBullet(next, bulletSize: style.isLarge ? 15 : 13)
@@ -1484,7 +1562,9 @@ struct TrainWidgetView: View {
             }
             .font(.caption)
             .lineLimit(1)
-            buttons(style).padding(.top, family == .systemSmall ? 10 : 8)
+            if hasButtons {
+                buttons(style).padding(.top, family == .systemSmall ? 10 : 8)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
@@ -1543,6 +1623,9 @@ private struct TransferColumns {
     let arrive: CGFloat
     let wait: CGFloat
     let nextTime: CGFloat
+    /// The room for a live or timetable mark before the time of the train
+    /// met, and the gap after it; none where none is marked.
+    let nextMark: CGFloat
     let gap: CGFloat
     /// Whether there's room for when your train gets to the change.
     let showsArrival: Bool
@@ -1555,11 +1638,12 @@ private struct TransferColumns {
 
     /// When your train leaves, an arrow, and when it gets there; or just when it leaves.
     var trip: CGFloat { showsArrival ? leave + Self.tripSpacing * 2 + Self.arrow + arrive : leave }
-    /// The bullet and time of the train met.
-    var next: CGFloat { BoardStyle.large.timeBullet + 5 + nextTime }
+    /// The bullet, mark and time of the train met.
+    var next: CGFloat { BoardStyle.large.timeBullet + 5 + nextMark + nextTime }
 
-    /// `lead` is how wide the first column is, and `width` the room for them all.
-    init(connections: [Connection], lead: CGFloat, width: CGFloat) {
+    /// `lead` is how wide the first column is, `width` the room for them all,
+    /// and `nextMark` the room for the train met's mark.
+    init(connections: [Connection], lead: CGFloat, width: CGFloat, nextMark: CGFloat = 0) {
         let style = BoardStyle.large
         let points = { (style: UIFont.TextStyle) in UIFont.preferredFont(forTextStyle: style).pointSize }
         let tripFont = UIFont.monospacedDigitSystemFont(ofSize: points(.subheadline), weight: .medium)
@@ -1575,7 +1659,8 @@ private struct TransferColumns {
         self.arrive = arrive
         self.wait = wait
         self.nextTime = nextTime
-        let withoutArrival = lead + leave + wait + style.timeBullet + 5 + nextTime
+        self.nextMark = nextMark
+        let withoutArrival = lead + leave + wait + style.timeBullet + 5 + nextMark + nextTime
         let used = withoutArrival + Self.tripSpacing * 2 + Self.arrow + arrive
         let showsArrival = used + 3 * Self.minimumGap <= width
         self.showsArrival = showsArrival

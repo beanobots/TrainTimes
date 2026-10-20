@@ -155,8 +155,8 @@ extension Selection {
 
     /// Opens the app at the times of this train and of the lines it changes to,
     /// from the Transfers widget: "traintimes://transfer?station=R33&lines=R&
-    /// direction=N&elevators=0&walk=4&change=R31&to=D,N". The walking time
-    /// goes along so the page leaves out the trains the widget does.
+    /// direction=N&elevators=0&walk=4&change=R31&to=D,N&going=N". The walking
+    /// time goes along so the page leaves out the trains the widget does.
     func transferURL(changingAt change: Change) -> URL {
         let base = link(to: "transfer")
         guard var components = URLComponents(url: base, resolvingAgainstBaseURL: false) else { return base }
@@ -164,6 +164,7 @@ extension Selection {
             URLQueryItem(name: "walk", value: String(walkMinutes)),
             URLQueryItem(name: "change", value: change.stationID),
             URLQueryItem(name: "to", value: change.routes.joined(separator: ",")),
+            URLQueryItem(name: "going", value: change.departureDirection(for: self).rawValue),
         ]
         return components.url ?? base
     }
@@ -175,7 +176,8 @@ extension Selection {
               let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems else { return nil }
         let value = { (name: String) in items.first { $0.name == name }?.value }
         guard let stationID = value("change"), let routes = value("to"),
-              let change = Change(stationID: stationID, routes: routes.split(separator: ",").map(String.init))
+              let change = Change(stationID: stationID, routes: routes.split(separator: ",").map(String.init),
+                                  direction: value("going").flatMap(Direction.init(rawValue:)))
                   .validated(for: selection) else { return nil }
         selection.walkMinutes = value("walk").flatMap(Int.init) ?? 0
         return (selection, change)

@@ -302,7 +302,8 @@ private struct TripSections: View {
                 TrainPicker(selection: $selection)
             }
             // Another line or direction goes on another way, which the change
-            // isn't on; another station on the same way keeps it
+            // isn't on; another station on the same way keeps it, while the
+            // change is still ahead of it
             .onChange(of: selection) { old, new in
                 if old.routes != new.routes || old.direction != new.direction {
                     change = nil
@@ -374,9 +375,9 @@ private struct CommuteSection: View {
         Binding {
             widget.commute != nil
         } set: { on in
-            // Starts out as the widget's own train, with its walking time,
-            // for you to choose another
-            widget.commute = on ? CommutingHours(selection: widget.selection) : nil
+            // Starts out as the widget's own train, with its walking time and
+            // change, for you to choose another
+            widget.commute = on ? CommutingHours(selection: widget.selection, change: widget.change) : nil
         }
     }
 
@@ -468,7 +469,7 @@ private struct ChangeRow: View {
     let selection: Selection
 
     private var subtitle: String {
-        let heading = change.station?.directionLabel(selection.direction, routes: change.routes) ?? ""
+        let heading = change.heading(for: selection)
         let how = change.isAllAcross(from: selection) ? "across the platform" : "\(change.walkMinutes) min walk"
         return "\(Lines.list(change.routes, joinedBy: "or")) \(heading) · \(how)"
     }

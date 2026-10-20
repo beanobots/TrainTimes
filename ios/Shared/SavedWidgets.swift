@@ -28,15 +28,15 @@ struct SavedWidget: Codable, Hashable, Identifiable, Sendable {
         case id, name, selection, change, commute
     }
 
-    /// One saved without a name still loads, going by the station's. Any
-    /// property added later needs a default here too: one widget that can't
-    /// be read leaves them all unread.
+    /// One saved without a name still loads, going by the station's, and one
+    /// whose change can't be read loses just that. Any property added later
+    /// needs a default here too: one widget that can't be read leaves them all unread.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.init(id: try container.decode(UUID.self, forKey: .id),
                   name: try container.decodeIfPresent(String.self, forKey: .name) ?? "",
                   selection: try container.decode(Selection.self, forKey: .selection),
-                  change: try container.decodeIfPresent(Change.self, forKey: .change),
+                  change: try? container.decodeIfPresent(Change.self, forKey: .change),
                   commute: try container.decodeIfPresent(CommutingHours.self, forKey: .commute))
     }
 
@@ -189,11 +189,12 @@ struct CommutingHours: Codable, Hashable, Sendable {
 
 extension CommutingHours {
     /// Hours saved without any of these still load, with them at their
-    /// defaults. Here, not in the type, so it keeps its memberwise init.
+    /// defaults, and a change that can't be read is left out. Here, not in
+    /// the type, so it keeps its memberwise init.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.init(selection: try container.decode(Selection.self, forKey: .selection),
-                  change: try container.decodeIfPresent(Change.self, forKey: .change))
+                  change: try? container.decodeIfPresent(Change.self, forKey: .change))
         start = try container.decodeIfPresent(Int.self, forKey: .start) ?? start
         end = try container.decodeIfPresent(Int.self, forKey: .end) ?? end
         weekdays = try container.decodeIfPresent(Set<Int>.self, forKey: .weekdays) ?? weekdays

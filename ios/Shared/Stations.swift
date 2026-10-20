@@ -144,11 +144,15 @@ enum StationDirectory {
     /// Every station, in the list's order.
     static let all: [Station] = stations(from: platforms)
 
-    /// Each station by each of its platforms' ids.
-    private static let byID = Dictionary(uniqueKeysWithValues: all.flatMap { station in
+    /// Each station by each of its platforms' ids. Should stations.json list
+    /// an id twice, the first is kept.
+    private static let byID = Dictionary(all.flatMap { station in
         station.platforms.map { ($0.id, station) }
-    })
-    private static let platformsByID = Dictionary(uniqueKeysWithValues: platforms.map { ($0.id, $0) })
+    }, uniquingKeysWith: { first, _ in first })
+    private static let platformsByID = Dictionary(platforms.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+
+    /// Each complex's stations, in the list's order.
+    private static let byComplex = Dictionary(grouping: all, by: \.complex)
 
     /// Each line's stops from its northern end south, by bullet label ("S" is
     /// every shuttle; lines.json is built by tools/make_lines.py).
@@ -169,6 +173,18 @@ enum StationDirectory {
             (station, station.platforms.compactMap { position[$0.id] }.min() ?? Int.max, offset)
         }
         return ranked.sorted { ($0.1, $0.2) < ($1.1, $1.2) }.map(\.0)
+    }
+
+    /// The stops of the line labeled `label` from its northern end south, by
+    /// platform id; nil where lines.json has none.
+    static func stops(onLine label: String) -> [String]? {
+        lineStops[label]
+    }
+
+    /// `station`, then the stations passageways join it to, which are free to
+    /// change to: 59 St's 4 5 6 for Lexington Av/59 St's N R W.
+    static func stations(inComplexOf station: Station) -> [Station] {
+        [station] + (byComplex[station.complex] ?? []).filter { $0.id != station.id }
     }
 
     /// Whether `route`'s line ends at `station` going `direction`, by day: it's

@@ -31,15 +31,23 @@ struct StationPage: Hashable {
 }
 
 /// A Transfers widget's two stations: its train at yours, and the lines it
-/// changes to at the change, going the same way.
+/// changes to at the change, going their way.
 struct TransferPage: Hashable {
     let selection: Selection
     let change: Change
 
-    /// The lines changed to, as a train of their own at the change.
-    var changeTrain: Selection {
-        Selection(stationID: change.stationID, routes: change.routes, direction: selection.direction,
-                  elevatorAlerts: selection.elevatorAlerts, serviceAlerts: selection.serviceAlerts)
+    /// The lines changed to, as trains of their own at the change: one for
+    /// each station of it they stop at, as 59 St's 4 5 6 for a change at
+    /// Lexington Av/59 St.
+    var changeTrains: [Selection] {
+        guard let station = change.station else { return [] }
+        let direction = change.departureDirection(for: selection)
+        return StationDirectory.stations(inComplexOf: station).compactMap { joined in
+            let routes = joined.routes.filter(change.routes.contains)
+            guard !routes.isEmpty else { return nil }
+            return Selection(stationID: joined.id, routes: routes, direction: direction,
+                             elevatorAlerts: selection.elevatorAlerts, serviceAlerts: selection.serviceAlerts)
+        }
     }
 }
 
@@ -521,7 +529,7 @@ private struct TransferLive: View {
     /// Moves along every few seconds so the minutes count down.
     @State private var now = Date.now
 
-    private var selections: [Selection] { [page.selection, page.changeTrain] }
+    private var selections: [Selection] { [page.selection] + page.changeTrains }
 
     var body: some View {
         List {
@@ -533,7 +541,9 @@ private struct TransferLive: View {
                 row(page.selection)
             }
             Section("Then change") {
-                row(page.changeTrain)
+                ForEach(page.changeTrains, id: \.trainID) { train in
+                    row(train)
+                }
             }
         }
         .navigationTitle("Transfer")
