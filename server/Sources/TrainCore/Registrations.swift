@@ -24,7 +24,10 @@ struct Registration: Sendable, Equatable {
     /// New with every registration of the token, so a poll that began before
     /// it was registered again doesn't record its push against the new one.
     var revision: UUID
+    /// The state last pushed; before the first push, the app's own, where it
+    /// sent it (`RegistrationRequest.state`).
     var lastState: ContentState? = nil
+    /// Nil before the first push.
     var lastPush: Date? = nil
 
     var settings: AppSettings {
@@ -68,7 +71,23 @@ struct RegistrationRequest: Decodable, Sendable {
     /// Seconds since 2001, as `JSONEncoder` writes a `Date` by default.
     var started: Date?
     /// `AppSettings.alertKinds`, as the app encodes it: `[0, 1, 2, 3]`.
-    var alertKinds: Set<ServiceAlert.Kind>?
+    var alertKinds: ServiceAlert.KnownKinds?
+    /// The countdown's state as the app last posted it, so that the first
+    /// push moves on from the train it shows as every later one does, not
+    /// from `trip`, which may have gone, taking off the walk again: a
+    /// countdown is registered again with each new push token, as it runs.
+    var state: ContentState?
+
+    /// Whether `state` is no bigger than one the app posts. Parts of it are
+    /// pushed back, as it was sent, and APNs refuses a payload over 4 KB.
+    var stateFits: Bool {
+        guard let state else { return true }
+        let followingRoutes = state.followingRoutes ?? []
+        return state.trip.utf8.count <= 256 && (state.terminal?.utf8.count ?? 0) <= 256
+            && (state.notice?.utf8.count ?? 0) <= 256 && (state.route?.utf8.count ?? 0) <= 16
+            && state.following.count <= 10 && followingRoutes.count <= 10
+            && followingRoutes.allSatisfy { $0.utf8.count <= 16 }
+    }
 }
 
 /// What a poll did to a registration, saved in one transaction per poll.
@@ -161,19 +180,16 @@ actor Store {
     /// oldest ones: the app counts down to one train at a time, and one it
     /// couldn't unregister mustn't stop it registering the next.
     func upsert(_ registration: Registration, maxTotal: Int, maxPerOwner: Int) throws -> UpsertResult {
-        if let existing = registrations[registration.token] {
-            guard existing.owner == registration.owner else { return .ownedByOther }
-        } else if registrations.count >= maxTotal {
-            return .full
-        }
+        let existing = registrations[registration.token]
+        if let existing, existing.owner != registration.owner { return .ownedByOther }
         let others = (tokensByOwner[registration.owner] ?? []).subtracting([registration.token])
             .compactMap { registrations[$0] }
             .sorted { $0.started < $1.started }
         let evicted = others.prefix(max(0, others.count - (maxPerOwner - 1))).map(\.token)
+        // Full only if it adds one: replacing a token, or dropping one of the owner's to make room, doesn't
+        if existing == nil, registrations.count - evicted.count >= maxTotal { return .full }
         try db.transaction {
-            for token in evicted {
-                try db.query("DELETE FROM registrations WHERE token = ?", [.text(token)])
-            }
+            try Self.delete(evicted, from: db)
             try write(registration)
         }
         for token in evicted { unindex(token) }
@@ -187,7 +203,7 @@ actor Store {
     func remove(_ token: String, owner: String) throws -> RemoveResult {
         guard let existing = registrations[token] else { return .notFound }
         guard existing.owner == owner else { return .notOwner }
-        try db.query("DELETE FROM registrations WHERE token = ?", [.text(token)])
+        try Self.delete([token], from: db)
         unindex(token)
         return .removed
     }
@@ -220,12 +236,18 @@ actor Store {
                     .text(registration.trip), .text(registration.token),
                 ])
             }
-            for token in dropped {
-                try db.query("DELETE FROM registrations WHERE token = ?", [.text(token)])
-            }
+            try Self.delete(dropped, from: db)
         }
         for registration in changed { registrations[registration.token] = registration }
         for token in dropped { unindex(token) }
+    }
+
+    /// Deletes the tokens' rows, and only those: the caller unindexes them
+    /// once that's committed.
+    private static func delete(_ tokens: [String], from db: SQLite) throws {
+        for token in tokens {
+            try db.query("DELETE FROM registrations WHERE token = ?", [.text(token)])
+        }
     }
 
     private func write(_ registration: Registration) throws {
@@ -249,26 +271,48 @@ actor Store {
         ])
     }
 
+    /// Each row on its own, so one this build can't read doesn't stop the
+    /// server starting: a row it can't read (a selection that doesn't decode,
+    /// say) is deleted, and alert kinds or a last state it can't read are left
+    /// out (the next pass then pushes afresh).
     private static func loadRegistrations(_ db: SQLite) throws -> [Registration] {
         let decoder = JSONDecoder()
-        return try db.query("""
+        var loaded: [Registration] = []
+        var unreadable: [String] = []
+        for row in try db.query("""
             SELECT token, owner, environment, selection, trip, started, alert_kinds, revision, last_state, last_push
             FROM registrations
-            """).compactMap { row in
-            guard let token = row[0].text, let owner = row[1].text,
+            """) {
+            guard let token = row[0].text else { continue }
+            guard let owner = row[1].text,
                   let environment = row[2].text.flatMap(PushEnvironment.init(rawValue:)),
-                  let selection = row[3].blob, let trip = row[4].text, let started = row[5].real,
-                  let revision = row[7].text.flatMap(UUID.init(uuidString:)) else { return nil }
-            return Registration(
-                token: token, owner: owner, environment: environment,
-                selection: try decoder.decode(Selection.self, from: selection), trip: trip,
-                started: Date(timeIntervalSinceReferenceDate: started),
-                alertKinds: try row[6].blob.map { try decoder.decode(Set<ServiceAlert.Kind>.self, from: $0) },
-                revision: revision,
-                lastState: try row[8].blob.map { try decoder.decode(ContentState.self, from: $0) },
-                lastPush: row[9].real.map(Date.init(timeIntervalSinceReferenceDate:))
-            )
+                  let selection = row[3].blob.flatMap({ try? decoder.decode(Selection.self, from: $0) }),
+                  let trip = row[4].text, let started = row[5].real,
+                  let revision = row[7].text.flatMap(UUID.init(uuidString:)) else {
+                unreadable.append(token)
+                continue
+            }
+            let alertKinds = row[6].blob.flatMap { try? decoder.decode(ServiceAlert.KnownKinds.self, from: $0).kinds }
+            let lastState = row[8].blob.flatMap { try? decoder.decode(ContentState.self, from: $0) }
+            var lost: [String] = []
+            if alertKinds == nil, row[6].blob != nil { lost.append("alert kinds") }
+            if lastState == nil, row[8].blob != nil { lost.append("last state") }
+            if !lost.isEmpty {
+                Log.error("load \(Registration.prefix(of: token)): left out its \(lost.joined(separator: " and ")), which couldn't be read")
+            }
+            loaded.append(Registration(
+                token: token, owner: owner, environment: environment, selection: selection, trip: trip,
+                started: Date(timeIntervalSinceReferenceDate: started), alertKinds: alertKinds, revision: revision,
+                lastState: lastState, lastPush: row[9].real.map(Date.init(timeIntervalSinceReferenceDate:))
+            ))
         }
+        if !unreadable.isEmpty {
+            try db.transaction { try delete(unreadable, from: db) }
+            for token in unreadable {
+                Log.error("drop \(Registration.prefix(of: token)): couldn't read it from \(fileName)")
+            }
+        }
+        return loaded
     }
 
     private func index(_ registration: Registration) {
@@ -284,7 +328,8 @@ actor Store {
 
     // MARK: registrations.json, from before the database
 
-    /// The shape registrations.json had.
+    /// The shape registrations.json had. Alert kinds or a last state this build
+    /// can't read are left out, as they are from the database.
     private struct LegacyRegistration: Decodable {
         var token: String
         var environment: PushEnvironment
@@ -295,13 +340,47 @@ actor Store {
         var revision: UUID
         var lastState: ContentState?
         var lastPush: Date?
+
+        private enum CodingKeys: String, CodingKey {
+            case token, environment, selection, trip, started, alertKinds, revision, lastState, lastPush
+        }
+
+        init(from decoder: any Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            token = try container.decode(String.self, forKey: .token)
+            environment = try container.decode(PushEnvironment.self, forKey: .environment)
+            selection = try container.decode(Selection.self, forKey: .selection)
+            trip = try container.decode(String.self, forKey: .trip)
+            started = try container.decode(Date.self, forKey: .started)
+            alertKinds = try? container.decodeIfPresent(ServiceAlert.KnownKinds.self, forKey: .alertKinds)?.kinds
+            revision = try container.decode(UUID.self, forKey: .revision)
+            lastState = try? container.decodeIfPresent(ContentState.self, forKey: .lastState)
+            lastPush = try container.decodeIfPresent(Date.self, forKey: .lastPush)
+        }
     }
 
-    /// Moves registrations.json's registrations into the database, then deletes it.
+    /// One of registrations.json's entries, or nil when it can't be read.
+    private struct LegacyEntry: Decodable {
+        var registration: LegacyRegistration?
+
+        init(from decoder: any Decoder) throws {
+            registration = try? LegacyRegistration(from: decoder)
+        }
+    }
+
+    /// Moves registrations.json's registrations into the database, then deletes
+    /// it. Entries that can't be read are dropped; a file that can't be read is left as it is.
     private static func migrateLegacyFile(in directory: URL, db: SQLite, existing: Set<String>) throws -> [Registration] {
         let file = directory.appendingPathComponent(legacyFileName)
         guard FileManager.default.fileExists(atPath: file.path) else { return [] }
-        let legacy = try JSONDecoder().decode([LegacyRegistration].self, from: Data(contentsOf: file))
+        guard let entries = try? JSONDecoder().decode([LegacyEntry].self, from: Data(contentsOf: file)) else {
+            Log.error("couldn't read \(legacyFileName), so left it in \(directory.path)")
+            return []
+        }
+        let legacy = entries.compactMap(\.registration)
+        if legacy.count < entries.count {
+            Log.error("dropped \(entries.count - legacy.count) registrations from \(legacyFileName) that couldn't be read")
+        }
         let moved = legacy.filter { !existing.contains($0.token) }.map { old in
             Registration(token: old.token, owner: Owner.legacy, environment: old.environment, selection: old.selection,
                          trip: old.trip, started: old.started, alertKinds: old.alertKinds, revision: old.revision,

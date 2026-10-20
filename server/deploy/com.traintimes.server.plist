@@ -56,17 +56,22 @@
         <string>100000</string>
         <key>MAX_REGISTRATIONS_PER_KEY</key>
         <string>5</string>
+        <!-- RATE_LIMIT_BURST, left out, is the same as this -->
         <key>RATE_LIMIT_PER_MINUTE</key>
-        <string>30</string>
-        <key>RATE_LIMIT_BURST</key>
         <string>30</string>
         <key>MAX_CHALLENGES</key>
         <string>10000</string>
+        <key>MAX_CHALLENGES_PER_IP</key>
+        <string>10</string>
         <key>MAX_KEYS_PER_IP_PER_DAY</key>
         <string>10</string>
         <!-- 1 to log every push, not just each pass's totals -->
         <key>LOG_PUSHES</key>
         <string>0</string>
+        <!-- StandardOutPath below: the server moves to the new file once
+             newsyslog has rotated it -->
+        <key>LOG_FILE</key>
+        <string>/usr/local/traintimes/server.log</string>
     </dict>
 
     <key>StandardOutPath</key>

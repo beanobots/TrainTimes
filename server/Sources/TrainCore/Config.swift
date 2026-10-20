@@ -33,6 +33,9 @@ struct Limits: Sendable {
     var requestsPerMinute = 30.0
     var requestBurst = 30.0
     var maxChallenges = 10_000
+    /// Outstanding challenges per client: one for each request the app is
+    /// about to sign, with room for a few it gave up on.
+    var challengesPerIP = 10
     var keysPerIPPerDay = 10
     /// Attest keys unused this long are forgotten.
     var keyRetention: TimeInterval = 90 * 86400
@@ -51,6 +54,9 @@ struct Config: Sendable {
     var pushConcurrency: Int
     var limits: Limits
     var logPushes: Bool
+    /// The file launchd sends stdout and stderr to, if the server's to move
+    /// to the new one when newsyslog rotates it.
+    var logFile: String?
 
     static let defaultAppID = "XUU899AG4D.com.rtrainwidget.app"
 
@@ -94,14 +100,18 @@ struct Config: Sendable {
                                                    range: 1...10_000_000)
         limits.maxRegistrationsPerKey = try Self.integer("MAX_REGISTRATIONS_PER_KEY", in: env,
                                                          default: limits.maxRegistrationsPerKey, range: 1...1000)
-        limits.requestsPerMinute = Double(try Self.integer("RATE_LIMIT_PER_MINUTE", in: env, default: 30, range: 1...100_000))
+        limits.requestsPerMinute = Double(try Self.integer("RATE_LIMIT_PER_MINUTE", in: env, default: Int(limits.requestsPerMinute),
+                                                           range: 1...100_000))
         limits.requestBurst = Double(try Self.integer("RATE_LIMIT_BURST", in: env, default: Int(limits.requestsPerMinute),
                                                       range: 1...100_000))
         limits.maxChallenges = try Self.integer("MAX_CHALLENGES", in: env, default: limits.maxChallenges, range: 1...10_000_000)
+        limits.challengesPerIP = try Self.integer("MAX_CHALLENGES_PER_IP", in: env, default: limits.challengesPerIP,
+                                                  range: 1...100_000)
         limits.keysPerIPPerDay = try Self.integer("MAX_KEYS_PER_IP_PER_DAY", in: env, default: limits.keysPerIPPerDay,
                                                   range: 1...100_000)
         self.limits = limits
         logPushes = Self.optional("LOG_PUSHES", in: env) == "1"
+        logFile = Self.optional("LOG_FILE", in: env)
     }
 
     static func required(_ name: String, in env: [String: String]) throws -> String {

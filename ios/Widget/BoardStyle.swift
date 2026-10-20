@@ -6,20 +6,27 @@ import UIKit
 /// widget, and the medium one on an SE or a mini, are compact.
 struct BoardStyle {
     let isLarge: Bool
+    /// The text size its text is drawn at, which its measurements go by: the
+    /// widget's own, which can be held below the phone's. Nil for the phone's.
+    var textSize: DynamicTypeSize? = nil
 
     static let compact = BoardStyle(isLarge: false)
     static let large = BoardStyle(isLarge: true)
+
+    /// This style, measuring its text at `size`.
+    func at(_ size: DynamicTypeSize) -> BoardStyle {
+        BoardStyle(isLarge: isLarge, textSize: size)
+    }
 
     // The station and direction across the top
 
     var bulletSize: CGFloat { isLarge ? 30 : 26 }
     var headerSpacing: CGFloat { isLarge ? 8 : 7 }
     var nameFont: Font { isLarge ? .body.bold() : .subheadline.bold() }
-    var nameUIFont: UIFont { .systemFont(ofSize: Self.points(isLarge ? .body : .subheadline), weight: .bold) }
+    var nameUIFont: UIFont { .systemFont(ofSize: points(isLarge ? .body : .subheadline), weight: .bold) }
     /// The station shrinks this far before it's cut short.
     var nameScale: CGFloat { isLarge ? 0.82 : 0.85 }
     var headingFont: Font { isLarge ? .footnote : .caption2 }
-    var headingUIFont: UIFont { .preferredFont(forTextStyle: isLarge ? .footnote : .caption2) }
     var headingScale: CGFloat { isLarge ? 0.85 : 0.8 }
 
     // The countdown
@@ -33,18 +40,23 @@ struct BoardStyle {
     var columnWidth: CGFloat { isLarge ? 150 : 130 }
     /// Between the column and what's to its left.
     var columnGap: CGFloat { 10 }
-    var rowHeight: CGFloat { isLarge ? 19 : 14.5 }
+    /// Taller as the text size makes its times taller, so the column has fewer
+    /// rows rather than ones run into each other.
+    var rowHeight: CGFloat { (isLarge ? 19 : 14.5) * growth(isLarge ? .body : .footnote) }
 
     /// How many rows the column has room for, from the top beside the station.
     var columnRows: Int { isLarge ? 4 : 5 }
 
     var timeFont: Font { isLarge ? .body.weight(.semibold) : .footnote.weight(.semibold) }
-    var timeUIFont: UIFont { .monospacedDigitSystemFont(ofSize: Self.points(isLarge ? .body : .footnote), weight: .semibold) }
+    var timeUIFont: UIFont { .monospacedDigitSystemFont(ofSize: points(isLarge ? .body : .footnote), weight: .semibold) }
     var minutesFont: Font { isLarge ? .subheadline.weight(.medium) : .caption.weight(.medium) }
-    var minutesUIFont: UIFont { .monospacedDigitSystemFont(ofSize: Self.points(isLarge ? .subheadline : .caption1), weight: .medium) }
+    var minutesUIFont: UIFont { .monospacedDigitSystemFont(ofSize: points(isLarge ? .subheadline : .caption1), weight: .medium) }
     var timeBullet: CGFloat { isLarge ? 16 : 13 }
     /// Between a later train's time and its minutes to go.
     var minutesGap: CGFloat { isLarge ? 12 : 10 }
+
+    /// The columns' labels, "LATER" and "THEN IN": caption2, semibold.
+    var labelUIFont: UIFont { .systemFont(ofSize: points(.caption2), weight: .semibold) }
 
     var stopFont: Font { isLarge ? .subheadline : .caption }
     var departsFont: Font { isLarge ? .footnote.weight(.semibold) : .caption.weight(.semibold) }
@@ -57,8 +69,22 @@ struct BoardStyle {
 
     var buttonHeight: CGFloat { isLarge ? 26 : 24 }
 
-    private static func points(_ style: UIFont.TextStyle) -> CGFloat {
-        UIFont.preferredFont(forTextStyle: style).pointSize
+    /// `style`'s font at the text size, to measure text drawn in it.
+    func font(_ style: UIFont.TextStyle) -> UIFont {
+        let traits = textSize.map { UITraitCollection(preferredContentSizeCategory: UIContentSizeCategory($0)) }
+        return UIFont.preferredFont(forTextStyle: style, compatibleWith: traits)
+    }
+
+    func points(_ style: UIFont.TextStyle) -> CGFloat {
+        font(style).pointSize
+    }
+
+    /// How much larger `style` is at the text size than at the default; 1 at
+    /// smaller sizes too.
+    private func growth(_ style: UIFont.TextStyle) -> CGFloat {
+        let standard = UIFont.preferredFont(forTextStyle: style,
+                                            compatibleWith: UITraitCollection(preferredContentSizeCategory: .large))
+        return max(1, points(style) / standard.pointSize)
     }
 }
 

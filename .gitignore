@@ -6,3 +6,5 @@ ios/build/
 ios/Payload/
 *.ipa
 ios/Config/
+# Python caches, from the tools importing line_styles.py
+__pycache__/

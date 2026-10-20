@@ -9,12 +9,22 @@ indirect enum CBORValue {
     case bytes([UInt8]), text(String), array([CBORValue]), map([(String, CBORValue)]), unsigned(UInt64)
 
     var encoded: [UInt8] {
+        /// The last `count` bytes of `value`, most significant first. A loop:
+        /// as one expression it's near too much for the type checker.
+        func bigEndian(_ value: UInt64, count: Int) -> [UInt8] {
+            var bytes: [UInt8] = []
+            for byte in (0..<count).reversed() {
+                bytes.append(UInt8(truncatingIfNeeded: value >> UInt64(8 * byte)))
+            }
+            return bytes
+        }
         func head(_ major: UInt8, _ value: UInt64) -> [UInt8] {
             switch value {
             case 0..<24: return [major << 5 | UInt8(value)]
             case 24..<256: return [major << 5 | 24, UInt8(value)]
             case 256..<65536: return [major << 5 | 25, UInt8(value >> 8), UInt8(value & 0xff)]
-            default: return [major << 5 | 26] + (0..<4).reversed().map { UInt8((value >> (8 * UInt64($0))) & 0xff) }
+            case 65536...UInt64(UInt32.max): return [major << 5 | 26] + bigEndian(value, count: 4)
+            default: return [major << 5 | 27] + bigEndian(value, count: 8)
             }
         }
         switch self {
@@ -78,14 +88,18 @@ struct TestAuthority {
     func attestation(appID: String, challenge: [UInt8], deviceKey: P256.Signing.PrivateKey,
                      environment: AttestEnvironment = .production, counter: UInt32 = 0,
                      credentialID: [UInt8]? = nil, nonceChallenge: [UInt8]? = nil,
-                     signer: P256.Signing.PrivateKey? = nil) throws -> [UInt8] {
+                     signer: P256.Signing.PrivateKey? = nil, extraCertificates: [Certificate] = [],
+                     flags: UInt8 = 0x40, aaguid: [UInt8]? = nil) throws -> [UInt8] {
         let keyID = Self.keyID(of: deviceKey)
         let credential = credentialID ?? keyID
-        let authData = Array(SHA256.hash(data: Data(appID.utf8))) + [0x40]
-            + withUnsafeBytes(of: counter.bigEndian, Array.init)
-            + environment.aaguid
-            + [UInt8(credential.count >> 8), UInt8(credential.count & 0xff)] + credential
-            + [0xa0] // a COSE key, which isn't looked at
+        // Built a piece at a time: as one `+` chain it's too much for the type checker
+        var authData: [UInt8] = Array(SHA256.hash(data: Data(appID.utf8)))
+        authData.append(flags)
+        authData += withUnsafeBytes(of: counter.bigEndian) { Array($0) }
+        authData += aaguid ?? environment.aaguid
+        authData += [UInt8(credential.count >> 8), UInt8(credential.count & 0xff)]
+        authData += credential
+        authData.append(0xa0) // a COSE key, which isn't looked at
         let nonce = Array(SHA256.hash(data: authData + Array(SHA256.hash(data: nonceChallenge ?? challenge))))
         let now = Date.now
         let leaf = try Certificate(
@@ -100,14 +114,15 @@ struct TestAuthority {
                                       value: ArraySlice(try Self.extensionValue(nonce: nonce)))
             },
             issuerPrivateKey: .init(signer ?? intermediateKey))
-        var leafDER = DER.Serializer()
-        try leafDER.serialize(leaf)
-        var intermediateDER = DER.Serializer()
-        try intermediateDER.serialize(intermediate)
+        let x5c = try ([leaf, intermediate] + extraCertificates).map { certificate -> CBORValue in
+            var der = DER.Serializer()
+            try der.serialize(certificate)
+            return .bytes(der.serializedBytes)
+        }
         return CBORValue.map([
             ("fmt", .text("apple-appattest")),
             ("attStmt", .map([
-                ("x5c", .array([.bytes(leafDER.serializedBytes), .bytes(intermediateDER.serializedBytes)])),
+                ("x5c", .array(x5c)),
                 ("receipt", .bytes([1, 2, 3])),
             ])),
             ("authData", .bytes(authData)),

@@ -42,22 +42,46 @@ actor RateLimiter {
 }
 
 /// Counts per client per UTC day, such as attest keys made from one address.
+/// Only what's recorded counts, so a request that fails uses up nothing.
 actor DailyLimiter {
     private let limit: Int
+    private let maxTracked: Int
     private var day: Int = -1
     private var counts: [String: Int] = [:]
 
-    init(limit: Int) { self.limit = limit }
+    init(limit: Int, maxTracked: Int = 200_000) {
+        self.limit = limit
+        self.maxTracked = maxTracked
+    }
 
-    func take(_ client: String, now: Date = .now) -> Bool {
+    /// Whether `client` is under the limit today. A client with none yet is
+    /// refused too once `maxTracked` others have some (a flood of addresses).
+    func allows(_ client: String, now: Date = .now) -> Bool {
+        startDay(now)
+        if let count = counts[client] { return count < limit }
+        return limit > 0 && counts.count < maxTracked
+    }
+
+    /// Counts one more for `client` today.
+    func record(_ client: String, now: Date = .now) {
+        startDay(now)
+        counts[client, default: 0] += 1
+    }
+
+    var tracked: Int { counts.count }
+
+    /// Whole seconds until the counts start again, at midnight UTC.
+    static func secondsUntilReset(now: Date) -> Int {
+        let seconds = 86400 - now.timeIntervalSince1970.truncatingRemainder(dividingBy: 86400)
+        return max(1, Int(seconds.rounded(.up)))
+    }
+
+    private func startDay(_ now: Date) {
         let today = Int(now.timeIntervalSince1970 / 86400)
         if today != day {
             day = today
             counts.removeAll()
         }
-        guard counts[client, default: 0] < limit else { return false }
-        counts[client, default: 0] += 1
-        return true
     }
 }
 
@@ -65,44 +89,81 @@ actor DailyLimiter {
 actor ChallengeStore {
     static let lifetime: TimeInterval = 5 * 60
 
+    enum Issued: Equatable {
+        case challenge(String)
+        /// The client has `perClient` outstanding; the first of them expires in this many seconds.
+        case clientFull(retryAfter: Int)
+        /// `limit` are outstanding in all.
+        case full
+    }
+
     private let limit: Int
-    private var expiries: [String: Date] = [:]
+    private let perClient: Int
+    private var expiries: [String: (client: String, expires: Date)] = [:]
+    /// When each client's outstanding challenges expire.
+    private var clients: [String: [Date]] = [:]
     /// In the order issued, so the expired ones come off the front.
     private var queue: [(challenge: String, expires: Date)] = []
     private var head = 0
 
-    init(limit: Int) { self.limit = limit }
+    init(limit: Int, perClient: Int) {
+        self.limit = limit
+        self.perClient = perClient
+    }
 
-    /// A new challenge, or nil when `limit` are outstanding.
-    func issue(now: Date = .now) -> String? {
+    /// A new challenge for `client`, unless it already has `perClient`
+    /// outstanding or `limit` are outstanding in all.
+    func issue(for client: String, now: Date = .now) -> Issued {
         purge(now: now)
-        guard expiries.count < limit else { return nil }
+        if let mine = clients[client], mine.count >= perClient, let first = mine.min() {
+            return .clientFull(retryAfter: max(1, Int(first.timeIntervalSince(now).rounded(.up))))
+        }
+        guard expiries.count < limit else { return .full }
         var generator = SystemRandomNumberGenerator()
         let bytes = (0..<32).map { _ in UInt8.random(in: .min ... .max, using: &generator) }
         let challenge = Data(bytes).base64EncodedString()
             .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
         let expires = now.addingTimeInterval(Self.lifetime)
-        expiries[challenge] = expires
+        expiries[challenge] = (client, expires)
+        clients[client, default: []].append(expires)
         queue.append((challenge, expires))
-        return challenge
+        return .challenge(challenge)
     }
 
     /// Whether `challenge` was issued, hasn't expired and hasn't been used;
     /// either way, it can't be used again.
     func consume(_ challenge: String, now: Date = .now) -> Bool {
-        guard let expires = expiries.removeValue(forKey: challenge) else { return false }
-        return expires > now
+        guard let entry = expiries.removeValue(forKey: challenge) else { return false }
+        release(entry)
+        return entry.expires > now
     }
 
     var outstanding: Int { expiries.count }
 
+    /// How many clients have challenges outstanding.
+    var clientCount: Int { clients.count }
+
+    /// How many challenges are queued, used ones included.
+    var queued: Int { queue.count - head }
+
+    private func release(_ entry: (client: String, expires: Date)) {
+        guard var mine = clients[entry.client], let index = mine.firstIndex(of: entry.expires) else { return }
+        mine.remove(at: index)
+        clients[entry.client] = mine.isEmpty ? nil : mine
+    }
+
     private func purge(now: Date) {
         while head < queue.count, queue[head].expires <= now {
-            expiries[queue[head].challenge] = nil
+            if let entry = expiries.removeValue(forKey: queue[head].challenge) { release(entry) }
             head += 1
         }
-        if head > 1024, head * 2 > queue.count {
+        // Used challenges stay queued until they'd have expired: once they're
+        // most of it, only the outstanding ones are kept
+        if queue.count - head > 2 * max(expiries.count, 1024) {
+            queue = queue[head...].filter { expiries[$0.challenge] != nil }
+            head = 0
+        } else if head > 1024, head * 2 > queue.count {
             queue.removeFirst(head)
             head = 0
         }
@@ -110,15 +171,29 @@ actor ChallengeStore {
 }
 
 enum ClientIP {
-    /// The client's address: cloudflared's `CF-Connecting-IP` when the request
-    /// came from cloudflared on this machine, otherwise the peer's own.
+    /// The client, as the limits count it: cloudflared's `CF-Connecting-IP`
+    /// when the request came from cloudflared on this machine, otherwise the
+    /// peer's own address, either as `key(_:)` gives it.
     static func resolve(peer: SocketAddress?, connectingIP: String?) -> String {
         if let peer, isLoopback(peer), let header = connectingIP?.trimmingCharacters(in: .whitespaces),
            (1...45).contains(header.utf8.count),
            header.utf8.allSatisfy({ isHexDigit($0) || $0 == UInt8(ascii: ".") || $0 == UInt8(ascii: ":") }) {
-            return header.lowercased()
+            return key(header.lowercased())
         }
-        return peer?.ipAddress ?? "unknown"
+        return peer?.ipAddress.map(key) ?? "unknown"
+    }
+
+    /// An IPv6 address's /64, as "2001:db8:0:0::/64": a host is commonly given
+    /// a whole /64, so could otherwise use a new address for every request.
+    /// An IPv4 address as it is, and an IPv4-mapped IPv6 one as its IPv4 address.
+    static func key(_ address: String) -> String {
+        guard case .v6(let v6)? = try? SocketAddress(ipAddress: address, port: 0) else { return address }
+        let bytes = withUnsafeBytes(of: v6.address.sin6_addr) { Array($0) }
+        if bytes[..<10].allSatisfy({ $0 == 0 }), bytes[10] == 0xff, bytes[11] == 0xff {
+            return bytes[12...].map { String($0) }.joined(separator: ".")
+        }
+        let groups = stride(from: 0, to: 8, by: 2).map { String(UInt16(bytes[$0]) << 8 | UInt16(bytes[$0 + 1]), radix: 16) }
+        return groups.joined(separator: ":") + "::/64"
     }
 
     static func isLoopback(_ address: SocketAddress) -> Bool {
@@ -139,6 +214,11 @@ enum Redact {
 
     static func id(_ value: String) -> String {
         let mac = HMAC<SHA256>.authenticationCode(for: Data(value.utf8), using: key)
-        return "#" + mac.prefix(5).map { String(format: "%02x", $0) }.joined()
+        return "#" + mac.prefix(5).hex
     }
+}
+
+extension Sequence<UInt8> {
+    /// Lowercase hex, two digits a byte.
+    var hex: String { map { String(format: "%02x", $0) }.joined() }
 }

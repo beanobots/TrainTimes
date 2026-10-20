@@ -10,6 +10,8 @@ SERVICE_USER=traintimes
 PREFIX=/usr/local/traintimes
 PLIST=/Library/LaunchDaemons/$LABEL.plist
 BUNDLE=TrainTimesServer_TrainResources.bundle
+LOG=$PREFIX/server.log
+NEWSYSLOG=/etc/newsyslog.d/$LABEL.conf
 
 DEPLOY_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PACKAGE_DIR=$(dirname "$DEPLOY_DIR")
@@ -39,22 +41,48 @@ else
 fi
 dscl . -create "/Users/$SERVICE_USER" IsHidden 1
 
-step "Installing into $PREFIX"
-install -d -m 700 "$PREFIX" "$PREFIX/data"
+# $PREFIX and the program are root's, so the service can't put links where
+# this script works. What's the service's (data/, the log and the .p8 key) is
+# never recursed into, nor followed if it's a link.
+step "Installing into $PREFIX (root's; data/, the log and the key $SERVICE_USER's)"
+install -d -o root -g wheel -m 755 "$PREFIX"
+# newsyslog, as root, chowns and chmods the log's old copies as it moves them
+# down. While $PREFIX was the service's it could have put links by those
+# names, so all but plain files with one name go.
+find "$PREFIX" -maxdepth 1 -name 'server.log.*' ! \( -type f -links 1 \) -exec rm -rf {} +
+if [[ ! -e $PREFIX/data && ! -L $PREFIX/data ]]; then
+    install -d -o "$SERVICE_USER" -m 700 "$PREFIX/data"
+fi
 # Copied in beside the old ones, then swapped in
-install -m 700 "$BIN_DIR/TrainTimesServer" "$PREFIX/TrainTimesServer.new"
-rm -rf "$PREFIX/$BUNDLE.new"
+rm -rf "$PREFIX/TrainTimesServer.new" "$PREFIX/$BUNDLE.new"
+install -o root -g wheel -m 755 "$BIN_DIR/TrainTimesServer" "$PREFIX/TrainTimesServer.new"
 cp -R "$BIN_DIR/$BUNDLE" "$PREFIX/$BUNDLE.new"
+chmod -R u=rwX,go=rX "$PREFIX/$BUNDLE.new"
+# A link or a directory left where the program goes (from when $PREFIX was
+# the service's) would take the new one somewhere else
+[[ -f $PREFIX/TrainTimesServer && ! -L $PREFIX/TrainTimesServer ]] || rm -rf "$PREFIX/TrainTimesServer"
 mv -f "$PREFIX/TrainTimesServer.new" "$PREFIX/TrainTimesServer"
 rm -rf "$PREFIX/$BUNDLE"
 mv "$PREFIX/$BUNDLE.new" "$PREFIX/$BUNDLE"
-touch "$PREFIX/server.log"
+# The log only as a plain file with no other name, made afresh otherwise
+if [[ -L $LOG ]] || [[ ! -f $LOG ]] || [[ $(stat -f %l "$LOG") != 1 ]]; then
+    rm -rf "$LOG"
+    (umask 077 && : > "$LOG")
+fi
+chown "$SERVICE_USER" "$LOG"
+chmod 600 "$LOG"
+find "$PREFIX" -maxdepth 1 -type f -links 1 -name '*.p8' -exec chown "$SERVICE_USER" {} + -exec chmod 600 {} +
 
-step "Setting owner $SERVICE_USER, mode 700"
-chown -R "$SERVICE_USER" "$PREFIX"
-chmod 700 "$PREFIX" "$PREFIX/data" "$PREFIX/TrainTimesServer"
-chmod -R go-rwx "$PREFIX"
-find "$PREFIX" -maxdepth 1 -name '*.p8' -exec chmod 600 {} +
+step "Rotating the log at 10 MB, keeping 7 ($NEWSYSLOG)"
+mkdir -p "$(dirname "$NEWSYSLOG")"
+cat > "$NEWSYSLOG" <<EOF
+# Installed by TrainTimes' deploy/install.sh. The server moves to the new file
+# itself (LOG_FILE), so N: there's nothing to signal.
+# logfile                           owner:group      mode count size(KB) when flags
+$LOG    $SERVICE_USER:    600  7     10240    *    N
+EOF
+chown root:wheel "$NEWSYSLOG"
+chmod 644 "$NEWSYSLOG"
 
 if [[ -f "$PLIST" ]]; then
     step "Keeping the existing $PLIST"
@@ -82,5 +110,9 @@ fi
 
 if grep -q '<key>ATTEST_MODE</key>' "$PLIST" && grep -A1 '<key>ATTEST_MODE</key>' "$PLIST" | grep -q '>off<'; then
     echo "    Warning: ATTEST_MODE is off: anyone with API_SECRET can register. For development only."
+fi
+if ! grep -q '<key>LOG_FILE</key>' "$PLIST"; then
+    echo "    Note: $PLIST has no LOG_FILE, so after newsyslog rotates the log the server writes to"
+    echo "    the old one until it restarts. Add LOG_FILE as deploy/$LABEL.plist has it."
 fi
 step "Done. Log: sudo tail -f $PREFIX/server.log"

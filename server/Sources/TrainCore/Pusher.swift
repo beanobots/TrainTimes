@@ -75,18 +75,35 @@ final class APNSPusher: Pusher {
     static func notification(for push: Push, topic: String) -> APNSLiveActivityNotification<ContentState> {
         APNSLiveActivityNotification(
             // No use once it's stale, though always worth a few minutes' retrying
-            expiration: .timeIntervalSince1970InSeconds(Int(max(
+            expiration: .timeIntervalSince1970InSeconds(unixSeconds(max(
                 push.staleDate ?? push.timestamp.addingTimeInterval(60 * 60),
                 push.timestamp.addingTimeInterval(5 * 60)
-            ).timeIntervalSince1970)),
+            ))),
             priority: push.priority == 10 ? .immediately : .consideringDevicePower,
             topic: topic,
             contentState: push.state,
             event: push.event == .end ? .end : .update,
-            timestamp: Int(push.timestamp.timeIntervalSince1970),
-            dismissalDate: push.dismissalDate.map { .date($0) } ?? .none,
-            staleDate: push.staleDate.map { Int($0.timeIntervalSince1970) }
+            timestamp: unixSeconds(push.timestamp),
+            dismissalDate: push.dismissalDate.map { .timeIntervalSince1970InSeconds(unixSeconds($0)) } ?? .none,
+            staleDate: push.staleDate.map(unixSeconds)
         )
+    }
+
+    /// A date far outside Int's range, from a malformed feed, gives the
+    /// nearest Int rather than crashing the pass.
+    private static func unixSeconds(_ date: Date) -> Int { Int(saturating: date.timeIntervalSince1970) }
+
+    /// What an APNs error means for the token. It's dropped only when APNs
+    /// doesn't know it or no longer does; for anything else (the server's key
+    /// or topic, APNs busy) it's kept. As only the attested app registers,
+    /// a token that isn't for the topic means APNS_TOPIC is wrong.
+    static func result(status: Int, reason: APNSError.ErrorReason?) -> PushResult {
+        let description = "\(status) \(reason?.reason ?? "no reason given")"
+        let gone: [APNSError.ErrorReason] = [.badDeviceToken, .unregistered, .expiredToken]
+        if [400, 410].contains(status), let reason, gone.contains(reason) {
+            return .invalidToken(description)
+        }
+        return .failed("APNs \(description)")
     }
 
     func send(_ push: Push) async -> PushResult {
@@ -101,12 +118,7 @@ final class APNSPusher: Pusher {
             }
             return .sent
         } catch let error as APNSError {
-            let reason = error.reason?.reason ?? "no reason given"
-            let gone: [APNSError.ErrorReason] = [.badDeviceToken, .unregistered, .expiredToken]
-            if [400, 410].contains(error.responseStatus), let found = error.reason, gone.contains(found) {
-                return .invalidToken("\(error.responseStatus) \(reason)")
-            }
-            return .failed("APNs \(error.responseStatus) \(reason)")
+            return Self.result(status: error.responseStatus, reason: error.reason)
         } catch {
             return .failed(String(describing: error))
         }

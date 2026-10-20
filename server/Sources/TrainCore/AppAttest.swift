@@ -113,8 +113,10 @@ struct AppAttest: Sendable {
         guard let keyIDBytes = Self.keyIDBytes(keyID) else { throw Problem.malformed("key id") }
         let object: CBOR
         do { object = try CBOR.decode(attestation) } catch { throw Problem.malformed("attestation CBOR") }
+        // x5c is the credential certificate and Apple's intermediate, as Apple
+        // sends it: the chain search's cost grows factorially with more
         guard object["fmt"]?.text == "apple-appattest",
-              let x5c = object["attStmt"]?["x5c"]?.array, x5c.count >= 2,
+              let x5c = object["attStmt"]?["x5c"]?.array, x5c.count == 2,
               let authDataBytes = object["authData"]?.bytes else {
             throw Problem.malformed("attestation object")
         }
@@ -142,9 +144,8 @@ struct AppAttest: Sendable {
         guard case .validCertificate = result else { throw Problem.untrustedChain }
 
         // 2-4. The nonce in the certificate is SHA256(authData ‖ SHA256(challenge))
-        let clientDataHash = SHA256.hash(data: challenge)
-        let nonce = SHA256.hash(data: authDataBytes + Array(clientDataHash))
-        guard let certificateNonce = try? Self.nonce(in: credential), certificateNonce == Array(nonce) else {
+        let nonce = Self.nonce(authenticatorData: authDataBytes, clientData: challenge)
+        guard let certificateNonce = try? Self.nonce(in: credential), certificateNonce == nonce else {
             throw Problem.nonceMismatch
         }
 
@@ -180,8 +181,7 @@ struct AppAttest: Sendable {
         let authData = try AuthenticatorData(authDataBytes, withCredential: false)
 
         // 1-3. The signature is ECDSA-SHA256 over nonce = SHA256(authenticatorData ‖ SHA256(clientData))
-        let clientDataHash = SHA256.hash(data: clientData)
-        let nonce = Data(SHA256.hash(data: authDataBytes + Array(clientDataHash)))
+        let nonce = Self.nonce(authenticatorData: authDataBytes, clientData: clientData)
         guard let publicKey = try? P256.Signing.PublicKey(x963Representation: key.publicKey),
               let signature = try? P256.Signing.ECDSASignature(derRepresentation: signatureBytes),
               publicKey.isValidSignature(signature, for: nonce) else {
@@ -192,6 +192,12 @@ struct AppAttest: Sendable {
         // 5. A counter above the last one
         guard authData.counter > key.counter else { throw Problem.badCounter }
         return authData.counter
+    }
+
+    /// SHA256(authenticatorData ‖ SHA256(clientData)): what an attestation's
+    /// certificate holds (its client data is the challenge), and what an assertion signs.
+    static func nonce(authenticatorData: [UInt8], clientData: [UInt8]) -> [UInt8] {
+        Array(SHA256.hash(data: authenticatorData + Array(SHA256.hash(data: clientData))))
     }
 
     /// The extension's value: SEQUENCE { [1] EXPLICIT OCTET STRING nonce }.

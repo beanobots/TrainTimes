@@ -1,56 +1,14 @@
 import Foundation
 
-/// Builds the countdown's state from a board, as the app does, and decides
-/// when a new one is worth a push.
+/// Decides when the countdown's new state, made as the app makes it
+/// (Shared/Countdown.swift), is worth a push.
 enum ActivityState {
-    /// iOS ends a Live Activity after 8 hours (`TrainActivityController.lifetime`).
-    static let lifetime: TimeInterval = 8 * 60 * 60
+    /// iOS ends a Live Activity after 8 hours (`CountdownState.lifetime`).
+    static let lifetime = CountdownState.lifetime
 
-    /// Shown as out of date two minutes after the train is due
-    /// (`TrainActivityController.content(_:)`).
+    /// Out of date as the train is due, as the app posts it (`CountdownState.staleDate`).
     static func staleDate(for state: ContentState) -> Date {
-        state.train.addingTimeInterval(2 * 60)
-    }
-
-    /// Mirrors `TrainActivityController.state(for:board:now:following:)`: the
-    /// tracked trip if it's still coming; when starting, the first train you
-    /// can catch; once the tracked train has gone, the next one you can catch.
-    /// The app reads `settings` from SharedStore; the server has the copy the
-    /// app sent when it registered.
-    static func state(for selection: Selection, board: Board, now: Date, following trip: String?,
-                      settings: AppSettings) -> ContentState? {
-        let upcoming = board.trains.filter { $0.time > now }
-        let catchable = selection.catchable(upcoming, now: now).first
-        let target: Arrival?
-        // A trip without an id can't be told from another one without
-        if let trip, !trip.isEmpty {
-            target = upcoming.first { $0.trip == trip } ?? catchable
-        } else {
-            target = catchable
-        }
-        guard let target else { return nil }
-        let following = upcoming.filter { $0.time > target.time }.prefix(2)
-        return ContentState(
-            train: target.time,
-            trip: target.trip,
-            isLive: target.isLive,
-            terminal: target.terminal,
-            following: following.map(\.time),
-            notice: board.notice(for: selection, settings: settings)?.label,
-            updated: now,
-            route: target.route,
-            followingRoutes: following.map(\.route)
-        )
-    }
-
-    /// Mirrors the `else` branch of `TrainActivityController.refreshNow()`: with
-    /// no trains at all, the countdown stays on its last train, saying so.
-    static func noTrains(from last: ContentState, now: Date) -> ContentState {
-        var state = last
-        state.following = []
-        state.notice = "No trains predicted"
-        state.updated = now
-        return state
+        state.staleDate
     }
 
     enum Push: Equatable {
@@ -83,5 +41,38 @@ enum ActivityState {
         if new.isLive != last.isLive || new.notice != last.notice { return true }
         if new.following.count != last.following.count || new.followingRoutes != last.followingRoutes { return true }
         return zip(new.following, last.following).contains { abs($0.timeIntervalSince($1)) >= followingThreshold }
+    }
+
+    /// The notice of a countdown with no trains and no alert that's why
+    /// (`ContentState.refreshed(for:board:settings:now:)`).
+    static let noTrains = "No trains predicted"
+
+    /// `new`, made from `board` at `now`, with `last`'s notice where that may
+    /// still hold but `board` can't say: it hasn't the alerts, or the outages,
+    /// that `selection` asks for, which isn't the same as there being none.
+    /// The notice would otherwise go, and come back with the next pass, a push
+    /// each time. An alert's stays unless an elevator out is now known to
+    /// come before it; an elevator's, unless the trains have gone, when the
+    /// notice names only an alert.
+    static func keepingNotice(of last: ContentState, in new: ContentState, board: Board,
+                              selection: Selection, now: Date) -> ContentState {
+        guard let notice = last.notice, notice != new.notice else { return new }
+        func isElevator(_ label: String?) -> Bool {
+            label.flatMap(Notice.Kind.init(label:)) == .elevator
+        }
+        let mayHold: Bool
+        if case .alert? = Notice.Kind(label: notice) {
+            mayHold = selection.serviceAlerts && board.alerts == nil && !isElevator(new.notice)
+        } else if isElevator(notice), selection.elevatorAlerts, board.outages == nil {
+            // Unless the trains have gone, as `refreshed` finds them
+            mayHold = ContentState(for: selection, trains: board.trains, notice: nil, now: now,
+                                   following: last.trip, after: last.train) != nil
+        } else {
+            mayHold = false
+        }
+        guard mayHold else { return new }
+        var state = new
+        state.notice = notice
+        return state
     }
 }

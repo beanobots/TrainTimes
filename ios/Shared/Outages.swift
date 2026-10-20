@@ -14,6 +14,16 @@ struct Outage: Identifiable, Hashable, Sendable {
     let isPlanned: Bool
     /// The MTA's advice for getting around it, when it's an elevator.
     let alternative: String
+    /// The GTFS stops whose platforms it serves, e.g. ["718", "R09"], Queensboro
+    /// Plaza's 7 and N W; nil where the MTA doesn't say.
+    var stops: [String]? = nil
+
+    /// Whether it serves one of `platforms`, or might: one whose stops the MTA
+    /// doesn't give could serve any of them.
+    func serves(anyOf platforms: [Platform]) -> Bool {
+        guard let stops, !stops.isEmpty else { return true }
+        return platforms.contains { stops.contains($0.id) }
+    }
 }
 
 /// The elevators and escalators the MTA runs, from equipment.json (built by tools/make_stations.py).
@@ -24,6 +34,9 @@ enum EquipmentDirectory {
         let ada: Bool
         let serving: String
         let alternative: String
+        /// The GTFS stops whose platforms it serves, e.g. ["718", "R09"], Queensboro
+        /// Plaza's 7 and N W; nil in a list made before there were these.
+        var stops: [String]? = nil
     }
 
     static let all: [String: Machine] = {
@@ -40,15 +53,27 @@ enum EquipmentDirectory {
     static func hasEquipment(atComplex complex: String) -> Bool {
         all.values.contains { $0.complex == complex }
     }
+
+    /// Whether any elevator or escalator serves one of `platforms`, a
+    /// station's, or might, as `Outage.serves(anyOf:)` has it.
+    static func hasEquipment(serving platforms: [Platform]) -> Bool {
+        guard let complex = platforms.first?.complex else { return false }
+        return all.values.contains { machine in
+            guard machine.complex == complex else { return false }
+            guard let stops = machine.stops, !stops.isEmpty else { return true }
+            return platforms.contains { stops.contains($0.id) }
+        }
+    }
 }
 
 enum OutagesFeed {
     /// Current and planned elevator and escalator outages (about 40 KB).
     static let url = URL(string: "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fnyct_ene.json")!
 
-    /// The outages at a station complex, current ones first.
+    /// The outages at a station complex, current ones first. A row that can't
+    /// be read is left out, rather than failing the rest.
     static func outages(atComplex complex: String, in data: Data, equipment: [String: EquipmentDirectory.Machine] = EquipmentDirectory.all) throws -> [Outage] {
-        let rows = try JSONDecoder().decode([Row].self, from: data)
+        let rows = try JSONDecoder().decode([MaybeRow].self, from: data).compactMap(\.row)
         let outages: [Outage] = rows.compactMap { row in
             guard let machine = equipment[row.equipment], machine.complex == complex else { return nil }
             return Outage(
@@ -60,7 +85,8 @@ enum OutagesFeed {
                 start: date(row.outagedate),
                 estimatedReturn: date(row.estimatedreturntoservice),
                 isPlanned: row.isupcomingoutage == "Y",
-                alternative: machine.alternative
+                alternative: machine.alternative,
+                stops: machine.stops
             )
         }
         return outages.sorted { a, b in
@@ -76,6 +102,15 @@ enum OutagesFeed {
         let outagedate: String?
         let estimatedreturntoservice: String?
         let isupcomingoutage: String?
+    }
+
+    /// A row, or nil for one that isn't as expected.
+    private struct MaybeRow: Decodable {
+        let row: Row?
+
+        init(from decoder: Decoder) throws {
+            row = try? Row(from: decoder)
+        }
     }
 
     /// Some descriptions start in lower case ("mezzanine to 4/5 platform").

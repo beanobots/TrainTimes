@@ -17,9 +17,3 @@ enum Bundle {
 struct AppSettings: Hashable, Sendable {
     var alertKinds: Set<ServiceAlert.Kind> = Set(ServiceAlert.Kind.allCases)
 }
-
-extension Selection {
-    /// Mirrors `Selection.trainID` in ios/Shared/StopEntity.swift (a
-    /// `StopEntity.id`), which imports AppIntents: "R34:N:R", "R31:N:N,R".
-    var trainID: String { "\(stationID):\(direction.rawValue):\(routes.joined(separator: ","))" }
-}

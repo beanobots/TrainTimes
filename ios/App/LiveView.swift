@@ -1,5 +1,6 @@
 import CoreLocation
 import MapKit
+import Observation
 import SwiftUI
 import UIKit
 
@@ -31,15 +32,23 @@ struct StationPage: Hashable {
 }
 
 /// A Transfers widget's two stations: its train at yours, and the lines it
-/// changes to at the change, going the same way.
+/// changes to at the change, going their way.
 struct TransferPage: Hashable {
     let selection: Selection
     let change: Change
 
-    /// The lines changed to, as a train of their own at the change.
-    var changeTrain: Selection {
-        Selection(stationID: change.stationID, routes: change.routes, direction: selection.direction,
-                  elevatorAlerts: selection.elevatorAlerts, serviceAlerts: selection.serviceAlerts)
+    /// The lines changed to, as trains of their own at the change: one for
+    /// each station of it they stop at, as 59 St's 4 5 6 for a change at
+    /// Lexington Av/59 St.
+    var changeTrains: [Selection] {
+        guard let station = change.station else { return [] }
+        let direction = change.departureDirection(for: selection)
+        return StationDirectory.stations(inComplexOf: station).compactMap { joined in
+            let routes = joined.routes.filter(change.routes.contains)
+            guard !routes.isEmpty else { return nil }
+            return Selection(stationID: joined.id, routes: routes, direction: direction,
+                             elevatorAlerts: selection.elevatorAlerts, serviceAlerts: selection.serviceAlerts)
+        }
     }
 }
 
@@ -52,14 +61,12 @@ struct LiveView: View {
     @Environment(WidgetStore.self) private var widgets
     @Environment(SettingsStore.self) private var settings
     @Environment(\.accessibilityDifferentiateWithoutColor) private var withoutColor
-    @Environment(\.scenePhase) private var scenePhase
     @State private var location = NearbyLocation()
     @State private var path = NavigationPath()
-    /// Each train's next arrivals, by `Selection.trainID`, as last fetched.
-    @State private var trains: [String: [Arrival]] = [:]
-    @State private var loadState = LoadState.loading
-    /// Moves along every few seconds so the minutes count down.
-    @State private var now = Date.now
+    /// How many trains the widgets have opened, so each gets a page of its own.
+    @State private var openings = 0
+    /// The next trains of every train in both lists.
+    @State private var live = LiveTrains()
     /// Adding a favorite starts by choosing its train.
     @State private var choosingTrain = false
     @State private var chosenTrain: Selection?
@@ -71,8 +78,6 @@ struct LiveView: View {
     @State private var nearby: [Nearby.Result] = []
     /// Shared with the Edit button; while editing, favorites leave out their times.
     @State private var editMode = EditMode.inactive
-
-    private enum LoadState { case loading, loaded, failed }
 
     /// Where Nearby goes by: the pin, or else you.
     private var here: CLLocation? { pin ?? location.location }
@@ -92,15 +97,10 @@ struct LiveView: View {
 
     /// Every train in both lists, for fetching them together.
     private var everyTrain: [Selection] {
-        favorites.favorites + nearby.flatMap { result in
-            result.station.routes.flatMap { route in
-                Direction.allCases.map { Selection(stationID: result.station.id, routes: [route], direction: $0) }
-            }
-        }
+        favorites.favorites + nearby.flatMap(\.station.lineSelections)
     }
 
-    private var marksLive: Bool { settings.marksLive(withoutColor: withoutColor) }
-    private var marksScheduled: Bool { settings.settings.marksScheduledTimes }
+    private var marks: TimeMarks { settings.timeMarks(withoutColor: withoutColor) }
 
     /// Starts out at the last favorite's station, with the walking time and alerts at their defaults.
     private var newTrain: Binding<Selection> {
@@ -136,15 +136,16 @@ struct LiveView: View {
             .navigationDestination(for: Selection.self) { selection in
                 // A nearby train that's a favorite too opens with its walking time
                 TrainDetail(selection: favorites.favorite(matching: selection) ?? selection)
-                    // Its own page for each train: one opened from the widget in
-                    // place of another would otherwise keep the other's state
-                    .id(selection.trainID)
+                    // Its own page for each train, and each time a widget opens
+                    // one: opened in place of another, or of itself switched to
+                    // another train, it would otherwise keep that one's state
+                    .id("\(selection.trainID) \(openings)")
             }
             .navigationDestination(for: StationPage.self) { page in
-                StationLive(station: page.station, routes: page.routes, marksLive: marksLive, marksScheduled: marksScheduled) { path.append($0) }
+                StationLive(station: page.station, routes: page.routes, marks: marks) { path.append($0) }
             }
             .navigationDestination(for: TransferPage.self) { page in
-                TransferLive(page: page, marksLive: marksLive, marksScheduled: marksScheduled)
+                TransferLive(page: page, marks: marks)
             }
             .toolbar {
                 if !favorites.favorites.isEmpty {
@@ -166,7 +167,7 @@ struct LiveView: View {
                                     favorites.add(widget.selection)
                                 } label: {
                                     Text(widget.title)
-                                    Text("\(Lines.list(widget.selection.routes)) \(widget.selection.heading)")
+                                    Text(widget.selection.caption)
                                 }
                                 .disabled(favorites.contains(widget.selection))
                             }
@@ -189,6 +190,7 @@ struct LiveView: View {
                 self.opening = nil
                 switch opening {
                 case .train(let selection):
+                    openings += 1
                     path = NavigationPath([selection])
                 case .station(let page):
                     path = NavigationPath([page])
@@ -210,28 +212,11 @@ struct LiveView: View {
             .onChange(of: here, initial: true) { _, here in
                 nearby = here.map { Nearby.stations(near: $0, limit: 3) } ?? []
             }
-            .refreshable {
+            // New times every minute, and straight away for a new train or
+            // station; pulled down or back in the app, it finds you again too
+            .updatingTrains(live, id: everyTrain.map(\.trainID), refreshing: {
                 if location.isAllowed && pin == nil { location.find() }
-                await load()
-            }
-            // New times every minute, and straight away for a new train or station
-            .task(id: everyTrain.map(\.trainID)) {
-                while !Task.isCancelled {
-                    await load()
-                    try? await Task.sleep(for: .seconds(60))
-                }
-            }
-            .task {
-                while !Task.isCancelled {
-                    try? await Task.sleep(for: .seconds(10))
-                    now = .now
-                }
-            }
-            .onChange(of: scenePhase) { _, phase in
-                guard phase == .active else { return }
-                if location.isAllowed && pin == nil { location.find() }
-                Task { await load() }
-            }
+            }, load: load)
             // With the last favorite gone the Edit button goes too, so editing ends with it
             .onChange(of: favorites.favorites.isEmpty) { _, isEmpty in
                 if isEmpty { editMode = .inactive }
@@ -241,9 +226,8 @@ struct LiveView: View {
 
     private var favoritesSection: some View {
         Section {
-            if loadState == .failed {
-                Label("Couldn't reach the MTA. Pull down to try again.", systemImage: "wifi.exclamationmark")
-                    .foregroundStyle(.secondary)
+            if live.anyFailed(everyTrain) {
+                UnreachableNote()
             }
             if favorites.favorites.isEmpty {
                 Text("Tap ☆ on any train, or +, to keep it here.")
@@ -253,10 +237,10 @@ struct LiveView: View {
                 NavigationLink(value: selection) {
                     FavoriteRow(
                         selection: selection,
-                        trains: trains[selection.trainID].map { selection.catchable($0, now: now) },
-                        now: now,
-                        marksLive: marksLive,
-                        marksScheduled: marksScheduled,
+                        trains: live.trains[selection.trainID].map { selection.catchable($0, now: live.now) },
+                        failed: live.failed.contains(selection.trainID),
+                        now: live.now,
+                        marks: marks,
                         showsTimes: !editMode.isEditing
                     )
                 }
@@ -343,32 +327,19 @@ struct LiveView: View {
         ForEach(nearby) { result in
             NearbyStationRow(result: result)
             ForEach(result.station.routes, id: \.self) { route in
-                NearbyLineRow(
-                    station: result.station,
-                    route: route,
-                    trains: { selection in
-                        // Each line's own trains, not those of another line running on its tracks
-                        trains[selection.trainID]?.filter { $0.route == route && $0.time > now }
-                    },
-                    now: now,
-                    marksLive: marksLive,
-                    marksScheduled: marksScheduled,
-                    open: { path.append($0) }
-                )
+                NearbyLineRow(station: result.station, route: route, live: live, marks: marks) { path.append($0) }
             }
         }
     }
 
+    /// New times for every train in both lists. Until a train's first come,
+    /// its row shows a dash.
     private func load() async {
         let selections = everyTrain
-        guard !selections.isEmpty else { return }
-        if trains.isEmpty { loadState = .loading }
-        let fetched = await TrainService.trains(for: selections)
-        // A newer list cancels this load; that isn't a failure
-        guard !Task.isCancelled else { return }
-        trains.merge(fetched) { $1 }
-        now = .now
-        loadState = fetched.isEmpty ? .failed : .loaded
+        // Nearby rows show only each line's own trains, which are all in its
+        // own feeds; a favorite shows those of other lines running on it too
+        let nearbyOnly = Set(selections.map(\.trainID)).subtracting(favorites.favorites.map(\.trainID))
+        await live.load(selections, ownLinesOnly: nearbyOnly)
     }
 }
 
@@ -377,9 +348,10 @@ private struct FavoriteRow: View {
     let selection: Selection
     /// The trains you can still catch; nil until they're fetched.
     let trains: [Arrival]?
+    /// Whether they couldn't be fetched the last time.
+    let failed: Bool
     let now: Date
-    let marksLive: Bool
-    let marksScheduled: Bool
+    let marks: TimeMarks
     /// Left out while editing, for the delete and move controls.
     let showsTimes: Bool
 
@@ -389,14 +361,14 @@ private struct FavoriteRow: View {
                 .frame(width: 40)
             VStack(alignment: .leading, spacing: 2) {
                 Text(selection.station?.name ?? "Train").font(.headline)
-                Text("\(Lines.list(selection.routes)) \(selection.heading)")
+                Text(selection.caption)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
             Spacer(minLength: 8)
             if showsTimes {
-                Minutes(trains: trains, now: now, marksLive: marksLive, marksScheduled: marksScheduled)
+                Minutes(trains: trains, failed: failed, now: now, marks: marks)
             }
         }
         .padding(.vertical, 2)
@@ -427,69 +399,28 @@ private struct StationLive: View {
     let station: Station
     /// Its lines, in the order they're shown.
     let routes: [String]
-    let marksLive: Bool
-    let marksScheduled: Bool
+    let marks: TimeMarks
     let open: (Selection) -> Void
-    /// Each train's next arrivals, by `Selection.trainID`, as last fetched.
-    @State private var trains: [String: [Arrival]] = [:]
-    @State private var failed = false
-    /// Moves along every few seconds so the minutes count down.
-    @State private var now = Date.now
-
-    private var selections: [Selection] {
-        station.routes.flatMap { route in
-            Direction.allCases.map { Selection(stationID: station.id, routes: [route], direction: $0) }
-        }
-    }
+    @State private var live = LiveTrains()
 
     var body: some View {
         List {
-            if failed {
-                Label("Couldn't reach the MTA. Pull down to try again.", systemImage: "wifi.exclamationmark")
-                    .foregroundStyle(.secondary)
+            if live.anyFailed(station.lineSelections) {
+                UnreachableNote()
             }
             Section {
                 ForEach(routes, id: \.self) { route in
-                    NearbyLineRow(
-                        station: station,
-                        route: route,
-                        trains: { selection in
-                            // Each line's own trains, not those of another line running on its tracks
-                            trains[selection.trainID]?.filter { $0.route == route && $0.time > now }
-                        },
-                        now: now,
-                        marksLive: marksLive,
-                        marksScheduled: marksScheduled,
-                        open: open
-                    )
+                    NearbyLineRow(station: station, route: route, live: live, marks: marks, open: open)
                 }
             } header: {
                 Text(station.borough)
             }
         }
         .navigationTitle(station.name)
-        .refreshable { await load() }
-        // New times every minute
-        .task(id: station.id) {
-            while !Task.isCancelled {
-                await load()
-                try? await Task.sleep(for: .seconds(60))
-            }
+        .updatingTrains(live, id: station.id) {
+            // Each line's own trains are all in its own feeds
+            await live.load(station.lineSelections, includingOtherLines: false)
         }
-        .task {
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(10))
-                now = .now
-            }
-        }
-    }
-
-    private func load() async {
-        let fetched = await TrainService.trains(for: selections)
-        guard !Task.isCancelled else { return }
-        trains.merge(fetched) { $1 }
-        now = .now
-        failed = fetched.isEmpty
     }
 }
 
@@ -497,43 +428,28 @@ private struct StationLive: View {
 /// yours, then the lines it changes to at the change. Each opens on its own.
 private struct TransferLive: View {
     let page: TransferPage
-    let marksLive: Bool
-    let marksScheduled: Bool
-    /// Each train's next arrivals, by `Selection.trainID`, as last fetched.
-    @State private var trains: [String: [Arrival]] = [:]
-    @State private var failed = false
-    /// Moves along every few seconds so the minutes count down.
-    @State private var now = Date.now
+    let marks: TimeMarks
+    @State private var live = LiveTrains()
 
-    private var selections: [Selection] { [page.selection, page.changeTrain] }
+    private var selections: [Selection] { [page.selection] + page.changeTrains }
 
     var body: some View {
         List {
-            if failed {
-                Label("Couldn't reach the MTA. Pull down to try again.", systemImage: "wifi.exclamationmark")
-                    .foregroundStyle(.secondary)
+            if live.anyFailed(selections) {
+                UnreachableNote()
             }
             Section("Your train") {
                 row(page.selection)
             }
             Section("Then change") {
-                row(page.changeTrain)
+                ForEach(page.changeTrains, id: \.trainID) { train in
+                    row(train)
+                }
             }
         }
         .navigationTitle("Transfer")
-        .refreshable { await load() }
-        // New times every minute
-        .task(id: selections.map(\.trainID)) {
-            while !Task.isCancelled {
-                await load()
-                try? await Task.sleep(for: .seconds(60))
-            }
-        }
-        .task {
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(10))
-                now = .now
-            }
+        .updatingTrains(live, id: selections.map(\.trainID)) {
+            await live.load(selections)
         }
     }
 
@@ -542,44 +458,136 @@ private struct TransferLive: View {
         NavigationLink(value: selection) {
             FavoriteRow(
                 selection: selection,
-                trains: trains[selection.trainID].map { selection.catchable($0, now: now) },
-                now: now,
-                marksLive: marksLive,
-                marksScheduled: marksScheduled,
+                trains: live.trains[selection.trainID].map { selection.catchable($0, now: live.now) },
+                failed: live.failed.contains(selection.trainID),
+                now: live.now,
+                marks: marks,
                 showsTimes: true
             )
         }
     }
+}
 
-    private func load() async {
-        let fetched = await TrainService.trains(for: selections)
+/// The next trains of what a page of the Live tab lists, fetched together:
+/// your favorites and the stations near you, a station's every line, or a
+/// transfer's trains.
+@MainActor @Observable
+final class LiveTrains {
+    /// Each train's next arrivals, by `Selection.trainID`, as last fetched.
+    private(set) var trains: [String: [Arrival]] = [:]
+    /// The `Selection.trainID`s whose trains couldn't be fetched the last time
+    /// they were asked for. It can hold trains of an older list, so a page
+    /// goes by its own; see `anyFailed(_:)`.
+    private(set) var failed: Set<String> = []
+    /// Moves along every few seconds so the minutes count down.
+    var now = Date.now
+
+    /// New times for `selections`, as `TrainService.trains(for:)` fetches
+    /// them. One left out couldn't be fetched: its old times go, rather than
+    /// count down as if they were new. Other trains keep theirs, and whether
+    /// theirs failed, so a load of an older list that ends after the newer
+    /// one's doesn't clear its rows or what failed of them.
+    func load(_ selections: [Selection], includingOtherLines: Bool = true, ownLinesOnly: Set<String> = []) async {
+        // With nothing to fetch, nothing failed
+        guard !selections.isEmpty else {
+            failed = []
+            return
+        }
+        let fetched = await TrainService.trains(for: selections, includingOtherLines: includingOtherLines,
+                                                ownLinesOnly: ownLinesOnly)
+        // A newer list cancels this load; that isn't a failure
         guard !Task.isCancelled else { return }
+        let asked = Set(selections.map(\.trainID))
+        let missing = asked.subtracting(fetched.keys)
         trains.merge(fetched) { $1 }
+        for trainID in missing { trains[trainID] = nil }
+        failed.subtract(asked)
+        failed.formUnion(missing)
         now = .now
-        failed = fetched.isEmpty
+    }
+
+    /// Whether the trains of any of `selections`, those a page lists,
+    /// couldn't be fetched the last time.
+    func anyFailed(_ selections: [Selection]) -> Bool {
+        !failed.isDisjoint(with: selections.map(\.trainID))
     }
 }
 
-/// One line at a station near you, and its next trains each way. Each
-/// direction opens on its own. A direction with no name, at the end of the
-/// line, has no trains to show and is left out.
+extension View {
+    /// Sets `now` to the time every 10 seconds while the view is up, so
+    /// between loads the minutes count down and trains you can no longer
+    /// catch drop off.
+    func ticking(_ now: Binding<Date>) -> some View {
+        task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(10))
+                now.wrappedValue = .now
+            }
+        }
+    }
+
+    /// Keeps `live` up to date with `load`: straight away and every minute,
+    /// starting over whenever `id` changes, and after `refreshing` when the
+    /// list is pulled down or the app comes back. In between, its `now` ticks.
+    fileprivate func updatingTrains<ID: Equatable>(_ live: LiveTrains, id: ID, refreshing: @escaping () -> Void = {},
+                                                   load: @escaping () async -> Void) -> some View {
+        modifier(UpdatingTrains(live: live, id: id, refreshing: refreshing, load: load))
+    }
+}
+
+private struct UpdatingTrains<ID: Equatable>: ViewModifier {
+    let live: LiveTrains
+    let id: ID
+    let refreshing: () -> Void
+    let load: () async -> Void
+    @Environment(\.scenePhase) private var scenePhase
+
+    func body(content: Content) -> some View {
+        content
+            .refreshable {
+                refreshing()
+                await load()
+            }
+            .task(id: id) {
+                while !Task.isCancelled {
+                    await load()
+                    try? await Task.sleep(for: .seconds(60))
+                }
+            }
+            .ticking(Binding { live.now } set: { live.now = $0 })
+            .onChange(of: scenePhase) { _, phase in
+                guard phase == .active else { return }
+                refreshing()
+                Task { await load() }
+            }
+    }
+}
+
+/// Over a page's trains when some of them couldn't be fetched.
+private struct UnreachableNote: View {
+    var body: some View {
+        Label("Couldn't reach the MTA. Pull down to try again.", systemImage: "wifi.exclamationmark")
+            .foregroundStyle(.secondary)
+    }
+}
+
+/// One line at a station near you, and its next trains each way, as the
+/// Trains near you widget has them (`Station.ways(of:trains:now:)`): toward
+/// Manhattan first, and named as there. Each direction opens on its own. A
+/// direction with no name, at the end of the line, has no trains to show and
+/// is left out; so is the way a line ends at a platform others go on from,
+/// unless some of its trains go on too.
 private struct NearbyLineRow: View {
     let station: Station
     let route: String
-    /// A direction's trains; nil until they're fetched.
-    let trains: (Selection) -> [Arrival]?
-    let now: Date
-    let marksLive: Bool
-    let marksScheduled: Bool
+    /// The page's trains: each way's, nil until they're fetched, and whether
+    /// they couldn't be the last time.
+    let live: LiveTrains
+    let marks: TimeMarks
     let open: (Selection) -> Void
 
-    private var directions: [Direction] {
-        let platforms = station.platforms(serving: [route])
-        let named = Direction.allCases.filter { direction in
-            platforms.contains { !$0.directionName(direction).isEmpty }
-        }
-        // Where the MTA names neither, both, as "Northbound" and "Southbound"
-        return named.isEmpty ? Direction.allCases : named
+    private var ways: [LineWay] {
+        station.ways(of: route, trains: live.trains, now: live.now).compactMap { $0 }
     }
 
     var body: some View {
@@ -587,17 +595,17 @@ private struct NearbyLineRow: View {
             LineBullet(route: route, size: 30)
                 .frame(width: 40)
             VStack(spacing: 10) {
-                ForEach(directions, id: \.self) { direction in
-                    let selection = Selection(stationID: station.id, routes: [route], direction: direction)
+                ForEach(ways, id: \.direction) { way in
+                    let failed = live.failed.contains(way.selection.trainID)
                     Button {
-                        open(selection)
+                        open(way.selection)
                     } label: {
                         HStack(spacing: 8) {
-                            Text(station.directionLabel(direction, routes: [route]))
+                            Text(way.label)
                                 .font(.subheadline)
                                 .lineLimit(1)
                             Spacer(minLength: 8)
-                            Minutes(trains: trains(selection), now: now, marksLive: marksLive, marksScheduled: marksScheduled)
+                            Minutes(trains: way.trains, failed: failed, now: live.now, marks: marks)
                             Image(systemName: "chevron.right")
                                 .font(.footnote.weight(.semibold))
                                 .foregroundStyle(.tertiary)
@@ -605,9 +613,9 @@ private struct NearbyLineRow: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("\(Lines.name(of: route)) \(station.directionLabel(direction, routes: [route]))")
+                    .accessibilityLabel("\(Lines.name(of: route)) \(way.label)")
                     // The label stands for the whole row, so the times come as its value
-                    .accessibilityValue(Minutes.spoken(trains(selection), now: now))
+                    .accessibilityValue(Minutes.spoken(way.trains, failed: failed, now: live.now))
                 }
             }
         }
@@ -674,12 +682,15 @@ private struct DropPinSheet: View {
 private struct Minutes: View {
     /// Nil until they're fetched.
     let trains: [Arrival]?
+    /// Whether they couldn't be fetched the last time, which it then says instead.
+    let failed: Bool
     let now: Date
-    let marksLive: Bool
-    let marksScheduled: Bool
+    let marks: TimeMarks
 
     var body: some View {
-        if let trains {
+        if failed {
+            Text("Couldn't load").font(.subheadline).foregroundStyle(.secondary)
+        } else if let trains {
             if trains.isEmpty {
                 Text("No trains").font(.subheadline).foregroundStyle(.secondary)
             } else {
@@ -699,13 +710,15 @@ private struct Minutes: View {
         }
     }
 
-    /// As VoiceOver reads them: "Now, 1 minute, 7 minutes".
-    static func spoken(_ trains: [Arrival]?, now: Date) -> String {
+    /// As VoiceOver reads them: "Now, 1 minute, 7 minutes by the timetable".
+    /// A timetable time says so, as its colour does on screen.
+    static func spoken(_ trains: [Arrival]?, failed: Bool = false, now: Date) -> String {
+        guard !failed else { return "Couldn't load" }
         guard let trains else { return "Loading" }
         guard !trains.isEmpty else { return "No trains" }
         return trains.prefix(3).map { train in
-            let minutes = Int(train.time.timeIntervalSince(now) / 60)
-            return minutes < 1 ? "Now" : minutes == 1 ? "1 minute" : "\(minutes) minutes"
+            let time = MinutesToGo(until: train.time, from: now).spoken
+            return train.isLive ? time : "\(time) by the timetable"
         }
         .joined(separator: ", ")
     }
@@ -715,24 +728,15 @@ private struct Minutes: View {
         HStack(spacing: 6) {
             ForEach(trains, id: \.self) { train in
                 HStack(spacing: 2) {
-                    if marksLive && train.isLive {
-                        LiveMark(size: 9)
-                    } else if marksScheduled && !train.isLive {
-                        ScheduledMark(size: 9)
-                    }
-                    Text(label(for: train))
+                    StatusMark(isLive: train.isLive, marks: marks, size: 9)
+                    Text(MinutesToGo(until: train.time, from: now).number)
                 }
-                .foregroundStyle(train.isLive ? Color.liveText : Color.primary)
+                .foregroundStyle(train.statusColor(scheduled: .primary))
             }
             Text("min").foregroundStyle(.secondary)
         }
         .lineLimit(1)
         .fixedSize()
-    }
-
-    private func label(for train: Arrival) -> String {
-        let minutes = Int(train.time.timeIntervalSince(now) / 60)
-        return minutes < 1 ? "Now" : "\(minutes)"
     }
 }
 

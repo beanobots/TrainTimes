@@ -17,12 +17,14 @@ struct Pill: View {
     var body: some View {
         Image(systemName: symbol)
             .font(large ? .subheadline.weight(.bold) : .footnote.weight(.bold))
+            // Held to what fits its face, which stays the height of the row of buttons
+            .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
             .foregroundStyle(iconColor)
             .frame(width: fills ? nil : 44, height: large ? BoardStyle.large.buttonHeight : BoardStyle.compact.buttonHeight)
             .frame(maxWidth: fills ? .infinity : nil)
             .background {
                 if let lit, renderingMode == .fullColor {
-                    Capsule().fill(Color(hex: lit.color))
+                    Capsule().fill(lit.swiftUIColor)
                 } else if lit != nil {
                     // Tinted and clear Home Screens draw a widget in one color; an outline stays readable
                     Capsule().strokeBorder(lineWidth: 1.5)
@@ -37,7 +39,7 @@ struct Pill: View {
     private var iconColor: Color {
         guard renderingMode == .fullColor else { return .white }
         guard let lit else { return .boardText }
-        return lit.usesDarkText ? .black : .white
+        return lit.textColor
     }
 }
 
@@ -93,14 +95,19 @@ struct RefreshButton: View {
     var large = false
     /// The `TrainEntry.widgetID` of the widget it's on; nil on the countdown.
     var widgetID: String? = nil
+    /// The last try for new times couldn't reach the MTA, so the times shown
+    /// are old: it shows no signal in place of ↻.
+    var failed = false
 
     var body: some View {
+        let symbol = failed ? "wifi.slash" : "arrow.clockwise"
+        let label = failed ? "Refresh. Couldn't reach the MTA, so these times are old" : "Refresh"
         if widgetsOnly {
-            FlashButton(symbol: "arrow.clockwise", intent: RefreshWidgetsIntent(widgetID: widgetID ?? ""), route: route,
-                        label: "Refresh", fills: fills, large: large)
+            FlashButton(symbol: symbol, intent: RefreshWidgetsIntent(widgetID: widgetID ?? ""), route: route,
+                        label: label, fills: fills, large: large)
         } else {
-            FlashButton(symbol: "arrow.clockwise", intent: RefreshIntent(widgetID: widgetID), route: route,
-                        label: "Refresh", fills: fills, large: large)
+            FlashButton(symbol: symbol, intent: RefreshIntent(widgetID: widgetID), route: route,
+                        label: label, fills: fills, large: large)
         }
     }
 }

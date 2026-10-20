@@ -17,8 +17,8 @@ struct WidgetsView: View {
         let selection: Selection
     }
 
-    /// Starts out as the default widget, for its walking time; the
-    /// picker sets the station, lines and direction one after another.
+    /// Starts out as the default widget's train, with its walking time and
+    /// alerts; the picker sets the station, lines and direction together.
     private var newTrain: Binding<Selection> {
         Binding {
             chosenTrain ?? store.defaultWidget.selection
@@ -30,6 +30,13 @@ struct WidgetsView: View {
     private func add() {
         chosenTrain = nil
         choosingTrain = true
+    }
+
+    /// What decides which saved widget a widget out there shows, when it
+    /// hasn't picked one or the one picked is gone: which is the default, and
+    /// which widgets, in order, change trains.
+    private var placement: [String] {
+        [store.saved.defaultID.uuidString] + store.saved.widgets.map { "\($0.id) \($0.change != nil)" }
     }
 
     var body: some View {
@@ -73,7 +80,7 @@ struct WidgetsView: View {
                                     newWidget = NewWidget(selection: selection)
                                 } label: {
                                     Text(selection.station?.name ?? "Train")
-                                    Text("\(Lines.list(selection.routes)) \(selection.heading)")
+                                    Text(selection.caption)
                                 }
                             }
                         }
@@ -95,6 +102,10 @@ struct WidgetsView: View {
             .onChange(of: scenePhase) { _, phase in
                 if phase == .active { Task { await store.countPlaced() } }
             }
+            // And which saved widget some of them show changes here
+            .onChange(of: placement) {
+                Task { await store.countPlaced() }
+            }
         }
     }
 }
@@ -109,7 +120,7 @@ private struct WidgetRow: View {
     private var subtitle: String {
         let selection = widget.selection
         let base = widget.title == selection.station?.name
-            ? "\(Lines.list(selection.routes)) \(selection.heading)"
+            ? selection.caption
             : selection.station?.name ?? ""
         guard let change = widget.change else { return base }
         return "\(base), then \(Lines.list(change.routes, joinedBy: "or"))"
@@ -180,13 +191,13 @@ private struct WidgetEditor: View {
                     store.delete(id)
                 }
             } message: {
-                Text(placed == 0 ? "" : "Widgets showing it will show the default instead.")
+                Text(placed == 0 ? "" : "Next train widgets showing it will show the default instead, and Transfers widgets the first one that changes trains, or else the default.")
             }
         }
     }
 }
 
-/// Adding a widget, set up as the default is until you choose its train.
+/// A new widget, its train already chosen, to name and set up before it's added.
 private struct AddWidget: View {
     @Environment(WidgetStore.self) private var store
     @Environment(\.dismiss) private var dismiss
@@ -226,8 +237,17 @@ private struct WidgetFields: View {
 
     private var station: Station? { widget.selection.station }
 
+    /// Its train, which keeps or drops the change with it in the one change to the widget.
+    private var train: Binding<Selection> {
+        Binding {
+            widget.selection
+        } set: {
+            widget.setSelection($0)
+        }
+    }
+
     var body: some View {
-        TripSections(selection: $widget.selection, change: $widget.change)
+        TripSections(selection: train, change: $widget.change)
         CommuteSection(widget: $widget)
         Section("Name") {
             TextField(station?.name ?? "Name", text: $widget.name)
@@ -250,19 +270,20 @@ private struct WidgetFields: View {
     }
 }
 
-/// The walk to the station, in minutes.
-private struct WalkStepper: View {
+/// The walk to the station, in minutes: a widget's, or a favorite's.
+struct WalkStepper: View {
     @Binding var minutes: Int
 
     var body: some View {
-        Stepper(value: $minutes, in: 0...60) {
+        Stepper(value: $minutes, in: Selection.walkRange) {
             Text(minutes == 0 ? "Walk to the station: not set" : "Walk to the station: \(minutes) min")
         }
     }
 }
 
 /// A train, tapped to choose another, and any change of trains on the way:
-/// a widget's own, or its commuting hours'.
+/// a widget's own, or its commuting hours'. `selection` is bound through their
+/// `setSelection`, which keeps or drops the change with a new train.
 private struct TripSections: View {
     @Binding var selection: Selection
     @Binding var change: Change?
@@ -292,7 +313,7 @@ private struct TripSections: View {
             Button {
                 choosingTrain = true
             } label: {
-                TrainRow(selection: selection)
+                TrainChoiceRow(selection: selection)
             }
             .buttonStyle(.plain)
             .accessibilityHint("Choose another station, line or direction")
@@ -300,15 +321,6 @@ private struct TripSections: View {
             // each row, header and footer, and the extra sheets knock this one out
             .sheet(isPresented: $choosingTrain) {
                 TrainPicker(selection: $selection)
-            }
-            // Another line or direction goes on another way, which the change
-            // isn't on; another station on the same way keeps it
-            .onChange(of: selection) { old, new in
-                if old.routes != new.routes || old.direction != new.direction {
-                    change = nil
-                } else {
-                    change = change?.validated(for: new)
-                }
             }
         } header: {
             if let trainHeader { Text(trainHeader) }
@@ -374,9 +386,9 @@ private struct CommuteSection: View {
         Binding {
             widget.commute != nil
         } set: { on in
-            // Starts out as the widget's own train, with its walking time,
-            // for you to choose another
-            widget.commute = on ? CommutingHours(selection: widget.selection) : nil
+            // Starts out as the widget's own train, with its walking time and
+            // change, for you to choose another
+            widget.commute = on ? CommutingHours(selection: widget.selection, change: widget.change) : nil
         }
     }
 
@@ -387,6 +399,16 @@ private struct CommuteSection: View {
             widget.commute ?? commute
         } set: {
             widget.commute = $0
+        }
+    }
+
+    /// The train in these hours, which keeps or drops their change with it in
+    /// the one change to the widget.
+    private func train(_ hours: Binding<CommutingHours>) -> Binding<Selection> {
+        Binding {
+            hours.wrappedValue.selection
+        } set: {
+            hours.wrappedValue.setSelection($0)
         }
     }
 
@@ -421,7 +443,7 @@ private struct CommuteSection: View {
         }
         if let commute = widget.commute {
             let hours = hours(commute)
-            TripSections(selection: hours.selection, change: hours.change, trainHeader: "During commuting hours")
+            TripSections(selection: train(hours), change: hours.change, trainHeader: "During commuting hours")
             Section {
                 WalkStepper(minutes: hours.selection.walkMinutes)
             }
@@ -468,7 +490,7 @@ private struct ChangeRow: View {
     let selection: Selection
 
     private var subtitle: String {
-        let heading = change.station?.directionLabel(selection.direction, routes: change.routes) ?? ""
+        let heading = change.heading(for: selection)
         let how = change.isAllAcross(from: selection) ? "across the platform" : "\(change.walkMinutes) min walk"
         return "\(Lines.list(change.routes, joinedBy: "or")) \(heading) · \(how)"
     }
@@ -493,18 +515,20 @@ private struct ChangeRow: View {
     }
 }
 
-/// A widget's train; tapping it chooses another, in three steps.
-private struct TrainRow: View {
+/// A widget's train, or the train page's; tapping it chooses another, in three steps.
+struct TrainChoiceRow: View {
     let selection: Selection
+    /// In place of the station's name, where it has none.
+    var placeholder = "Choose a train"
 
     var body: some View {
         HStack(spacing: 12) {
             LineBullets(routes: selection.routes, size: 36)
                 .frame(width: 46)
             VStack(alignment: .leading, spacing: 2) {
-                Text(selection.station?.name ?? "Choose a train").font(.headline).foregroundStyle(.primary)
+                Text(selection.station?.name ?? placeholder).font(.headline).foregroundStyle(.primary)
                 if let station = selection.station {
-                    Text("\(Lines.list(selection.routes)) \(selection.heading) · \(station.borough)")
+                    Text("\(selection.caption) · \(station.borough)")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }

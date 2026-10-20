@@ -7,14 +7,17 @@ default widget's line.
 Each is an icon set in the asset catalog with a light, a dark and a tinted
 version. The R's is AppIcon, the main icon; the others are alternate icons named
 for their bullet: AppIcon-7, AppIcon-S for the three shuttles, AppIcon-SI for
-Staten Island. The colors are the ones in ios/Shared/Lines.swift, and like the
-app's bullets the label is centred on its capitals. Needs Pillow and the DejaVu
-Sans Bold font (fonts-dejavu-core on Debian and Ubuntu).
+Staten Island. The bullets and their colors are the app's, read from
+ios/Shared/Lines.swift (see line_styles.py), and like the app's bullets the
+label is centred on its capitals. Needs Pillow and the DejaVu Sans Bold font
+(fonts-dejavu-core on Debian and Ubuntu).
 """
 import os
 import sys
 
 from PIL import Image, ImageDraw, ImageFont
+
+from line_styles import BULLETS
 
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 SIZE = 1024
@@ -25,21 +28,6 @@ FONT_SIZES = {1: 470, 2: round(470 * 0.45 / 0.62)}
 # The tinted icon is gray, for iOS to tint: a light bullet with a dark label
 TINTED_BULLET = (235, 235, 235)
 TINTED_LABEL = (20, 20, 20)
-
-# Each bullet: its color, and whether its label is black (on the light colors)
-BULLETS = {
-    "1": (0xEE352E, False), "2": (0xEE352E, False), "3": (0xEE352E, False),
-    "4": (0x00933C, False), "5": (0x00933C, False), "6": (0x00933C, False),
-    "7": (0xB933AD, False),
-    "A": (0x0039A6, False), "C": (0x0039A6, False), "E": (0x0039A6, False),
-    "B": (0xFF6319, False), "D": (0xFF6319, False), "F": (0xFF6319, False), "M": (0xFF6319, False),
-    "G": (0x6CBE45, True),
-    "J": (0x996633, False), "Z": (0x996633, False),
-    "L": (0xA7A9AC, True),
-    "N": (0xFCCC0A, True), "Q": (0xFCCC0A, True), "R": (0xFCCC0A, True), "W": (0xFCCC0A, True),
-    "S": (0x808183, False),
-    "SI": (0x0078C6, False),
-}
 
 CONTENTS = """{
   "images": [

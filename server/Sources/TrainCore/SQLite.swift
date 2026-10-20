@@ -30,6 +30,8 @@ final class SQLite {
         guard sqlite3_open_v2(path, &handle, flags, nil) == SQLITE_OK else {
             let message = handle.map { String(cString: sqlite3_errmsg($0)) } ?? "out of memory"
             sqlite3_close(handle)
+            // deinit still runs, and mustn't close it again
+            handle = nil
             throw Problem(description: "can't open the database: \(message)")
         }
         sqlite3_busy_timeout(handle, 5000)

@@ -1,0 +1,43 @@
+name: Build the push server
+
+on:
+  push:
+    branches: [main]
+    # The server, and the app's files it builds with
+    paths:
+      - server/**
+      - ios/Shared/**
+      - .github/workflows/build-server.yml
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run at a time for each branch or pull request: a newer run cancels an
+# older one, whose changes it tests too.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server:
+    # The server compiles the ios/Shared files linked from its
+    # Sources/TrainCore/Shared in Swift 6 mode, which the app's build doesn't.
+    # It needs macOS for SQLite.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the server's copies of the station lists
+        # make_stations.py and make_lines.py write them; a symlink wouldn't survive bundling
+        run: |
+          cmp ios/Shared/stations.json server/Sources/TrainResources/Resources/stations.json
+          cmp ios/Shared/equipment.json server/Sources/TrainResources/Resources/equipment.json
+          cmp ios/Shared/lines.json server/Sources/TrainResources/Resources/lines.json
+
+      - name: Build the server
+        run: swift build --package-path server
+
+      - name: Test the server
+        run: swift test --package-path server

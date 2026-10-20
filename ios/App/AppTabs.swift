@@ -31,6 +31,8 @@ struct AppTabs: View {
         .environment(store)
         .environment(favorites)
         .environment(settings)
+        // The store kept, not one made with a view thrown away
+        .onAppear { store.start() }
         .sheet(item: $alertsTrain) { train in
             AlertsSheet(selection: train.selection)
         }

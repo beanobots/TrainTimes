@@ -13,6 +13,8 @@ final class NearbyLocator: NSObject, CLLocationManagerDelegate {
 
     private let manager = CLLocationManager()
     private var waiting: CheckedContinuation<CLLocation?, Never>?
+    /// Gives up on finding you after 10 seconds; cancelled once there's an answer.
+    private var timeout: Task<Void, Never>?
 
     static func locate() async -> Outcome {
         await NearbyLocator().locate()
@@ -27,7 +29,7 @@ final class NearbyLocator: NSObject, CLLocationManagerDelegate {
         if manager.isAuthorizedForWidgetUpdates, let location = await requestLocation() {
             return .found(location)
         }
-        // Where iOS last found you, if it was lately
+        // Where iOS last found you, if it was lately; the widget says when
         if let last = manager.location, Date.now.timeIntervalSince(last.timestamp) < 60 * 60 {
             return .found(last)
         }
@@ -41,14 +43,16 @@ final class NearbyLocator: NSObject, CLLocationManagerDelegate {
         return await withCheckedContinuation { continuation in
             waiting = continuation
             manager.requestLocation()
-            Task { @MainActor in
+            timeout = Task { @MainActor in
                 try? await Task.sleep(for: .seconds(10))
-                self.finish(nil)
+                if !Task.isCancelled { self.finish(nil) }
             }
         }
     }
 
     private func finish(_ location: CLLocation?) {
+        timeout?.cancel()
+        timeout = nil
         waiting?.resume(returning: location)
         waiting = nil
     }

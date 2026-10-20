@@ -31,9 +31,15 @@ struct TrainLiveActivity: Widget {
                             Spacer(minLength: 8)
                             markedCountdown(context, markSize: 14, size: 30)
                                 .multilineTextAlignment(.trailing)
-                                .foregroundStyle(shownState(context).isLive ? Color.liveGreen : .white)
+                                .foregroundStyle(statusColor(context))
                         }
                         .padding(.horizontal, 8)
+                        if let notice = shownState(context).notice {
+                            noticeLabel(notice)
+                                .lineLimit(1)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 8)
+                        }
                         HStack(spacing: 8) {
                             RefreshButton(route: trainRoute(context), fills: true)
                             WalkButton(intent: StopCountdownIntent(), route: trainRoute(context), running: true, fills: true)
@@ -43,17 +49,25 @@ struct TrainLiveActivity: Widget {
                     }
                 }
             } compactLeading: {
-                LineBullet(route: trainRoute(context), size: 20)
+                // The countdown beside it has no room for its mark
+                HStack(spacing: 2) {
+                    LineBullet(route: trainRoute(context), size: 20)
+                    statusMark(context, size: 10)
+                        .foregroundStyle(statusColor(context))
+                }
             } compactTrailing: {
                 countdown(context)
                     .monospacedDigit()
                     .multilineTextAlignment(.trailing)
                     .frame(maxWidth: 52)
-                    .foregroundStyle(shownState(context).isLive ? Color.liveGreen : .white)
+                    .foregroundStyle(statusColor(context))
+                    .accessibilityValue(status(context))
             } minimal: {
+                // No room for the countdown; VoiceOver says when the train is due
                 LineBullet(route: trainRoute(context), size: 20)
+                    .accessibilityValue("\(status(context)), \(Spoken.clock(shownState(context).train))")
             }
-            .keylineTint(Color(hex: LineStyle.of(trainRoute(context)).color))
+            .keylineTint(LineStyle.of(trainRoute(context)).swiftUIColor)
         }
     }
 }
@@ -70,31 +84,32 @@ private struct CountdownBanner: View {
                     Text(context.attributes.heading).font(.caption).foregroundStyle(Color.boardGray)
                 }
                 .lineLimit(1)
+                .accessibilityElement(children: .combine)
                 Spacer()
                 buttons(context)
+                    // Read after the countdown, not before it
+                    .accessibilityElement(children: .contain)
+                    .accessibilitySortPriority(-1)
             }
             // The mark goes first: the countdown takes all the width it's given
             HStack(spacing: 6) {
-                if marksLive(context) {
-                    LiveMark(size: 18)
-                } else if marksScheduled(context) {
-                    ScheduledMark(size: 18)
-                }
+                statusMark(context, size: 18)
                 countdown(context)
                     .font(.system(size: 40, weight: .bold, design: .rounded))
                     .monospacedDigit()
                     .multilineTextAlignment(.leading)
             }
-            .foregroundStyle(shownState(context).isLive ? Color.liveGreen : .white)
+            .foregroundStyle(statusColor(context))
+            .accessibilityElement(children: .combine)
+            .accessibilityValue(status(context))
             Text(summary(context))
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(Color.boardGray)
                 .lineLimit(1)
+                .accessibilityLabel(summary(context, spoken: true))
             HStack {
                 if let notice = shownState(context).notice {
-                    Label(notice, systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.orange)
+                    noticeLabel(notice)
                 }
                 Spacer()
                 // Stale once its train is due; with a next train it's moved on to that
@@ -106,26 +121,7 @@ private struct CountdownBanner: View {
             }
         }
         .padding(16)
-    }
-}
-
-extension TrainActivityAttributes.ContentState {
-    /// Once the train has gone, the first of the following trains still to
-    /// come, as though it were the one counted down to; or, with none, as it
-    /// is. The countdown is out of date as its train is due, and iOS redraws
-    /// it then, so it moves on without the app. Only once, though: nothing
-    /// redraws it again until the app updates it. A following train's trip
-    /// and where it ends aren't known; it's taken to be live if this one was.
-    func movedOn(at now: Date) -> Self {
-        guard train <= now, let index = following.firstIndex(where: { $0 > now }) else { return self }
-        var state = self
-        state.train = following[index]
-        state.trip = ""
-        state.terminal = nil
-        if let routes = followingRoutes, index < routes.count { state.route = routes[index] }
-        state.following = Array(following.dropFirst(index + 1))
-        state.followingRoutes = followingRoutes.map { Array($0.dropFirst(index + 1)) }
-        return state
+        .accessibilityElement(children: .contain)
     }
 }
 
@@ -154,15 +150,9 @@ private func countdown(_ context: ActivityViewContext<TrainActivityAttributes>) 
 /// takes all the width it's offered, and iOS drops anything joined to its text,
 /// so it's held to the width of its digits by a hidden stand-in for them.
 private func markedCountdown(_ context: ActivityViewContext<TrainActivityAttributes>, markSize: CGFloat, size: CGFloat) -> some View {
-    let remaining = shownState(context).train.timeIntervalSinceNow
-    let placeholder = remaining >= 3600 ? "0:00:00" : remaining >= 600 ? "00:00" : "0:00"
-    return HStack(spacing: 4) {
-        if marksLive(context) {
-            LiveMark(size: markSize)
-        } else if marksScheduled(context) {
-            ScheduledMark(size: markSize)
-        }
-        Text(placeholder)
+    HStack(spacing: 4) {
+        statusMark(context, size: markSize)
+        Text(TimerText.placeholder(seconds: shownState(context).train.timeIntervalSinceNow))
             .hidden()
             .overlay(alignment: .trailing) {
                 countdown(context).multilineTextAlignment(.trailing)
@@ -170,19 +160,36 @@ private func markedCountdown(_ context: ActivityViewContext<TrainActivityAttribu
             .font(.system(size: size, weight: .bold, design: .rounded))
             .monospacedDigit()
     }
+    .accessibilityElement(children: .combine)
+    .accessibilityValue(status(context))
 }
 
-/// Whether the countdown's train is live and Settings › Mark live times, or the
-/// phone's Differentiate Without Color, is on, as on the widgets.
-private func marksLive(_ context: ActivityViewContext<TrainActivityAttributes>) -> Bool {
-    shownState(context).isLive
-        && (UIAccessibility.shouldDifferentiateWithoutColor || SharedStore.loadSettings().marksLiveTimes)
+/// The live or scheduled mark, as Settings or the phone asks, as on the
+/// widgets. VoiceOver has the countdown's `status` instead, marked or not.
+private func statusMark(_ context: ActivityViewContext<TrainActivityAttributes>, size: CGFloat) -> some View {
+    let marks = SharedStore.loadSettings().timeMarks(withoutColor: UIAccessibility.shouldDifferentiateWithoutColor)
+    return StatusMark(isLive: shownState(context).isLive, marks: marks, size: size)
+        .accessibilityHidden(true)
 }
 
-/// Whether the countdown's train is a timetable time and Settings › Mark
-/// scheduled times is on, as on the widgets.
-private func marksScheduled(_ context: ActivityViewContext<TrainActivityAttributes>) -> Bool {
-    !shownState(context).isLive && SharedStore.loadSettings().marksScheduledTimes
+/// The countdown's colour: green for a live prediction, white for a timetable time.
+private func statusColor(_ context: ActivityViewContext<TrainActivityAttributes>) -> Color {
+    shownState(context).isLive ? .liveGreen : .white
+}
+
+/// "Live" or "Scheduled", which the countdown otherwise shows by its colour alone.
+private func status(_ context: ActivityViewContext<TrainActivityAttributes>) -> String {
+    shownState(context).isLive ? "Live" : "Scheduled"
+}
+
+/// What's in the way, with its kind's symbol and colour as on the widgets, or
+/// that there are no trains.
+private func noticeLabel(_ notice: String) -> some View {
+    let kind = Notice.Kind(label: notice)
+    return Label(notice, systemImage: kind?.symbol ?? "exclamationmark.triangle.fill")
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(kind?.tint ?? .orange)
+        .accessibilityLabel("Alert: \(notice)")
 }
 
 /// The line of the train it's counting down to, which can be another one running on yours.
@@ -191,8 +198,9 @@ private func trainRoute(_ context: ActivityViewContext<TrainActivityAttributes>)
 }
 
 /// "8:22 AM · Forest Hills · then 8:31, 8:39", naming the line of any later
-/// train that isn't on this one's: "then R 8:31, 8:39".
-private func summary(_ context: ActivityViewContext<TrainActivityAttributes>) -> String {
+/// train that isn't on this one's: "then R 8:31, 8:39"; `spoken`, a shuttle
+/// by its name: "then 42 St Shuttle 8:31".
+private func summary(_ context: ActivityViewContext<TrainActivityAttributes>, spoken: Bool = false) -> String {
     let state = shownState(context)
     let route = trainRoute(context)
     var parts = [Spoken.clock(state.train)]
@@ -201,7 +209,7 @@ private func summary(_ context: ActivityViewContext<TrainActivityAttributes>) ->
         let times = state.following.indices.map { index -> String in
             let time = state.following[index].clock
             guard let routes = state.followingRoutes, index < routes.count, routes[index] != route else { return time }
-            return "\(LineStyle.of(routes[index]).label) \(time)"
+            return "\(spoken ? Lines.name(of: routes[index]) : LineStyle.of(routes[index]).label) \(time)"
         }
         parts.append("then " + times.joined(separator: ", "))
     }

@@ -24,6 +24,22 @@ struct SavedWidget: Codable, Hashable, Identifiable, Sendable {
         self.commute = commute
     }
 
+    private enum CodingKeys: String, CodingKey {
+        case id, name, selection, change, commute
+    }
+
+    /// One saved without a name still loads, going by the station's, and one
+    /// whose change can't be read loses just that. Any property added later
+    /// needs a default here too: one widget that can't be read leaves them all unread.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(id: try container.decode(UUID.self, forKey: .id),
+                  name: try container.decodeIfPresent(String.self, forKey: .name) ?? "",
+                  selection: try container.decode(Selection.self, forKey: .selection),
+                  change: try? container.decodeIfPresent(Change.self, forKey: .change),
+                  commute: try container.decodeIfPresent(CommutingHours.self, forKey: .commute))
+    }
+
     /// Its name, or the station's.
     var title: String {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
@@ -41,11 +57,27 @@ struct SavedWidget: Codable, Hashable, Identifiable, Sendable {
         shown.change = commute.change
         return shown
     }
+
+    /// Another train, keeping the change only where it's still on its way,
+    /// in the one change to the widget.
+    mutating func setSelection(_ new: Selection) {
+        change = keptChange(change, from: selection, to: new)
+        selection = new
+    }
+}
+
+/// What becomes of `change` when its train goes from `old` to `new`. Another
+/// line or direction goes another way, which the change isn't on, so it goes;
+/// another station the same way keeps it while it's still ahead.
+private func keptChange(_ change: Change?, from old: Selection, to new: Selection) -> Change? {
+    guard old != new else { return change }
+    guard old.routes == new.routes, old.direction == new.direction else { return nil }
+    return change?.validated(for: new)
 }
 
 /// The saved widgets, in the order the Widgets tab lists them, and which one
-/// is the default: the one widgets show until they pick another, and the
-/// one the Live tab, Siri and the countdown go by.
+/// is the default: the one widgets show until they pick another, and whose
+/// train, as it shows it at the time, Siri and its countdown go by.
 struct SavedWidgets: Codable, Hashable, Sendable {
     /// Never empty.
     private(set) var widgets: [SavedWidget]
@@ -138,6 +170,17 @@ struct CommutingHours: Codable, Hashable, Sendable {
     /// `Calendar` weekdays, 1 for Sunday; Monday to Friday to start with.
     var weekdays: Set<Int> = [2, 3, 4, 5, 6]
 
+    private enum CodingKeys: String, CodingKey {
+        case selection, change, start, end, weekdays
+    }
+
+    /// Another train in these hours, keeping their change only where it's
+    /// still on its way, as a saved widget's own train does.
+    mutating func setSelection(_ new: Selection) {
+        change = keptChange(change, from: selection, to: new)
+        selection = new
+    }
+
     /// Whether `date` is in these hours. One that starts after midnight is
     /// in the day it started on's hours.
     func isActive(at date: Date, calendar: Calendar = .current) -> Bool {
@@ -164,5 +207,19 @@ struct CommutingHours: Codable, Hashable, Sendable {
             }
         }
         return candidates.filter { $0 > date }.sorted().first { isActive(at: $0, calendar: calendar) != active }
+    }
+}
+
+extension CommutingHours {
+    /// Hours saved without any of these still load, with them at their
+    /// defaults, and a change that can't be read is left out. Here, not in
+    /// the type, so it keeps its memberwise init.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(selection: try container.decode(Selection.self, forKey: .selection),
+                  change: try? container.decodeIfPresent(Change.self, forKey: .change))
+        start = try container.decodeIfPresent(Int.self, forKey: .start) ?? start
+        end = try container.decodeIfPresent(Int.self, forKey: .end) ?? end
+        weekdays = try container.decodeIfPresent(Set<Int>.self, forKey: .weekdays) ?? weekdays
     }
 }

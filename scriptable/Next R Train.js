@@ -5,22 +5,43 @@
 // Next Manhattan-bound R train at Prospect Av, Brooklyn.
 // A home-screen and lock-screen widget for Scriptable (https://scriptable.app).
 // Reads the MTA's real-time feed for the N/Q/R/W lines; no API key needed.
+// For another stop or line, change the settings below: the feed, the color and
+// the terminals go with the line.
 
 // ---- Settings ---------------------------------------------------------------
 const STOP_ID = "R34N"; // Prospect Av, Manhattan-bound ("R34S" is toward Bay Ridge)
+// The lines, as the feed names them: "GS", "FS" and "H" are the shuttles, and a
+// line's express runs ("6X") are shown with it
 const ROUTES = ["R"]; // add "N" to also show N trains when they run local
 const STATION = "Prospect Av";
 const HEADING = "to Manhattan";
+// The feed for ROUTES' group of lines: it ends -ace, -bdfm, -g, -jz, -l, -nqrw or
+// -si, or at "gtfs" for the 1 to 7 and the 42 St shuttle
 const FEED_URL = "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs-nqrw";
+// The line's color, for its bullet (the label on it is black if it's light)
+const LINE_COLOR = "#FCCC0A";
+// The MTA makes its feed anew about every 30 seconds; one older than this has stopped updating
+const STALE_SECONDS = 3 * 60;
+// How fast the phone's clock may be before the feed looks stopped (as the app's SubwayFeed.clockAllowance)
+const CLOCK_ALLOWANCE_SECONDS = 7 * 60;
 // Where a train ends up, keyed by the last stop of its trip
-const TERMINALS = { G08N: "Forest Hills", G21N: "Queens Plaza", R27N: "Whitehall St", R45S: "Bay Ridge" };
+const TERMINALS = {
+  R01N: "Astoria", G08N: "Forest Hills", G21N: "Queens Plaza", R27N: "Whitehall St",
+  R45S: "Bay Ridge", D43S: "Coney Island",
+};
 // -----------------------------------------------------------------------------
 
-const YELLOW = new Color("#FCCC0A");
+const BULLET = new Color(LINE_COLOR);
+// Black on the light bullets, as on the N, Q, R and W, and white on the rest
+const BULLET_LABEL = 0.299 * BULLET.red + 0.587 * BULLET.green + 0.114 * BULLET.blue > 0.57 ? Color.black() : Color.white();
 const GREEN = new Color("#4CD964");
 const BACKGROUND = new Color("#111111");
 const DIM = new Color("#9A9A9A");
 const DOT = "\u00b7"; // written as an escape so the script stays plain ASCII
+// The express runs of the 5, 6, 7 and F are their own routes in the feeds ("6X")
+const line = (route) => route.replace(/^([567F])X$/, "$1");
+// What a line's bullet says: an S for the shuttles
+const label = (route) => (["GS", "FS", "H"].includes(route) ? "S" : route);
 
 const family = config.widgetFamily || "medium"; // run in the app: preview the medium size
 let widget;
@@ -46,9 +67,11 @@ async function upcomingTrains() {
 }
 
 // Decodes just enough of the GTFS-realtime protobuf (gtfs.org/realtime) to list,
-// for every trip that stops at stopId, its route, arrival time, last stop and
-// whether a train is assigned to it (live=true: a live prediction; false: the
-// MTA hasn't assigned a train yet, so the time is still the timetable's).
+// for every trip that stops at stopId and goes on from it, its line, arrival
+// time, last stop and whether a train is assigned to it (live=true: a live
+// prediction; false: the MTA hasn't assigned a train yet, so the time is still
+// the timetable's). Throws if the feed says it was made over STALE_SECONDS ago,
+// by the phone's clock with CLOCK_ALLOWANCE_SECONDS more.
 function arrivalsAt(stopId, bytes) {
   let pos = 0;
   const varint = () => {
@@ -99,7 +122,9 @@ function arrivalsAt(stopId, bytes) {
   };
 
   const arrivals = [];
+  let made = 0;
   fields(bytes.length, {
+    1: () => message({ 3: () => (made = varint()) }), // FeedMessage.header: its timestamp
     2: () => message({ // FeedMessage.entity
       3: () => { // FeedEntity.trip_update
         let route = "";
@@ -124,10 +149,16 @@ function arrivalsAt(stopId, bytes) {
             lastStop = stop;
           },
         });
-        if (time) arrivals.push({ route, time: new Date(time * 1000), terminal: TERMINALS[lastStop], live });
+        // A trip that ends at stopId doesn't leave from it
+        if (time && lastStop !== stopId) {
+          arrivals.push({ route: line(route), time: new Date(time * 1000), terminal: TERMINALS[lastStop], live });
+        }
       },
     }),
   });
+  if (made && Date.now() / 1000 - made > STALE_SECONDS + CLOCK_ALLOWANCE_SECONDS) {
+    throw new Error(`The MTA's feed hasn't updated since ${clock(new Date(made * 1000), true)}`);
+  }
   return arrivals.sort((a, b) => a.time - b.time);
 }
 
@@ -135,7 +166,7 @@ function arrivalsAt(stopId, bytes) {
 
 function trainWidget(trains) {
   if (trains.length === 0) {
-    const widget = messageWidget(`No ${ROUTES.join("/")} trains predicted`, "Check mta.info for service changes");
+    const widget = messageWidget(`No ${ROUTES.map(label).join("/")} trains predicted`, "Check mta.info for service changes");
     widget.refreshAfterDate = new Date(Date.now() + 5 * 60 * 1000);
     return widget;
   }
@@ -146,11 +177,11 @@ function trainWidget(trains) {
   widget.refreshAfterDate = new Date(Math.min(next.time.getTime() + 10 * 1000, Date.now() + 60 * 1000));
 
   if (family === "accessoryInline") {
-    widget.addText(`${next.route} ${[next, ...later.slice(0, 2)].map((t) => clock(t.time)).join(` ${DOT} `)}`);
+    widget.addText(`${label(next.route)} ${[next, ...later.slice(0, 2)].map((t) => clock(t.time)).join(` ${DOT} `)}`);
     return widget;
   }
   if (family === "accessoryRectangular" || family === "accessoryCircular") {
-    const title = widget.addText(family === "accessoryCircular" ? next.route : `${next.route} ${DOT} ${STATION}`);
+    const title = widget.addText(family === "accessoryCircular" ? label(next.route) : `${label(next.route)} ${DOT} ${STATION}`);
     title.font = Font.boldSystemFont(family === "accessoryCircular" ? 16 : 13);
     if (family === "accessoryCircular") title.centerAlignText();
     const timer = countdown(widget, next, 22);
@@ -279,11 +310,13 @@ function bullet(stack, route, size) {
   const circle = stack.addStack();
   circle.size = new Size(size, size);
   circle.cornerRadius = size / 2;
-  circle.backgroundColor = YELLOW;
+  circle.backgroundColor = BULLET;
   circle.centerAlignContent();
-  const letter = circle.addText(route);
-  letter.font = Font.boldSystemFont(Math.round(size * 0.62));
-  letter.textColor = Color.black();
+  const text = label(route);
+  const letter = circle.addText(text);
+  // Two letters, as on the SI, are smaller
+  letter.font = Font.boldSystemFont(Math.round(size * (text.length > 1 ? 0.45 : 0.62)));
+  letter.textColor = BULLET_LABEL;
 }
 
 function messageWidget(title, detail) {
