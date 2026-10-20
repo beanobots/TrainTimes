@@ -9,7 +9,7 @@ enum Spoken {
     /// as you can't reach them in time.
     static func nextTrain(selection: Selection, trains: [Arrival], unreachable: Bool = false, notice: Notice?,
                           now: Date) -> String {
-        let lines = Lines.list(selection.routes, joinedBy: "or")
+        let lines = Lines.spokenList(selection.routes, joinedBy: "or")
         let station = selection.station?.name ?? "your station"
         var sentence: String
         if let next = trains.first {

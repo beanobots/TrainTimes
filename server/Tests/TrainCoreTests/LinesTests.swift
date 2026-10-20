@@ -53,7 +53,7 @@ import Testing
         #expect(["5X", "6X", "7X", "FX", "R", "GS"].map(Lines.normalized) == ["5", "6", "7", "F", "R", "GS"])
     }
 
-    /// What VoiceOver and Siri call a train of each line, everywhere they name one.
+    /// What VoiceOver calls a train of each line, everywhere it names one.
     @Test func eachShuttleIsSpokenOfByItsName() {
         #expect(Lines.spokenName(of: "R") == "R train")
         #expect(Lines.spokenName(of: "SI") == "SI train")
@@ -61,6 +61,17 @@ import Testing
         #expect(Lines.spokenName(of: "GS") == "42 St Shuttle")
         #expect(Lines.spokenName(of: "FS") == "Franklin Av Shuttle")
         #expect(Lines.spokenName(of: "H") == "Rockaway Park Shuttle")
+    }
+
+    /// Siri names a shuttle among other lines too, where the screen has its bullet's S.
+    @Test func aShuttleIsSaidByItsNameAmongOtherLines() {
+        #expect(Lines.spokenList(["7", "GS"], joinedBy: "or") == "7 or 42 St Shuttle")
+        #expect(Lines.spokenList(["N", "R"], joinedBy: "or") == "N or R")
+        #expect(Lines.spokenList(["D", "N", "R"]) == "D, N and R")
+        #expect(Lines.spokenList(["FS"]) == "Franklin Av Shuttle")
+        #expect(Lines.spokenList([]) == "")
+        #expect(Lines.list(["7", "GS"], joinedBy: "or") == "7 or S")
+        #expect(Lines.list(["GS"]) == "42 St Shuttle")
     }
 
     /// The bullets' letters, drawn the same size by every bullet: the widgets',

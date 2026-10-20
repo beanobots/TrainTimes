@@ -921,9 +921,11 @@ struct TrainWidgetView: View {
         MinutesToGo(until: train.time, from: entry.date)
     }
 
-    /// "8:12", or "N 8:12" where it could be more than one line.
-    private func time(_ train: Arrival) -> String {
-        entry.selection.marksLine(of: train) ? "\(train.lineLabel) \(train.time.clock)" : train.time.clock
+    /// "8:12", or "N 8:12" where it could be more than one line; `spoken`,
+    /// a shuttle by its name: "42 St Shuttle 8:12".
+    private func time(_ train: Arrival, spoken: Bool = false) -> String {
+        guard entry.selection.marksLine(of: train) else { return train.time.clock }
+        return "\(spoken ? Lines.name(of: train.route) : train.lineLabel) \(train.time.clock)"
     }
 
     /// The Lock Screen's "then 8:31, 8:39", each time after its live or
@@ -937,7 +939,7 @@ struct TrainWidgetView: View {
             }
             text = Text("\(text)\(Text(verbatim: time(train)))")
         }
-        let spoken = trains.map { "\(time($0)), \(status($0).lowercased())" }.joined(separator: "; ")
+        let spoken = trains.map { "\(time($0, spoken: true)), \(status($0).lowercased())" }.joined(separator: "; ")
         return text.accessibilityLabel("then \(spoken)")
     }
 

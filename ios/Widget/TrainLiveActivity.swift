@@ -106,6 +106,7 @@ private struct CountdownBanner: View {
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(Color.boardGray)
                 .lineLimit(1)
+                .accessibilityLabel(summary(context, spoken: true))
             HStack {
                 if let notice = shownState(context).notice {
                     noticeLabel(notice)
@@ -195,8 +196,9 @@ private func trainRoute(_ context: ActivityViewContext<TrainActivityAttributes>)
 }
 
 /// "8:22 AM · Forest Hills · then 8:31, 8:39", naming the line of any later
-/// train that isn't on this one's: "then R 8:31, 8:39".
-private func summary(_ context: ActivityViewContext<TrainActivityAttributes>) -> String {
+/// train that isn't on this one's: "then R 8:31, 8:39"; `spoken`, a shuttle
+/// by its name: "then 42 St Shuttle 8:31".
+private func summary(_ context: ActivityViewContext<TrainActivityAttributes>, spoken: Bool = false) -> String {
     let state = shownState(context)
     let route = trainRoute(context)
     var parts = [Spoken.clock(state.train)]
@@ -205,7 +207,7 @@ private func summary(_ context: ActivityViewContext<TrainActivityAttributes>) ->
         let times = state.following.indices.map { index -> String in
             let time = state.following[index].clock
             guard let routes = state.followingRoutes, index < routes.count, routes[index] != route else { return time }
-            return "\(LineStyle.of(routes[index]).label) \(time)"
+            return "\(spoken ? Lines.name(of: routes[index]) : LineStyle.of(routes[index]).label) \(time)"
         }
         parts.append("then " + times.joined(separator: ", "))
     }

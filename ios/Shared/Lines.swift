@@ -97,7 +97,7 @@ enum Lines {
         }
     }
 
-    /// A line as VoiceOver and Siri name a train of it: "R train", or a
+    /// A train of the line as VoiceOver names it on its own: "R train", or a
     /// shuttle by its name, "42 St Shuttle", which says what it is.
     static func spokenName(of route: String) -> String {
         let label = LineStyle.of(route).label
@@ -113,7 +113,16 @@ enum Lines {
 
     /// "R", "42 St Shuttle", "N and R", "D, N and R"; or joined by "or", "D or N"
     static func list(_ routes: [String], joinedBy conjunction: String = "and") -> String {
-        let names = routes.count == 1 ? routes.map(name(of:)) : routes.map { LineStyle.of($0).label }
+        joined(routes.count == 1 ? routes.map(name(of:)) : routes.map { LineStyle.of($0).label }, by: conjunction)
+    }
+
+    /// The lines as they're said aloud, each by its name, as the S of the
+    /// shuttles doesn't say which: "N or R", "7 or 42 St Shuttle".
+    static func spokenList(_ routes: [String], joinedBy conjunction: String = "and") -> String {
+        joined(routes.map(name(of:)), by: conjunction)
+    }
+
+    private static func joined(_ names: [String], by conjunction: String) -> String {
         guard let last = names.last, names.count > 1 else { return names.first ?? "" }
         return names.dropLast().joined(separator: ", ") + " \(conjunction) " + last
     }
