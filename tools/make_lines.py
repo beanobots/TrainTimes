@@ -15,9 +15,14 @@ the R running short at night, the stops of the less common ones go in among
 those before, a branch after the last stop it shares with them. A stop only
 northbound trains make, such as Aqueduct Racetrack on the A, is then added from
 those trains, run backwards.
+
+Written to ios/Shared, it's also copied to the server's resources, as
+make_stations.py does with its files.
 """
 import csv
 import json
+import os
+import shutil
 import sys
 from collections import Counter
 
@@ -82,6 +87,12 @@ def main(gtfs_dir, stations_path, target_dir):
     with open(target, "w", encoding="utf-8") as file:
         file.write("{\n" + ",\n".join(f"{json.dumps(k)}: {json.dumps(v)}" for k, v in lines.items()) + "\n}\n")
     print(f"{len(lines)} lines -> {target}")
+
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if os.path.samefile(target_dir, os.path.join(repo, "ios", "Shared")):
+        server = os.path.join(repo, "server", "Sources", "TrainResources", "Resources")
+        shutil.copyfile(target, os.path.join(server, "lines.json"))
+        print(f"and copied to {os.path.relpath(server, repo)}")
 
 
 if __name__ == "__main__":

@@ -30,10 +30,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Check the server's copies of the station lists
-        # make_stations.py writes both; a symlink wouldn't survive bundling
+        # make_stations.py and make_lines.py write them; a symlink wouldn't survive bundling
         run: |
           cmp ios/Shared/stations.json server/Sources/TrainResources/Resources/stations.json
           cmp ios/Shared/equipment.json server/Sources/TrainResources/Resources/equipment.json
+          cmp ios/Shared/lines.json server/Sources/TrainResources/Resources/lines.json
 
       - name: Build the server
         run: swift build --package-path server

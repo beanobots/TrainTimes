@@ -19,13 +19,15 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-http-types.git", from: "1.0.0"),
     ],
     targets: [
-        // stations.json and equipment.json, copies of ../ios/Shared's that
-        // tools/make_stations.py writes (a symlinked resource is bundled as the
-        // link, which doesn't resolve from the bundle). A target of their own,
-        // so TrainCore can stand in for `Bundle` (see Shims.swift).
+        // stations.json, equipment.json and lines.json, copies of ../ios/Shared's
+        // that tools/make_stations.py and make_lines.py write (a symlinked
+        // resource is bundled as the link, which doesn't resolve from the
+        // bundle). A target of their own, so TrainCore can stand in for
+        // `Bundle` (see Shims.swift).
         .target(
             name: "TrainResources",
-            resources: [.copy("Resources/stations.json"), .copy("Resources/equipment.json")]
+            resources: [.copy("Resources/stations.json"), .copy("Resources/equipment.json"),
+                        .copy("Resources/lines.json")]
         ),
         // The app's own feed code (Shared/, symlinked from ../ios/Shared), and
         // the server's logic, which needs its internal types. SQLite is the

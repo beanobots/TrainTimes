@@ -224,10 +224,11 @@ Built into the app (refresh them now and then):
 To refresh them, follow the download steps at the top of `tools/make_stations.py`,
 then run `python3 tools/make_stations.py Stations.csv entrances.json equipment.json ios/Shared`.
 It also copies the first two into the push server's resources, which can't
-link to them. `lines.json` keeps only the stops `stations.json` lists, so then follow the
+link to them (`make_lines.py` does the same with `lines.json`). `lines.json`
+keeps only the stops `stations.json` lists, so then follow the
 download steps at the top of `tools/make_lines.py` and run
 `python3 tools/make_lines.py gtfs ios/Shared/stations.json ios/Shared`. Push all
-five files: the three in `ios/Shared` and the server's copies in
+six files: the three in `ios/Shared` and the server's copies of them in
 `server/Sources/TrainResources/Resources`, which the server's CI checks match.
 
 ## How it stays fresh
