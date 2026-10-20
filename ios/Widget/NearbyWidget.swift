@@ -23,6 +23,9 @@ struct NearbyEntry: TimelineEntry {
     let content: Content
     /// The app's Settings, for marking live times.
     var settings = AppSettings()
+    /// When you were found, where it wasn't just now: iOS couldn't find you
+    /// afresh, so the stations are near where you were then.
+    var locatedAt: Date? = nil
 
     enum Content {
         /// The stations nearest you, nearest first, and what the place is
@@ -63,23 +66,32 @@ struct NearbyProvider: TimelineProvider {
     }
 
     /// One entry a minute for half an hour, so the minutes count down, and
-    /// when to find you again: as often as the train widget reloads.
+    /// when to find you again: as often as the train widget reloads. Both go
+    /// from once you're found and the trains fetched, so the entries start
+    /// when they're shown.
     private static func plan(height: CGFloat) async -> (entries: [NearbyEntry], reload: Date) {
-        let now = Date.now
         let settings = SharedStore.loadSettings()
-        let reload = now.addingTimeInterval(Provider.reloadInterval(at: now))
-        let one = { (content: NearbyEntry.Content) in [NearbyEntry(date: now, content: content, settings: settings)] }
+        let reload = { (now: Date) in now.addingTimeInterval(Provider.reloadInterval(at: now)) }
         switch await NearbyLocator.locate() {
         case .notAllowed(let asked):
             // The app reloads the widget once location's turned on
-            return (one(.locationOff(asked: asked)), now.addingTimeInterval(60 * 60))
+            let now = Date.now
+            return ([NearbyEntry(date: now, content: .locationOff(asked: asked), settings: settings)],
+                    now.addingTimeInterval(60 * 60))
         case .notFound:
-            return (one(.notFound), reload)
+            let now = Date.now
+            return ([NearbyEntry(date: now, content: .notFound, settings: settings)], reload(now))
         case .found(let location):
-            let place = await NearbyLocator.placeName(for: location)
+            // Where iOS last found you, when it couldn't just now: the widget says when that was
+            let locatedAt = Date.now.timeIntervalSince(location.timestamp) > 2 * 60 ? location.timestamp : nil
+            // Its name is looked up while the trains are fetched
+            async let place = NearbyLocator.placeName(for: location)
             let near = Nearby.stations(near: location, limit: 3)
             guard !near.isEmpty else {
-                return (one(.noStations(place: place, nearest: Nearby.nearest(to: location))), reload)
+                let name = await place
+                let now = Date.now
+                return ([NearbyEntry(date: now, content: .noStations(place: name, nearest: Nearby.nearest(to: location)),
+                                     settings: settings, locatedAt: locatedAt)], reload(now))
             }
             // Every line at each station, both ways
             let selections = near.flatMap { result in
@@ -87,18 +99,21 @@ struct NearbyProvider: TimelineProvider {
                     Direction.allCases.map { Selection(stationID: result.station.id, routes: [route], direction: $0) }
                 }
             }
-            async let fetched = TrainService.trains(for: selections, includingOtherLines: false, now: now)
+            async let fetched = TrainService.trains(for: selections, includingOtherLines: false)
             async let alertEntries = TrainService.alertEntries()
             let trains = await fetched
             let alerts = await alertEntries
+            let name = await place
+            let now = Date.now
             let unreachable = trains.isEmpty
             let stations = near.map { NearbyStation($0, trains: trains, alerts: alerts, kinds: settings.alertKinds, now: now) }
             let shown = NearbyLayout.fit(stations, in: NearbyLayout.room(height: height, unreachable: unreachable))
-            let content = NearbyEntry.Content.stations(place: place, stations: shown, unreachable: unreachable)
+            let content = NearbyEntry.Content.stations(place: name, stations: shown, unreachable: unreachable)
             let entries = (0..<Self.minutesShown).map { minute in
-                NearbyEntry(date: now.addingTimeInterval(Double(minute) * 60), content: content, settings: settings)
+                NearbyEntry(date: now.addingTimeInterval(Double(minute) * 60), content: content, settings: settings,
+                            locatedAt: locatedAt)
             }
-            return (entries, reload)
+            return (entries, reload(now))
         }
     }
 }
@@ -114,12 +129,11 @@ struct NearbyStation {
     /// The lines with a row of their own: those with trains, or with an alert
     /// saying why there are none.
     var lines: [NearbyLine]
-    /// The lines in the small row under them: those not running now, or, at
-    /// a station with more lines than there's room for, the rest.
-    var folded: [String]
-    /// Whether `folded` is lines left out for room ("4 more lines") rather
-    /// than ones not running.
-    var foldedForRoom = false
+    /// The lines not running now, in the small row under them.
+    let notRunning: [String]
+    /// At a station with more lines than there's room for, the rest, in the
+    /// small row too ("4 more lines").
+    var leftOut: [String] = []
 
     /// `result`'s lines, with their trains (each line's own, by
     /// `Selection.trainID`) and alerts of the kinds chosen in Settings.
@@ -132,22 +146,22 @@ struct NearbyStation {
             NearbyLine($0, at: result.station, trains: trains, alerts: alerts, kinds: kinds, now: now)
         }
         self.lines = lines.filter { !$0.isIdle }
-        folded = lines.filter(\.isIdle).map(\.route)
+        notRunning = lines.filter(\.isIdle).map(\.route)
     }
+
+    /// Whether it has the small row.
+    var hasSmallRow: Bool { !notRunning.isEmpty || !leftOut.isEmpty }
 
     /// How tall it is on the widget.
     var height: CGFloat {
-        NearbyLayout.stationHeader + CGFloat(lines.count) * NearbyLayout.row + (folded.isEmpty ? 0 : NearbyLayout.smallRow)
+        NearbyLayout.stationHeader + CGFloat(lines.count) * NearbyLayout.row + (hasSmallRow ? NearbyLayout.smallRow : 0)
     }
 
-    /// Moves its last line with a row of its own to the small row, which then
-    /// counts the lines left out.
+    /// Moves its last line with a row of its own to the lines left out, ahead
+    /// of those left out before it, which came after it.
     mutating func leaveOutLastLine() {
         guard let line = lines.popLast() else { return }
-        let order = station.routes
-        folded.append(line.route)
-        folded.sort { (order.firstIndex(of: $0) ?? 0) < (order.firstIndex(of: $1) ?? 0) }
-        foldedForRoom = true
+        leftOut.insert(line.route, at: 0)
     }
 }
 
@@ -159,6 +173,8 @@ struct NearbyLine: Identifiable {
     let directions: [NearbyDirection?]
     /// Its most important alert, when there are no trains either way: why not.
     let notice: Notice?
+    /// The way `notice` is for, whose alerts a tap on it opens.
+    let noticeSelection: Selection?
 
     var id: String { route }
 
@@ -213,8 +229,19 @@ struct NearbyLine: Identifiable {
             }
         }
         let noTrains = ways.values.allSatisfy { $0.trains?.isEmpty == true }
-        let worst = ways.values.flatMap(\.alerts).min { $0.kind < $1.kind }
-        notice = noTrains ? worst.map { Notice(kind: .alert($0.kind), label: $0.kind.label, text: $0.header, others: 0) } : nil
+        // Each way's worst alert, in their order, so of two as bad the first way's
+        let worst = order.compactMap { direction -> (alert: ServiceAlert, selection: Selection)? in
+            guard let way = ways[direction], let alert = way.alerts.first else { return nil }
+            return (alert, way.selection)
+        }
+        .min { $0.alert.kind < $1.alert.kind }
+        if noTrains, let worst {
+            notice = Notice(kind: .alert(worst.alert.kind), label: worst.alert.kind.label, text: worst.alert.header, others: 0)
+            noticeSelection = worst.selection
+        } else {
+            notice = nil
+            noticeSelection = nil
+        }
     }
 
     private struct Way {
@@ -228,9 +255,20 @@ struct NearbyLine: Identifiable {
     /// other the borough its trains are headed for. A line that stays in one
     /// borough, like the Staten Island Railway, goes by where its trains end up.
     private static func labels(of route: String, at station: Station, ways: [Direction: Way]) -> [Direction: String] {
-        // "Uptown & The Bronx" is uptown
+        // "Uptown & The Bronx" and "Uptown - Queens" are uptown
         func named(_ direction: Direction) -> String {
-            let name = station.directionName(direction, of: route).components(separatedBy: " & ")[0]
+            var name = station.directionName(direction, of: route)
+            // Where the lines here part, this one's way: "Broad St (JZ) - Uptown (M)" is uptown for the M
+            let label = LineStyle.of(route).label
+            if let own = name.components(separatedBy: " - ").first(where: {
+                $0.hasSuffix(")") && ($0.components(separatedBy: "(").last ?? "").contains(label)
+            }) {
+                name = own.components(separatedBy: " (")[0]
+            }
+            name = name.components(separatedBy: " & ")[0]
+            // Only those: "34 St - Hudson Yards" stays as it is
+            let first = name.components(separatedBy: " - ")[0]
+            if first == "Uptown" || first == "Downtown" { name = first }
             return name.isEmpty ? (direction == .north ? "Northbound" : "Southbound") : name
         }
         var labels: [Direction: String] = [:]
@@ -277,7 +315,7 @@ enum NearbyLayout {
     /// A station's name and how far it is, with the rule above it.
     static let stationHeader: CGFloat = 29
     static let row: CGFloat = 26
-    /// The small row of lines not running, or left out for room.
+    /// The small row of lines not running, and of those left out for room.
     static let smallRow: CGFloat = 22
     /// "Couldn't reach the MTA" along the bottom.
     static let problem: CGFloat = 22
@@ -359,6 +397,8 @@ struct NearbyWidgetView: View {
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
                         .frame(maxWidth: .infinity, minHeight: NearbyLayout.problem)
+                        // ↻ is the Refresh button
+                        .accessibilityLabel("Couldn't reach the MTA. Tap Refresh to try again.")
                 }
             case .locationOff(let asked):
                 header(nil, located: false, refreshes: false)
@@ -373,7 +413,8 @@ struct NearbyWidgetView: View {
                 }
             case .notFound:
                 header(nil)
-                message("location.slash", "Couldn't find where you are", "Tap ↻ to try again.")
+                message("location.slash", "Couldn't find where you are", "Tap ↻ to try again.",
+                        spoken: "Tap Refresh to try again.")
             case .noStations(let place, let nearest):
                 header(place)
                 message("tram", "No stations within \(Nearby.rangeDescription) of you",
@@ -387,14 +428,22 @@ struct NearbyWidgetView: View {
         .widgetURL(url)
     }
 
-    /// Where you are, and ↻, which finds you again.
+    /// Where you are, and ↻, which finds you again. When iOS couldn't find
+    /// you afresh, when it last did.
     private func header(_ place: String?, located: Bool = true, refreshes: Bool = true) -> some View {
         HStack(spacing: 6) {
             Image(systemName: located ? "location.fill" : "location.slash")
                 .font(.caption.weight(.bold))
+                .accessibilityHidden(true)
             Text(place ?? "Nearby")
                 .font(.subheadline.bold())
                 .lineLimit(1)
+            if let locatedAt = entry.locatedAt {
+                Text("as of \(locatedAt.formatted(date: .omitted, time: .shortened))")
+                    .font(.footnote)
+                    .foregroundStyle(Color.boardGray)
+                    .fixedSize()
+            }
             Spacer(minLength: 0)
             if refreshes {
                 RefreshButton(widgetsOnly: true)
@@ -449,7 +498,7 @@ struct NearbyWidgetView: View {
                     .frame(height: NearbyLayout.row)
                 }
             }
-            if !nearby.folded.isEmpty {
+            if nearby.hasSmallRow {
                 foldedRow(nearby)
             }
         }
@@ -478,7 +527,10 @@ struct NearbyWidgetView: View {
                     Spacer(minLength: 0)
                     time(direction.next(at: entry.date))
                 }
-                .accessibilityElement(children: .combine)
+                // Named with its line, for a way reached on its own; the time comes as its value
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(spokenName(direction))
+                .accessibilityValue(spokenTime(direction))
             }
             .frame(maxWidth: .infinity)
         } else {
@@ -516,16 +568,35 @@ struct NearbyWidgetView: View {
         .fixedSize()
     }
 
-    /// A line with no trains either way, and the alert that says why, which opens it in the app.
+    /// As VoiceOver names a way: "R Manhattan", and its alert, "R Uptown, Delays".
+    private func spokenName(_ direction: NearbyDirection) -> String {
+        let name = "\(Lines.name(of: direction.selection.firstRoute)) \(direction.label)"
+        return direction.alert.map { "\(name), \($0.label)" } ?? name
+    }
+
+    /// As VoiceOver reads a way's next train: "12 minutes, live", "Now,
+    /// scheduled". Whether it's live is said with the marks off too, as they
+    /// and the green are all that show it.
+    private func spokenTime(_ direction: NearbyDirection) -> String {
+        guard direction.trains != nil else { return "Couldn't load" }
+        guard let train = direction.next(at: entry.date) else { return "No trains" }
+        let minutes = max(0, Int(train.time.timeIntervalSince(entry.date) / 60))
+        let time = minutes == 0 ? "Now" : minutes == 1 ? "1 minute" : "\(minutes) minutes"
+        return "\(time), \(train.isLive ? "live" : "scheduled")"
+    }
+
+    /// A line with no trains either way, and the alert that says why, which
+    /// opens the alerts of the way it's for in the app.
     private func noticeRow(_ line: NearbyLine, _ notice: Notice) -> some View {
-        let selection = line.directions.compactMap { $0 }.first?.selection
-        return Link(destination: selection?.alertsURL ?? Nearby.url) {
+        Link(destination: line.noticeSelection?.alertsURL ?? Nearby.url) {
             HStack(spacing: 8) {
                 LineBullet(route: line.route, size: 20)
                 HStack(spacing: 4) {
+                    // Its kind is in its words
                     Image(systemName: notice.symbol)
                         .font(.caption2)
                         .foregroundStyle(notice.tint)
+                        .accessibilityHidden(true)
                     notice.bannerText
                         .font(.footnote)
                         .foregroundStyle(Color.boardText)
@@ -537,11 +608,11 @@ struct NearbyWidgetView: View {
         }
     }
 
-    /// The bullets of lines not running now, or of those left out for room.
+    /// The bullets of lines left out for room, then of those not running now.
     /// It opens the station, every line both ways; lines left out for room
     /// at the top.
     private func foldedRow(_ nearby: NearbyStation) -> some View {
-        Link(destination: Nearby.stationURL(nearby.station, first: nearby.foldedForRoom ? nearby.folded : [])) {
+        Link(destination: Nearby.stationURL(nearby.station, first: nearby.leftOut)) {
             foldedLabel(nearby)
                 // The whole row, not just its bullets and words
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -549,21 +620,24 @@ struct NearbyWidgetView: View {
         }
     }
 
+    /// "4 more lines ›" and "Not running now", each after its lines' bullets;
+    /// with no room for both, just the lines left out for room, which the
+    /// station shows first.
     private func foldedLabel(_ nearby: NearbyStation) -> some View {
-        HStack(spacing: 3) {
-            ForEach(nearby.folded, id: \.self) { route in
-                LineBullet(route: route, size: 14)
-            }
-            HStack(spacing: 4) {
-                if nearby.foldedForRoom {
-                    Text(nearby.folded.count == 1 ? "1 more line" : "\(nearby.folded.count) more lines")
-                    Image(systemName: "chevron.right")
-                        .font(.caption2.weight(.bold))
-                } else {
-                    Text("Not running now")
+        Group {
+            if nearby.leftOut.isEmpty {
+                notRunningLabel(nearby.notRunning)
+            } else if nearby.notRunning.isEmpty {
+                leftOutLabel(nearby.leftOut)
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 10) {
+                        leftOutLabel(nearby.leftOut)
+                        notRunningLabel(nearby.notRunning)
+                    }
+                    leftOutLabel(nearby.leftOut)
                 }
             }
-            .padding(.leading, 5)
         }
         .font(.footnote)
         .foregroundStyle(Color.boardGray)
@@ -571,12 +645,45 @@ struct NearbyWidgetView: View {
         .frame(height: NearbyLayout.smallRow)
     }
 
-    /// In place of the stations: why there are none, and what to do.
-    private func message(_ symbol: String, _ title: String, _ detail: String, button: String? = nil) -> some View {
+    /// "4 more lines ›", after their bullets.
+    private func leftOutLabel(_ routes: [String]) -> some View {
+        folded(routes) {
+            Text(routes.count == 1 ? "1 more line" : "\(routes.count) more lines")
+            Image(systemName: "chevron.right")
+                .font(.caption2.weight(.bold))
+                .accessibilityHidden(true)
+        }
+    }
+
+    /// "Not running now", after their bullets.
+    private func notRunningLabel(_ routes: [String]) -> some View {
+        folded(routes) {
+            Text("Not running now")
+        }
+    }
+
+    /// `routes`' bullets, then what they are.
+    private func folded<Words: View>(_ routes: [String], @ViewBuilder _ words: () -> Words) -> some View {
+        HStack(spacing: 3) {
+            ForEach(routes, id: \.self) { route in
+                LineBullet(route: route, size: 14)
+            }
+            HStack(spacing: 4) {
+                words()
+            }
+            .padding(.leading, 5)
+        }
+    }
+
+    /// In place of the stations: why there are none, and what to do. `spoken`
+    /// is the detail as VoiceOver reads it, where it differs.
+    private func message(_ symbol: String, _ title: String, _ detail: String, spoken: String? = nil,
+                         button: String? = nil) -> some View {
         VStack(spacing: 6) {
             Image(systemName: symbol)
                 .font(.title2)
                 .foregroundStyle(Color.boardGray)
+                .accessibilityHidden(true)
             Text(title)
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(Color.boardText)
@@ -585,6 +692,7 @@ struct NearbyWidgetView: View {
                 Text(detail)
                     .font(.footnote)
                     .foregroundStyle(Color.boardGray)
+                    .accessibilityLabel(spoken ?? detail)
             }
             if let button {
                 Text(button)
