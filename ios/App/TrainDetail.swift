@@ -23,7 +23,8 @@ struct TrainDetail: View {
     /// The train this train's Lock Screen countdown is for, while one is running.
     @State private var countdownTrain: Date?
     @State private var countdownProblem: String?
-    /// While a countdown's starting, so a second tap doesn't start another.
+    /// While a countdown's starting, so a second tap doesn't start another,
+    /// and a load begun meanwhile gets the notices too.
     @State private var startingCountdown = false
     @State private var choosingTrain = false
 
@@ -333,8 +334,8 @@ struct TrainDetail: View {
     /// Times already shown stay up while new ones load, and if they don't come,
     /// saying how old they are. Alerts and outages come with them only when
     /// `includingNotices`, or when the ones shown are 10 minutes old, or while
-    /// this train's countdown is running, which gets them too and would
-    /// otherwise lose a newer notice to them; otherwise those shown stay.
+    /// this train's countdown is running or starting, which gets them too and
+    /// would otherwise lose a newer notice to them; otherwise those shown stay.
     private func loadBoard(includingNotices: Bool = false) async {
         if board == nil { loadState = .loading }
         // The times are as of when the fetch begins; `now` ticks on while it
@@ -343,7 +344,7 @@ struct TrainDetail: View {
         now = started
         countdownTrain = TrainActivityController.currentTrain(for: selection)
         let trainID = selection.trainID
-        let fetchesNotices = includingNotices || board == nil || countdownTrain != nil
+        let fetchesNotices = includingNotices || board == nil || countdownTrain != nil || startingCountdown
             || noticesFetched.map { !$0.isWithin(10 * 60, before: started) } ?? true
         do {
             var fetched = try await TrainService.board(for: selection, includingAlerts: fetchesNotices,

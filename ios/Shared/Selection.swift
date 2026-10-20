@@ -93,7 +93,10 @@ struct Selection: Codable, Hashable, Sendable {
     /// their platform, which must be running on one of them: an N running local
     /// on the R. Lines that do usually stop there are left out unless chosen.
     /// Each goes its own way (`direction(of:at:)`): toward Manhattan from Marcy
-    /// Av, a J at "M16S" or an M at "M16N", not the other way round.
+    /// Av, a J at "M16S" or an M at "M16N", not the other way round. Where a
+    /// line runs the other way to the rest, another line's train on a track
+    /// none of the chosen lines is on is left out (`Platform.carries(_:with:)`):
+    /// with the G alone at Hoyt-Schermerhorn Sts, an E on the A and C's.
     func shows(_ train: Arrival) -> Bool {
         shows(train, at: station)
     }
@@ -101,9 +104,11 @@ struct Selection: Codable, Hashable, Sendable {
     /// `shows(_:)`, with `station` looked up once for many trains.
     func shows(_ train: Arrival, at station: Station?) -> Bool {
         let platform = station?.platforms.first { $0.id == train.stop.dropLast() }
-        // Only where a line runs the other way do the chosen lines' trains stop at both letters
+        // Only where a line runs the other way do the chosen lines' trains stop
+        // at both letters, and can another line's be on a track none of them is on
         if let platform, platform.reversed != nil,
-           !train.stop.hasSuffix(direction(of: train.route, at: platform).rawValue) { return false }
+           !train.stop.hasSuffix(direction(of: train.route, at: platform).rawValue)
+               || !platform.carries(train.route, with: routes) { return false }
         if routes.contains(train.route) { return true }
         let usual = platform?.routes ?? station?.routes
         return !(usual?.contains(train.route) ?? true)
@@ -153,8 +158,8 @@ struct Selection: Codable, Hashable, Sendable {
     /// lines' platforms: `direction`, but the other where the line runs the
     /// other way to another chosen there (`Platform.direction(_:of:with:)`),
     /// so they all go the way `heading` names. Toward Manhattan from Marcy Av,
-    /// the J and Z are S and the M N; the M alone goes by its own, N, and
-    /// another line's train running on it by the other, S.
+    /// the J and Z are S and the M N; the M alone goes by its own, N, as an F
+    /// running on it does, and a Z running local by the J's, S.
     func direction(of route: String, at platform: Platform) -> Direction {
         platform.direction(direction, of: route, with: routes)
     }
@@ -167,15 +172,17 @@ struct Selection: Codable, Hashable, Sendable {
 
     /// Where the chosen lines' trains stop, as the feeds name it: "R31N", or
     /// where they run opposite ways on a platform, both of its: toward
-    /// Manhattan from Marcy Av, the J's "M16S" and the M's "M16N". And where
-    /// other lines' trains running on theirs do (`Platform.side(going:with:)`):
-    /// with the M alone, on the J's track, the other; with the G alone at
-    /// Hoyt-Schermerhorn Sts, on a track of its own, the G's.
+    /// Manhattan from Marcy Av, the J's "M16S" and the M's "M16N". And both
+    /// where a line runs the other way on another's track, so other lines'
+    /// trains on it go by either (`Platform.sharesTrack`): with the M alone,
+    /// an F by the M's and a Z running local by the J's; with the G alone at
+    /// Hoyt-Schermerhorn Sts, on a track of its own, just the G's.
     var stopIDs: [String] {
         platforms.flatMap { platform -> [String] in
             let stops = platform.stops(of: routes, going: direction)
-            let others = platform.id + platform.side(going: direction, with: routes).rawValue
-            return stops.contains(others) ? stops : stops + [others]
+            guard platform.sharesTrack else { return stops }
+            let both = [direction, direction.opposite].map { platform.id + $0.rawValue }
+            return stops + both.filter { !stops.contains($0) }
         }
     }
 
@@ -184,12 +191,15 @@ struct Selection: Codable, Hashable, Sendable {
 
     /// Where `train` goes from its platform, by its own line's way: just one of
     /// `heading`'s names where the chosen lines' platforms name the direction
-    /// differently. Another line's train running on theirs is named for the
-    /// side they stop on: toward Church Av on the G's own track at
-    /// Hoyt-Schermerhorn Sts, an F is S, as the G is, on the side named "Manhattan - Church Av".
+    /// differently. A train of a line that doesn't stop at its platform,
+    /// chosen or not, is named for the side the chosen lines there stop on:
+    /// toward Church Av on the G's own track at Hoyt-Schermerhorn Sts, an F is
+    /// S, as the G is, on the side named "Manhattan - Church Av"; an F chosen
+    /// with the M at Delancey St-Essex St, going N at the J's platform, is on
+    /// the M's side, "Broad St (JZ) - Uptown (M)".
     func heading(of train: Arrival) -> String {
         guard let platform = platform(of: train), let way = Direction(ofStop: train.stop) else { return heading }
-        if !routes.contains(train.route), let line = routes.first(where: platform.routes.contains) {
+        if !platform.routes.contains(train.route), let line = routes.first(where: platform.routes.contains) {
             return Station.directionLabel(platform.side(of: line, going: direction(of: line, at: platform)), on: [platform])
         }
         return Station.directionLabel(way, on: [platform], routes: [train.route])

@@ -77,53 +77,70 @@ struct Platform: Codable, Hashable, Identifiable, Sendable {
     }
 
     /// The side `route`'s trains going `direction` stop on here, by the way
-    /// whose name it has: the other way where the line is `reversed`. An M
-    /// going N at Marcy Av stops on the side named S, "Manhattan", as a J
-    /// going S does. Trains on one side are across the platform from each other.
+    /// whose name it has: the other way where they go by the N or S of the
+    /// lines `reversed` here (`isReversed(_:)`). An M going N at Marcy Av
+    /// stops on the side named S, "Manhattan", as a J going S does, and so
+    /// does an F going N. Trains on one side are across the platform from each other.
     func side(of route: String, going direction: Direction) -> Direction {
-        reversed?.contains(route) == true ? direction.opposite : direction
+        isReversed(route) ? direction.opposite : direction
+    }
+
+    /// Whether trains of `route` here go by the N or S of the lines that are
+    /// `reversed`: one of those, or a line that doesn't stop here, unless it's
+    /// on the trunk of one that isn't, by its bullet's colour. The feeds give
+    /// a trip one N or S all along its line, and an F, B or D can only get to
+    /// the J's platform at Delancey St-Essex St on the M's way, over the
+    /// Chrystie St connection, so it goes by the M's, but a Z running local
+    /// by the J's. At Hoyt-Schermerhorn Sts, an F on the G's track goes by
+    /// the G's, and an E by the A and C's.
+    func isReversed(_ route: String) -> Bool {
+        guard let reversed else { return false }
+        if routes.contains(route) { return reversed.contains(route) }
+        let color = LineStyle.of(route).color
+        return !routes.contains { !reversed.contains($0) && LineStyle.of($0).color == color }
     }
 
     /// The feeds' N or S for `route`'s trains here going `direction` with the
     /// lines of `routes`, as a train or change of several lines goes, so they
     /// all stop on one side: `direction`, but the other where the line is
     /// `reversed` and some of `routes` here aren't. A line alone, or with only
-    /// lines `reversed` like it, goes by its own, and a train of a line that
-    /// doesn't stop here running with them, chosen or not, by
-    /// `side(going:with:)`: going with the M alone toward Manhattan from
-    /// Flushing Av, a Z running local is S, the M N; with the G alone toward
-    /// Church Av at Hoyt-Schermerhorn Sts, an F is S, as the G is.
+    /// lines `reversed` like it, goes by its own. A train of a line that
+    /// doesn't stop here, chosen or not, goes on that side by its own line's
+    /// N or S (`isReversed(_:)`): going with the M alone toward Manhattan from
+    /// Flushing Av, an F is N, as the M is, and a Z running local S, as the J
+    /// is; with the G alone toward Church Av at Hoyt-Schermerhorn Sts, an F is
+    /// S, as the G is.
     func direction(_ direction: Direction, of route: String, with routes: [String]) -> Direction {
         let here = routes.filter(self.routes.contains)
         guard !here.isEmpty else { return direction }
-        if here.contains(route), here.allSatisfy({ reversed?.contains($0) == true }) { return direction }
-        // The N or S of `route`'s trains on that side: the other where it's `reversed`
-        return side(of: route, going: side(going: direction, with: routes))
+        // The side they stop on, by the way whose name it has: the other where every one is `reversed`
+        let side = here.allSatisfy { isReversed($0) } ? direction.opposite : direction
+        // The N or S of `route`'s trains on that side: the other where it goes by the `reversed` lines'
+        return self.side(of: route, going: side)
     }
 
-    /// The N or S of another line's train running here with the lines of
-    /// `routes` going `direction` together, on their track: theirs,
-    /// `direction`, or where every one of them here is `reversed` on the
-    /// track of lines that aren't (`sharesTrack(_:)`), the other, those
-    /// lines'. On the M's track toward Manhattan at Marcy Av, the J's, it's
-    /// S, as the J is, though the M is N; on the G's own toward Church Av at
-    /// Hoyt-Schermerhorn Sts, S, as the G is.
-    func side(going direction: Direction, with routes: [String]) -> Direction {
-        let here = routes.filter(self.routes.contains)
-        let turned = !here.isEmpty && here.allSatisfy { reversed?.contains($0) == true }
-        return turned && sharesTrack(here) ? direction.opposite : direction
+    /// Whether a train of `route` here runs on the track of one of the lines
+    /// of `routes`: one of theirs, or another line's that goes by the N or S
+    /// of one of them (`isReversed(_:)`), or any where the lines `reversed`
+    /// here run on the track of those that aren't (`sharesTrack`). With the M
+    /// alone at Flushing Av, a Z running local on the J's track does; with
+    /// the G alone at Hoyt-Schermerhorn Sts, an F on its track does, but an
+    /// E on the A and C's doesn't.
+    func carries(_ route: String, with routes: [String]) -> Bool {
+        let theirs = isReversed(route)
+        return routes.contains { self.routes.contains($0) && isReversed($0) == theirs } || sharesTrack
     }
 
-    /// Whether a line of `routes` that's `reversed` here runs on the track of
-    /// one that isn't, by lines.json's order: a stop next to this one on its
-    /// line is next to it on theirs, as Hewes St and Delancey St-Essex St are
-    /// on the M's and the J's at Marcy Av. At Hoyt-Schermerhorn Sts the G has
-    /// a track of its own, on to Fulton St and Bergen St, and the A and C
+    /// Whether its `reversed` lines run on the track of those that aren't, by
+    /// lines.json's order: a stop next to this one on one of them is next to
+    /// it on one of theirs, as Hewes St and Delancey St-Essex St are on the
+    /// M's and the J's at Marcy Av. At Hoyt-Schermerhorn Sts the G has a
+    /// track of its own, on to Fulton St and Bergen St, and the A and C
     /// theirs, on to Jay St-MetroTech.
-    func sharesTrack(_ routes: [String]) -> Bool {
-        let turned = routes.filter { self.routes.contains($0) && reversed?.contains($0) == true }
-        let others = Set(self.routes.filter { reversed?.contains($0) != true }.flatMap { neighbours(on: $0) })
-        return turned.contains { !others.isDisjoint(with: neighbours(on: $0)) }
+    var sharesTrack: Bool {
+        guard let reversed else { return false }
+        let others = Set(routes.filter { !reversed.contains($0) }.flatMap { neighbours(on: $0) })
+        return routes.contains { reversed.contains($0) && !others.isDisjoint(with: neighbours(on: $0)) }
     }
 
     /// The stops before and after this one on `route`'s line, as lines.json

@@ -239,6 +239,10 @@ import Testing
         #expect(connections.first?.waitLabel == "1 min")
         let arriving = train("M", 6, trip: "m1", at: "M18N", lastStop: "G08N")
         #expect(!jz.isAcross(from: arriving, to: train("J", 7, trip: "j2", at: "M18N", lastStop: "G05N")))
+        // And from an F that came the M's way, N as the M is, the J toward Broad St is across too
+        let f = train("F", 6, trip: "f1", at: "M18N", lastStop: "D21N")
+        #expect(jz.isAcross(from: f, to: train("J", 7, trip: "j1", at: "M18S", lastStop: "M23S")))
+        #expect(!jz.isAcross(from: f, to: train("J", 7, trip: "j2", at: "M18N", lastStop: "G05N")))
 
         // A G toward Church Av is S, and at Hoyt-Schermerhorn Sts it's across
         // the platform from the A and C toward Manhattan, N
