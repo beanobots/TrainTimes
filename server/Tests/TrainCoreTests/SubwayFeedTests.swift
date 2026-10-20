@@ -356,4 +356,35 @@ import Testing
                                                    "59 St-Columbus Circle"])
         #expect(stations.count == 39)
     }
+
+    @Test func threeLinesThatCrossEachHaveTheirStopsListedInOrder() throws {
+        // South from Times Sq, the R runs local to Bay Ridge, the Q over the Manhattan
+        // Bridge to Coney Island by Brighton Beach, and the N over it, then by the R's
+        // 36 St and 59 St, to Coney Island by its own 86 St
+        let r = ["R16S", "R17S", "R18S", "R19S", "R20S", "R21S", "R22S", "R23S", "R24S", "R25S", "R26S", "R27S",
+                 "R28S", "R29S", "R30S", "R31S", "R32S", "R33S", "R34S", "R35S", "R36S", "R39S", "R40S", "R41S",
+                 "R42S", "R43S", "R44S", "R45S"]
+        let q = ["R16S", "R17S", "R20S", "Q01S", "R30S", "D24S", "D25S", "D26S", "D27S", "D28S", "D29S", "D30S",
+                 "D31S", "D32S", "D33S", "D34S", "D35S", "D37S", "D38S", "D39S", "D40S", "D41S", "D42S", "D43S"]
+        let n = ["R16S", "R17S", "R20S", "Q01S", "R31S", "R36S", "R41S", "N02S", "N03S", "N04S", "N05S", "N06S",
+                 "N07S", "N08S", "N09S", "N10S", "D43S"]
+        func trip(_ id: String, route: String, stops: [String]) -> Protobuf {
+            GTFSFeed.trip(id, route: route, stops: stops.enumerated().map { FeedStop($0.element, at: Double($0.offset) * 2 + 1) })
+        }
+        let feed = GTFSFeed.feed([trip("R1", route: "R", stops: r), trip("Q1", route: "Q", stops: q),
+                                  trip("N1", route: "N", stops: n)])
+        let nqr = Selection(stationID: "R16", routes: ["N", "Q", "R"], direction: .south)
+        let stations = try TrainService.stations(after: nqr, in: [feed]).map(\.id)
+        for stops in [r, q, n] {
+            let own = stops.dropFirst().compactMap(StationDirectory.station(forStop:)).map(\.id)
+            #expect(stations.filter(Set(own).contains) == own)
+        }
+        #expect(Set(stations).count == stations.count)
+        #expect(stations.count == 54)
+        // Coney Island-Stillwell Av, where the Q and N end, comes after the N's
+        // 86 St, not among the Q's stops ahead of the N's 36 St
+        let coneyIsland = try #require(StationDirectory.station(forStop: "D43S")).id
+        let eightySixth = try #require(StationDirectory.station(forStop: "N10S")).id
+        #expect(stations.firstIndex(of: coneyIsland) == stations.firstIndex(of: eightySixth).map { $0 + 1 })
+    }
 }

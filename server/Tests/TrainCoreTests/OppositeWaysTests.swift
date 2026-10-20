@@ -110,6 +110,14 @@ import Testing
         #expect(away.shows(train("M", at: "M16S")))
         #expect(away.shows(train("F", at: "M16N")))
         #expect(!away.shows(train("F", at: "M16S")))
+        // With the F chosen too at Delancey St-Essex St, an F on the M's track
+        // at the J's platform goes by the J's way there, as with the M alone
+        let fm = Selection(stationID: "M18", routes: ["F", "M"], direction: .north)
+        let mAtDelancey = Selection(stationID: "M18", routes: ["M"], direction: .north)
+        #expect(fm.shows(train("F", at: "M18S")))
+        #expect(!fm.shows(train("F", at: "M18N")))
+        #expect(mAtDelancey.shows(train("F", at: "M18S")))
+        #expect(!mAtDelancey.shows(train("F", at: "M18N")))
         // The G alone toward Church Av at Hoyt-Schermerhorn Sts is S, and so is
         // an F running on its own track; an E across the platform on the A and
         // C's toward Manhattan, N, isn't running on it

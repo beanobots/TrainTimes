@@ -88,14 +88,15 @@ struct Platform: Codable, Hashable, Identifiable, Sendable {
     /// lines of `routes`, as a train or change of several lines goes, so they
     /// all stop on one side: `direction`, but the other where the line is
     /// `reversed` and some of `routes` here aren't. A line alone, or with only
-    /// lines `reversed` like it, goes by its own, and another line's train
-    /// running with them by `side(going:with:)`: going with the M alone toward
-    /// Manhattan from Flushing Av, a Z running local is S, the M N; with the G
-    /// alone toward Church Av at Hoyt-Schermerhorn Sts, an F is S, as the G is.
+    /// lines `reversed` like it, goes by its own, and a train of a line that
+    /// doesn't stop here running with them, chosen or not, by
+    /// `side(going:with:)`: going with the M alone toward Manhattan from
+    /// Flushing Av, a Z running local is S, the M N; with the G alone toward
+    /// Church Av at Hoyt-Schermerhorn Sts, an F is S, as the G is.
     func direction(_ direction: Direction, of route: String, with routes: [String]) -> Direction {
         let here = routes.filter(self.routes.contains)
         guard !here.isEmpty else { return direction }
-        if routes.contains(route), here.allSatisfy({ reversed?.contains($0) == true }) { return direction }
+        if here.contains(route), here.allSatisfy({ reversed?.contains($0) == true }) { return direction }
         // The N or S of `route`'s trains on that side: the other where it's `reversed`
         return side(of: route, going: side(going: direction, with: routes))
     }
