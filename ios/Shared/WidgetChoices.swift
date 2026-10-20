@@ -27,22 +27,20 @@ enum BulletImage {
                 let inRow = CGFloat(min(columns, count - row * columns))
                 let left = (side - inRow * size - (inRow - 1) * gap) / 2
                 let circle = CGRect(x: left + CGFloat(index % columns) * (size + gap), y: top + CGFloat(row) * (size + gap), width: size, height: size)
-                UIColor(
-                    red: CGFloat((style.color >> 16) & 0xFF) / 255,
-                    green: CGFloat((style.color >> 8) & 0xFF) / 255,
-                    blue: CGFloat(style.color & 0xFF) / 255,
-                    alpha: 1
-                ).setFill()
+                style.uiColor.setFill()
                 UIBezierPath(ovalIn: circle).fill()
-                let font = UIFont.systemFont(ofSize: size * (style.label.count > 1 ? 0.45 : 0.62), weight: .bold)
+                let font = UIFont.systemFont(ofSize: style.labelSize(bullet: size), weight: .bold)
                 let attributes: [NSAttributedString.Key: Any] = [
                     .font: font,
-                    .foregroundColor: style.usesDarkText ? UIColor.black : UIColor.white,
+                    .foregroundColor: style.textUIColor,
                 ]
                 let label = style.label as NSString
                 let width = label.size(withAttributes: attributes).width
-                // Centred on its capitals, as LineBullet is
-                label.draw(at: CGPoint(x: circle.midX - width / 2, y: circle.midY + font.capHeight / 2 - font.ascender), withAttributes: attributes)
+                // Its line, ascender to descender, centred, then raised as
+                // LineBullet raises it, so its capitals are centred
+                let lineTop = circle.midY - (font.ascender - font.descender) / 2
+                    - LineBullet.capitalsOffset(fontSize: font.pointSize)
+                label.draw(at: CGPoint(x: circle.midX - width / 2, y: lineTop), withAttributes: attributes)
             }
         }
         guard let png = image.pngData() else { return nil }

@@ -125,6 +125,8 @@ private struct StationStep: View {
                                 .opacity(filter == nil || filter == label ? 1 : 0.3)
                         }
                         .buttonStyle(.plain)
+                        // The S stands for all three shuttles here, not the 42 St one alone
+                        .accessibilityLabel(label == "S" ? "Shuttles" : Lines.spokenName(of: route))
                         .accessibilityAddTraits(filter == label ? .isSelected : [])
                     }
                 }
@@ -439,10 +441,7 @@ struct LineToggle: View {
                 if isOn {
                     LineBullet(route: route, size: 46)
                 } else {
-                    let fontSize = 46 * (style.label.count > 1 ? 0.42 : 0.56)
-                    Text(style.label)
-                        .font(.system(size: fontSize, weight: .bold))
-                        .offset(y: -LineBullet.capitalsOffset(fontSize: fontSize))
+                    LineBullet.label(style, size: 46)
                         .foregroundStyle(Color(.secondaryLabel))
                         .frame(width: 46, height: 46)
                         .background(Circle().fill(Color(.systemGray5)))
@@ -457,7 +456,7 @@ struct LineToggle: View {
             }
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("\(Lines.name(of: route)) train")
+        .accessibilityLabel(Lines.spokenName(of: route))
         .accessibilityAddTraits(isOn ? .isSelected : [])
     }
 }

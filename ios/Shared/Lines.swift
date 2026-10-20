@@ -26,6 +26,17 @@ struct LineStyle: Hashable, Sendable {
         default: LineStyle(label: route, color: 0x808183, usesDarkText: false)
         }
     }
+
+    /// How big its label is in a bullet `size` across: a little smaller for
+    /// two letters, "SI", than for one.
+    func labelSize(bullet size: CGFloat) -> CGFloat {
+        size * (label.count > 1 ? 0.45 : 0.62)
+    }
+
+    /// A 0xRRGGBB colour's red, green and blue, each from 0 to 1.
+    static func rgb(_ hex: UInt32) -> (red: Double, green: Double, blue: Double) {
+        (Double((hex >> 16) & 0xFF) / 255, Double((hex >> 8) & 0xFF) / 255, Double(hex & 0xFF) / 255)
+    }
 }
 
 enum Lines {
@@ -84,6 +95,14 @@ enum Lines {
         case "H": "Rockaway Park Shuttle"
         default: LineStyle.of(route).label
         }
+    }
+
+    /// A line as VoiceOver and Siri name a train of it: "R train", or a
+    /// shuttle by its name, "42 St Shuttle", which says what it is.
+    static func spokenName(of route: String) -> String {
+        let label = LineStyle.of(route).label
+        let called = name(of: route)
+        return called == label ? "\(label) train" : called
     }
 
     /// Whether `route` runs into Manhattan: every line but the G, the Franklin

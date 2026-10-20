@@ -368,7 +368,7 @@ private struct ChangeLinesStep: View {
                         // Your own train
                         LineBullet(route: route, size: 46)
                             .opacity(0.3)
-                            .accessibilityLabel("\(Lines.name(of: route)) train, the one you're on")
+                            .accessibilityLabel("\(Lines.spokenName(of: route)), the one you're on")
                     } else if canChoose(route) {
                         LineToggle(route: route, isOn: chosen.contains(route)) {
                             toggle(route)
@@ -377,7 +377,7 @@ private struct ChangeLinesStep: View {
                         // Ends its run here going the way chosen
                         LineBullet(route: route, size: 46)
                             .opacity(0.3)
-                            .accessibilityLabel("\(Lines.name(of: route)) train, which ends here going this way")
+                            .accessibilityLabel("\(Lines.spokenName(of: route)), which ends here going this way")
                     }
                 }
             }

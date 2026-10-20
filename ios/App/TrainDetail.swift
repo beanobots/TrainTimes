@@ -144,8 +144,7 @@ struct TrainDetail: View {
                         train: train,
                         leave: selection.walkMinutes > 0 ? selection.leaveTime(for: train) : nil,
                         marksLine: selection.marksLine(of: train),
-                        marksLive: settings.marksLive(withoutColor: withoutColor),
-                        marksScheduled: settings.settings.marksScheduledTimes
+                        marks: settings.timeMarks(withoutColor: withoutColor)
                     )
                 }
             }
@@ -371,22 +370,17 @@ private struct TrainRow: View {
     let leave: Date?
     /// Shown with its bullet: one of several lines chosen, or an N running local on the R, say.
     let marksLine: Bool
-    /// Whether a live prediction gets its symbol as well as its green.
-    let marksLive: Bool
-    /// Whether a timetable time gets its symbol.
-    let marksScheduled: Bool
+    /// Which times get their symbol: a live prediction as well as its green.
+    let marks: TimeMarks
 
     var body: some View {
         HStack(spacing: 8) {
             Text(train.time, format: .dateTime.hour().minute())
                 .font(.headline)
                 .monospacedDigit()
-                .foregroundStyle(train.isLive ? Color.liveText : Color.primary)
-            if marksLive && train.isLive {
-                LiveMark(size: 12).foregroundStyle(Color.liveText)
-            } else if marksScheduled && !train.isLive {
-                ScheduledMark(size: 12)
-            }
+                .foregroundStyle(train.statusColor(scheduled: .primary))
+            StatusMark(isLive: train.isLive, marks: marks, size: 12)
+                .foregroundStyle(train.statusColor(scheduled: .primary))
             if marksLine {
                 LineBullet(route: train.route, size: 20)
             }
@@ -507,7 +501,7 @@ private struct StationMap: View {
             longitudinalMeters: 350
         ))) {
             Marker(station.name, systemImage: "tram.fill", coordinate: CLLocationCoordinate2D(latitude: station.lat, longitude: station.lon))
-                .tint(Color(hex: LineStyle.of(route).color))
+                .tint(LineStyle.of(route).swiftUIColor)
             ForEach(Array(station.entrances.enumerated()), id: \.offset) { _, entrance in
                 Annotation(entrance.isElevator ? "Elevator" : "", coordinate: CLLocationCoordinate2D(latitude: entrance.lat, longitude: entrance.lon)) {
                     EntranceMark(entrance: entrance)

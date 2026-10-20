@@ -43,7 +43,7 @@ struct TransferTrack: View {
         .accessibilityLabel(layout?.spoken ?? "Where they are: the MTA hasn't said yet")
     }
 
-    private var localColor: Color { Color(hex: LineStyle.of(selection.firstRoute).color) }
+    private var localColor: Color { LineStyle.of(selection.firstRoute).swiftUIColor }
 
     /// A line for each colour of the lines changed to: the D's orange and the N's yellow.
     private var otherColors: [Color] {

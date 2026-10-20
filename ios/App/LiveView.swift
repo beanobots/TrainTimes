@@ -104,8 +104,7 @@ struct LiveView: View {
         }
     }
 
-    private var marksLive: Bool { settings.marksLive(withoutColor: withoutColor) }
-    private var marksScheduled: Bool { settings.settings.marksScheduledTimes }
+    private var marks: TimeMarks { settings.timeMarks(withoutColor: withoutColor) }
 
     /// Starts out at the last favorite's station, with the walking time and alerts at their defaults.
     private var newTrain: Binding<Selection> {
@@ -147,10 +146,10 @@ struct LiveView: View {
                     .id("\(selection.trainID) \(openings)")
             }
             .navigationDestination(for: StationPage.self) { page in
-                StationLive(station: page.station, routes: page.routes, marksLive: marksLive, marksScheduled: marksScheduled) { path.append($0) }
+                StationLive(station: page.station, routes: page.routes, marks: marks) { path.append($0) }
             }
             .navigationDestination(for: TransferPage.self) { page in
-                TransferLive(page: page, marksLive: marksLive, marksScheduled: marksScheduled)
+                TransferLive(page: page, marks: marks)
             }
             .toolbar {
                 if !favorites.favorites.isEmpty {
@@ -245,8 +244,7 @@ struct LiveView: View {
                         trains: live.trains[selection.trainID].map { selection.catchable($0, now: live.now) },
                         failed: live.failed.contains(selection.trainID),
                         now: live.now,
-                        marksLive: marksLive,
-                        marksScheduled: marksScheduled,
+                        marks: marks,
                         showsTimes: !editMode.isEditing
                     )
                 }
@@ -342,8 +340,7 @@ struct LiveView: View {
                     },
                     failed: { live.failed.contains($0.trainID) },
                     now: live.now,
-                    marksLive: marksLive,
-                    marksScheduled: marksScheduled,
+                    marks: marks,
                     open: { path.append($0) }
                 )
             }
@@ -369,8 +366,7 @@ private struct FavoriteRow: View {
     /// Whether they couldn't be fetched the last time.
     let failed: Bool
     let now: Date
-    let marksLive: Bool
-    let marksScheduled: Bool
+    let marks: TimeMarks
     /// Left out while editing, for the delete and move controls.
     let showsTimes: Bool
 
@@ -387,7 +383,7 @@ private struct FavoriteRow: View {
             }
             Spacer(minLength: 8)
             if showsTimes {
-                Minutes(trains: trains, failed: failed, now: now, marksLive: marksLive, marksScheduled: marksScheduled)
+                Minutes(trains: trains, failed: failed, now: now, marks: marks)
             }
         }
         .padding(.vertical, 2)
@@ -418,8 +414,7 @@ private struct StationLive: View {
     let station: Station
     /// Its lines, in the order they're shown.
     let routes: [String]
-    let marksLive: Bool
-    let marksScheduled: Bool
+    let marks: TimeMarks
     let open: (Selection) -> Void
     @State private var live = LiveTrains()
 
@@ -445,8 +440,7 @@ private struct StationLive: View {
                         },
                         failed: { live.failed.contains($0.trainID) },
                         now: live.now,
-                        marksLive: marksLive,
-                        marksScheduled: marksScheduled,
+                        marks: marks,
                         open: open
                     )
                 }
@@ -466,8 +460,7 @@ private struct StationLive: View {
 /// yours, then the lines it changes to at the change. Each opens on its own.
 private struct TransferLive: View {
     let page: TransferPage
-    let marksLive: Bool
-    let marksScheduled: Bool
+    let marks: TimeMarks
     @State private var live = LiveTrains()
 
     private var selections: [Selection] { [page.selection] + page.changeTrains }
@@ -500,8 +493,7 @@ private struct TransferLive: View {
                 trains: live.trains[selection.trainID].map { selection.catchable($0, now: live.now) },
                 failed: live.failed.contains(selection.trainID),
                 now: live.now,
-                marksLive: marksLive,
-                marksScheduled: marksScheduled,
+                marks: marks,
                 showsTimes: true
             )
         }
@@ -612,8 +604,7 @@ private struct NearbyLineRow: View {
     /// Whether a direction's trains couldn't be fetched the last time.
     let failed: (Selection) -> Bool
     let now: Date
-    let marksLive: Bool
-    let marksScheduled: Bool
+    let marks: TimeMarks
     let open: (Selection) -> Void
 
     private var directions: [Direction] {
@@ -643,8 +634,7 @@ private struct NearbyLineRow: View {
                                 .font(.subheadline)
                                 .lineLimit(1)
                             Spacer(minLength: 8)
-                            Minutes(trains: trains(selection), failed: failed(selection), now: now,
-                                    marksLive: marksLive, marksScheduled: marksScheduled)
+                            Minutes(trains: trains(selection), failed: failed(selection), now: now, marks: marks)
                             Image(systemName: "chevron.right")
                                 .font(.footnote.weight(.semibold))
                                 .foregroundStyle(.tertiary)
@@ -724,8 +714,7 @@ private struct Minutes: View {
     /// Whether they couldn't be fetched the last time, which it then says instead.
     let failed: Bool
     let now: Date
-    let marksLive: Bool
-    let marksScheduled: Bool
+    let marks: TimeMarks
 
     var body: some View {
         if failed {
@@ -757,8 +746,7 @@ private struct Minutes: View {
         guard let trains else { return "Loading" }
         guard !trains.isEmpty else { return "No trains" }
         return trains.prefix(3).map { train in
-            let minutes = Int(train.time.timeIntervalSince(now) / 60)
-            let time = minutes < 1 ? "Now" : minutes == 1 ? "1 minute" : "\(minutes) minutes"
+            let time = MinutesToGo(until: train.time, from: now).spoken
             return train.isLive ? time : "\(time) by the timetable"
         }
         .joined(separator: ", ")
@@ -769,24 +757,15 @@ private struct Minutes: View {
         HStack(spacing: 6) {
             ForEach(trains, id: \.self) { train in
                 HStack(spacing: 2) {
-                    if marksLive && train.isLive {
-                        LiveMark(size: 9)
-                    } else if marksScheduled && !train.isLive {
-                        ScheduledMark(size: 9)
-                    }
-                    Text(label(for: train))
+                    StatusMark(isLive: train.isLive, marks: marks, size: 9)
+                    Text(MinutesToGo(until: train.time, from: now).number)
                 }
-                .foregroundStyle(train.isLive ? Color.liveText : Color.primary)
+                .foregroundStyle(train.statusColor(scheduled: .primary))
             }
             Text("min").foregroundStyle(.secondary)
         }
         .lineLimit(1)
         .fixedSize()
-    }
-
-    private func label(for train: Arrival) -> String {
-        let minutes = Int(train.time.timeIntervalSince(now) / 60)
-        return minutes < 1 ? "Now" : "\(minutes)"
     }
 }
 

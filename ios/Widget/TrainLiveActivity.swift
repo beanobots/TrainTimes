@@ -31,7 +31,7 @@ struct TrainLiveActivity: Widget {
                             Spacer(minLength: 8)
                             markedCountdown(context, markSize: 14, size: 30)
                                 .multilineTextAlignment(.trailing)
-                                .foregroundStyle(shownState(context).isLive ? Color.liveGreen : .white)
+                                .foregroundStyle(statusColor(context))
                         }
                         .padding(.horizontal, 8)
                         if let notice = shownState(context).notice {
@@ -53,21 +53,21 @@ struct TrainLiveActivity: Widget {
                 HStack(spacing: 2) {
                     LineBullet(route: trainRoute(context), size: 20)
                     statusMark(context, size: 10)
-                        .foregroundStyle(shownState(context).isLive ? Color.liveGreen : .white)
+                        .foregroundStyle(statusColor(context))
                 }
             } compactTrailing: {
                 countdown(context)
                     .monospacedDigit()
                     .multilineTextAlignment(.trailing)
                     .frame(maxWidth: 52)
-                    .foregroundStyle(shownState(context).isLive ? Color.liveGreen : .white)
+                    .foregroundStyle(statusColor(context))
                     .accessibilityValue(status(context))
             } minimal: {
                 // No room for the countdown; VoiceOver says when the train is due
                 LineBullet(route: trainRoute(context), size: 20)
                     .accessibilityValue("\(status(context)), \(Spoken.clock(shownState(context).train))")
             }
-            .keylineTint(Color(hex: LineStyle.of(trainRoute(context)).color))
+            .keylineTint(LineStyle.of(trainRoute(context)).swiftUIColor)
         }
     }
 }
@@ -99,7 +99,7 @@ private struct CountdownBanner: View {
                     .monospacedDigit()
                     .multilineTextAlignment(.leading)
             }
-            .foregroundStyle(shownState(context).isLive ? Color.liveGreen : .white)
+            .foregroundStyle(statusColor(context))
             .accessibilityElement(children: .combine)
             .accessibilityValue(status(context))
             Text(summary(context))
@@ -163,15 +163,17 @@ private func markedCountdown(_ context: ActivityViewContext<TrainActivityAttribu
     .accessibilityValue(status(context))
 }
 
-/// The live or scheduled mark, as Settings or the phone asks. VoiceOver has
-/// the countdown's `status` instead, marked or not.
-@ViewBuilder
+/// The live or scheduled mark, as Settings or the phone asks, as on the
+/// widgets. VoiceOver has the countdown's `status` instead, marked or not.
 private func statusMark(_ context: ActivityViewContext<TrainActivityAttributes>, size: CGFloat) -> some View {
-    if marksLive(context) {
-        LiveMark(size: size).accessibilityHidden(true)
-    } else if marksScheduled(context) {
-        ScheduledMark(size: size).accessibilityHidden(true)
-    }
+    let marks = SharedStore.loadSettings().timeMarks(withoutColor: UIAccessibility.shouldDifferentiateWithoutColor)
+    return StatusMark(isLive: shownState(context).isLive, marks: marks, size: size)
+        .accessibilityHidden(true)
+}
+
+/// The countdown's colour: green for a live prediction, white for a timetable time.
+private func statusColor(_ context: ActivityViewContext<TrainActivityAttributes>) -> Color {
+    shownState(context).isLive ? .liveGreen : .white
 }
 
 /// "Live" or "Scheduled", which the countdown otherwise shows by its colour alone.
@@ -185,19 +187,6 @@ private func noticeLabel(_ notice: String) -> some View {
         .font(.caption.weight(.semibold))
         .foregroundStyle(.orange)
         .accessibilityLabel("Alert: \(notice)")
-}
-
-/// Whether the countdown's train is live and Settings › Mark live times, or the
-/// phone's Differentiate Without Color, is on, as on the widgets.
-private func marksLive(_ context: ActivityViewContext<TrainActivityAttributes>) -> Bool {
-    shownState(context).isLive
-        && (UIAccessibility.shouldDifferentiateWithoutColor || SharedStore.loadSettings().marksLiveTimes)
-}
-
-/// Whether the countdown's train is a timetable time and Settings › Mark
-/// scheduled times is on, as on the widgets.
-private func marksScheduled(_ context: ActivityViewContext<TrainActivityAttributes>) -> Bool {
-    !shownState(context).isLive && SharedStore.loadSettings().marksScheduledTimes
 }
 
 /// The line of the train it's counting down to, which can be another one running on yours.

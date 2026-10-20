@@ -97,7 +97,7 @@ struct StopLayout {
             label = away == 1 ? "1 STOP AWAY" : "\(away) STOPS AWAY"
         }
 
-        line = train.lineLabel
+        line = Lines.spokenName(of: train.route)
         switch place {
         case .starting: self.place = "scheduled to leave \(stops[0].name)"
         case .at: self.place = "at \(stops[index].name)"
@@ -120,7 +120,7 @@ struct StopLayout {
     /// writes a time.
     func spoken(clock: (Date) -> String) -> String {
         let departs = rows.first?.departs.map { " at \(clock($0))" } ?? ""
-        return "\(line) train \(place)\(departs), \(away)"
+        return "\(line) \(place)\(departs), \(away)"
     }
 }
 
@@ -229,17 +229,22 @@ struct TransferMapLayout {
         self.rows = rows
         firstRow = Self.row(at: now, in: rows)
 
+        // The note as VoiceOver says it, naming a shuttle
+        let spokenNote: String?
         if let next = connection.next {
             // Your train gets to the change at the top row's time; the train it
             // meets is where yours would be with as long to go
             let row = Self.row(at: connection.arrival.time.addingTimeInterval(-next.time.timeIntervalSince(now)), in: rows)
+            let offMap = row > CGFloat(rows.count - 1)
             nextRow = row
-            nextNote = row > CGFloat(rows.count - 1) ? Self.note(for: next, now: now) : nil
+            nextNote = offMap ? Self.note(for: next, line: next.lineLabel, now: now) : nil
+            spokenNote = offMap ? Self.note(for: next, line: Lines.name(of: next.route), now: now) : nil
         } else {
             nextRow = nil
             nextNote = nil
+            spokenNote = nil
         }
-        spoken = Self.spokenText(connection: connection, rows: rows, firstRow: firstRow, nextNote: nextNote)
+        spoken = Self.spokenText(connection: connection, rows: rows, firstRow: firstRow, nextNote: spokenNote)
     }
 
     /// Where your train is at `time`: between two stops by how far it has come
@@ -257,18 +262,19 @@ struct TransferMapLayout {
     }
 
     /// "D at 36 St", "D between 9 Av and 36 St"; the feed leaves out the stops
-    /// a train has passed, so often just "D heading for 36 St"
-    private static func note(for train: Arrival, now: Date) -> String? {
+    /// a train has passed, so often just "D heading for 36 St". `line` is what
+    /// it calls the train's line.
+    private static func note(for train: Arrival, line: String, now: Date) -> String? {
         guard let place = train.place(now: now) else { return nil }
         switch place {
         case .starting:
-            return train.approach.first.map { "\(train.lineLabel) starting at \($0.name)" }
+            return train.approach.first.map { "\(line) starting at \($0.name)" }
         case .at(let index):
-            return "\(train.lineLabel) at \(train.approach[index].name)"
+            return "\(line) at \(train.approach[index].name)"
         case .approaching(let index) where index > 0:
-            return "\(train.lineLabel) between \(train.approach[index - 1].name) and \(train.approach[index].name)"
+            return "\(line) between \(train.approach[index - 1].name) and \(train.approach[index].name)"
         case .approaching(let index):
-            return "\(train.lineLabel) heading for \(train.approach[index].name)"
+            return "\(line) heading for \(train.approach[index].name)"
         }
     }
 
@@ -276,9 +282,9 @@ struct TransferMapLayout {
     /// long to go, not where it is, so unless the note says where it is, it's
     /// by when it gets to the change.
     private static func spokenText(connection: Connection, rows: [Row], firstRow: CGFloat, nextNote: String?) -> String {
-        var sentences = ["Your \(connection.first.lineLabel) train is \(place(firstRow, in: rows))."]
+        var sentences = ["Your \(Lines.spokenName(of: connection.first.route)) is \(place(firstRow, in: rows))."]
         if let next = connection.next, !connection.staysOn {
-            let line = next.lineLabel
+            let line = Lines.name(of: next.route)
             if let nextNote {
                 sentences.append("\(nextNote).")
             } else {

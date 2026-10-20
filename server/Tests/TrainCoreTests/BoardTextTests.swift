@@ -24,6 +24,46 @@ import Testing
         #expect(ClockPattern.withoutDayPeriod("h:mm 'bis' a") == "h:mm 'bis'")
     }
 
+    /// Every widget, the app and Siri count the minutes to go alike.
+    @Test func minutesToGoAreWholeMinutesThenNow() {
+        func minutes(_ seconds: TimeInterval) -> MinutesToGo {
+            MinutesToGo(until: now.addingTimeInterval(seconds), from: now)
+        }
+        #expect(minutes(12 * 60 + 59).count == 12)
+        #expect(minutes(12 * 60 + 59).label == "12 min")
+        #expect(minutes(12 * 60 + 59).number == "12")
+        #expect(minutes(12 * 60 + 59).spoken == "12 minutes")
+        #expect(minutes(60).label == "1 min")
+        #expect(minutes(60).spoken == "1 minute")
+        // The last minute, and a train that's due, are "Now", never "0 min"
+        for seconds in [59.0, 0, -90] {
+            #expect(minutes(seconds).count == 0)
+            #expect(minutes(seconds).isNow)
+            #expect(minutes(seconds).label == "Now")
+            #expect(minutes(seconds).number == "Now")
+            #expect(minutes(seconds).spoken == "Now")
+        }
+    }
+
+    @Test func liveTimesAreMarkedWhereTheirGreenIsntEnough() {
+        func marks(live: Bool = false, scheduled: Bool = false, withoutColor: Bool = false,
+                   inOneColor: Bool = false) -> TimeMarks {
+            TimeMarks(marksLiveTimes: live, marksScheduledTimes: scheduled, withoutColor: withoutColor,
+                      inOneColor: inOneColor)
+        }
+        #expect(!marks().showsMark(isLive: true))
+        #expect(!marks().showsMark(isLive: false))
+        #expect(marks(live: true).showsMark(isLive: true))
+        #expect(!marks(live: true).showsMark(isLive: false))
+        // Differentiate Without Color, or a widget drawn in one colour, marks live times whatever Settings say
+        #expect(marks(withoutColor: true).showsMark(isLive: true))
+        #expect(marks(inOneColor: true).showsMark(isLive: true))
+        #expect(!marks(withoutColor: true, inOneColor: true).showsMark(isLive: false))
+        // Timetable times only as Settings say
+        #expect(marks(scheduled: true).showsMark(isLive: false))
+        #expect(!marks(scheduled: true).showsMark(isLive: true))
+    }
+
     /// The R getting to the change at 10 minutes, and a D there `wait` minutes later.
     func connection(wait: Double?, staysOn: Bool = false) -> Connection {
         let atChange = arrival(10, trip: "r1")

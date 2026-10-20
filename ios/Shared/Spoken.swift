@@ -9,23 +9,24 @@ enum Spoken {
     /// as you can't reach them in time.
     static func nextTrain(selection: Selection, trains: [Arrival], unreachable: Bool = false, notice: Notice?,
                           now: Date) -> String {
-        let lines = either(selection.routes.map { LineStyle.of($0).label })
+        let lines = Lines.list(selection.routes, joinedBy: "or")
         let station = selection.station?.name ?? "your station"
         var sentence: String
         if let next = trains.first {
-            let train = describe(line: next.lineLabel, heading: selection.heading(of: next))
+            let train = describe(line: Lines.name(of: next.route), heading: selection.heading(of: next))
             var after = ""
             if trains.count > 1 {
                 let second = trains[1]
-                after = clock(second.time) + (second.route == next.route ? "" : ", on the \(second.lineLabel)")
+                after = clock(second.time) + (second.route == next.route ? "" : ", on the \(Lines.name(of: second.route))")
             }
             if selection.walkMinutes > 0 {
-                let leave = selection.leaveTime(for: next)
-                let when = minutes(until: leave, from: now) == 0 ? "Leave now" : "Leave in \(duration(until: leave, from: now))"
+                let leave = MinutesToGo(until: selection.leaveTime(for: next), from: now)
+                let when = leave.isNow ? "Leave now" : "Leave in \(leave.spoken)"
                 sentence = "\(when) for the \(clock(next.time)) \(train) at \(station)."
                 if !after.isEmpty { sentence += " If you miss it, the next is at \(after)." }
             } else {
-                let when = minutes(until: next.time, from: now) == 0 ? "arriving now" : "in \(duration(until: next.time, from: now)), at \(clock(next.time))"
+                let due = MinutesToGo(until: next.time, from: now)
+                let when = due.isNow ? "arriving now" : "in \(due.spoken), at \(clock(next.time))"
                 sentence = "The next \(train) at \(station) is \(when)."
                 if !after.isEmpty { sentence += " The one after is at \(after)." }
             }
@@ -65,12 +66,6 @@ enum Spoken {
         return text + "."
     }
 
-    /// "R", "N or R", "D, N or R".
-    static func either(_ labels: [String]) -> String {
-        guard let last = labels.last, labels.count > 1 else { return labels.first ?? "" }
-        return labels.dropLast().joined(separator: ", ") + " or " + last
-    }
-
     /// "R to Manhattan", or "northbound R" where the MTA gives the direction no name.
     static func describe(line: String, heading: String) -> String {
         isNamed(heading) ? "\(line) to \(heading)" : "\(heading.lowercased()) \(line)".trimmingCharacters(in: .whitespaces)
@@ -85,15 +80,6 @@ enum Spoken {
     /// "Northbound" or "Southbound" given where the MTA names none.
     private static func isNamed(_ heading: String) -> Bool {
         !heading.isEmpty && heading != "Northbound" && heading != "Southbound"
-    }
-
-    static func minutes(until date: Date, from now: Date) -> Int {
-        max(0, Int(date.timeIntervalSince(now) / 60))
-    }
-
-    static func duration(until date: Date, from now: Date) -> String {
-        let count = minutes(until: date, from: now)
-        return count == 1 ? "1 minute" : "\(count) minutes"
     }
 
     static func clock(_ date: Date) -> String {

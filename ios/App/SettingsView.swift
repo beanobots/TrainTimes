@@ -28,10 +28,10 @@ final class SettingsStore {
         }
     }
 
-    /// Whether live times get their symbol: as chosen here, or always with the
-    /// phone's Differentiate Without Color.
-    func marksLive(withoutColor: Bool) -> Bool {
-        withoutColor || settings.marksLiveTimes
+    /// Which times get their symbol: as chosen here, and live ones always with
+    /// the phone's Differentiate Without Color.
+    func timeMarks(withoutColor: Bool) -> TimeMarks {
+        settings.timeMarks(withoutColor: withoutColor)
     }
 }
 

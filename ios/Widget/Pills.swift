@@ -24,7 +24,7 @@ struct Pill: View {
             .frame(maxWidth: fills ? .infinity : nil)
             .background {
                 if let lit, renderingMode == .fullColor {
-                    Capsule().fill(Color(hex: lit.color))
+                    Capsule().fill(lit.swiftUIColor)
                 } else if lit != nil {
                     // Tinted and clear Home Screens draw a widget in one color; an outline stays readable
                     Capsule().strokeBorder(lineWidth: 1.5)
@@ -39,7 +39,7 @@ struct Pill: View {
     private var iconColor: Color {
         guard renderingMode == .fullColor else { return .white }
         guard let lit else { return .boardText }
-        return lit.usesDarkText ? .black : .white
+        return lit.textColor
     }
 }
 

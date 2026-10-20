@@ -366,12 +366,10 @@ struct NearbyWidgetView: View {
     @Environment(\.widgetRenderingMode) private var renderingMode
     let entry: NearbyEntry
 
-    /// Whether live times get their symbol as well as their green: always
+    /// Which times get their symbol: live ones as well as their green, always
     /// where the widget is drawn in one colour, as on tinted and clear Home
     /// Screens, which would leave out the green.
-    private var marksLive: Bool { withoutColor || renderingMode != .fullColor || entry.settings.marksLiveTimes }
-    /// Whether timetable times get their symbol.
-    private var marksScheduled: Bool { entry.settings.marksScheduledTimes }
+    private var marks: TimeMarks { entry.settings.timeMarks(withoutColor: withoutColor, renderingMode: renderingMode) }
 
     /// A tap anywhere but a train opens the app at the stations near you, or
     /// without location, to allow it.
@@ -546,16 +544,13 @@ struct NearbyWidgetView: View {
     private func time(_ train: Arrival?) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 3) {
             if let train {
-                let minutes = max(0, Int(train.time.timeIntervalSince(entry.date) / 60))
-                if marksLive && train.isLive {
-                    LiveMark(size: 9).foregroundStyle(train.statusColor)
-                } else if marksScheduled && !train.isLive {
-                    ScheduledMark(size: 9).foregroundStyle(train.statusColor)
-                }
-                Text(minutes == 0 ? "Now" : "\(minutes)")
+                let minutes = MinutesToGo(until: train.time, from: entry.date)
+                StatusMark(isLive: train.isLive, marks: marks, size: 9)
+                    .foregroundStyle(train.statusColor)
+                Text(minutes.number)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(train.statusColor)
-                if minutes > 0 {
+                if !minutes.isNow {
                     Text("min")
                         .font(.footnote)
                         .foregroundStyle(Color.boardGray)
@@ -582,9 +577,7 @@ struct NearbyWidgetView: View {
     private func spokenTime(_ direction: NearbyDirection) -> String {
         guard direction.trains != nil else { return "Couldn't load" }
         guard let train = direction.next(at: entry.date) else { return "No trains" }
-        let minutes = max(0, Int(train.time.timeIntervalSince(entry.date) / 60))
-        let time = minutes == 0 ? "Now" : minutes == 1 ? "1 minute" : "\(minutes) minutes"
-        return "\(time), \(train.isLive ? "live" : "scheduled")"
+        return "\(MinutesToGo(until: train.time, from: entry.date).spoken), \(train.isLive ? "live" : "scheduled")"
     }
 
     /// A line with no trains either way, and the alert that says why, which

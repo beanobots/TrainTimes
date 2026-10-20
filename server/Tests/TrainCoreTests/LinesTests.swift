@@ -52,4 +52,29 @@ import Testing
     @Test func expressRoutesAreTheirLines() {
         #expect(["5X", "6X", "7X", "FX", "R", "GS"].map(Lines.normalized) == ["5", "6", "7", "F", "R", "GS"])
     }
+
+    /// What VoiceOver and Siri call a train of each line, everywhere they name one.
+    @Test func eachShuttleIsSpokenOfByItsName() {
+        #expect(Lines.spokenName(of: "R") == "R train")
+        #expect(Lines.spokenName(of: "SI") == "SI train")
+        // All three are "S" on their bullets
+        #expect(Lines.spokenName(of: "GS") == "42 St Shuttle")
+        #expect(Lines.spokenName(of: "FS") == "Franklin Av Shuttle")
+        #expect(Lines.spokenName(of: "H") == "Rockaway Park Shuttle")
+    }
+
+    /// The bullets' letters, drawn the same size by every bullet: the widgets',
+    /// the app's, the picker's and the Edit menu's pictures.
+    @Test func twoLetterBulletsHaveSmallerLetters() {
+        #expect(LineStyle.of("R").labelSize(bullet: 100) == 62)
+        #expect(LineStyle.of("GS").labelSize(bullet: 100) == 62)
+        #expect(LineStyle.of("SI").labelSize(bullet: 100) == 45)
+    }
+
+    @Test func lineColoursAsRedGreenAndBlue() {
+        let yellow = LineStyle.rgb(LineStyle.of("R").color)
+        #expect(yellow.red == 252.0 / 255 && yellow.green == 204.0 / 255 && yellow.blue == 10.0 / 255)
+        let white = LineStyle.rgb(0xFFFFFF)
+        #expect(white.red == 1 && white.green == 1 && white.blue == 1)
+    }
 }

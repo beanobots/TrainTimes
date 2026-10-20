@@ -4,23 +4,51 @@ import WidgetKit
 
 extension Color {
     init(hex: UInt32) {
-        self.init(
-            red: Double((hex >> 16) & 0xFF) / 255,
-            green: Double((hex >> 8) & 0xFF) / 255,
-            blue: Double(hex & 0xFF) / 255
-        )
+        let rgb = LineStyle.rgb(hex)
+        self.init(red: rgb.red, green: rgb.green, blue: rgb.blue)
     }
 
-    /// A live prediction, on the widget's black background.
-    static let liveGreen = Color(red: 0.30, green: 0.85, blue: 0.39)
+    /// `light` in light mode, `dark` in dark mode.
+    init(light: UIColor, dark: UIColor) {
+        // Assigned rather than self.init(_:), which Xcode's previews can't build
+        self = Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? dark : light })
+    }
 
-    /// A live prediction in the app: darker on a light background so it stays
-    /// readable, brighter on a dark one.
-    static let liveText = Color(UIColor { traits in
-        traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.30, green: 0.85, blue: 0.39, alpha: 1)
-            : UIColor(red: 0.08, green: 0.50, blue: 0.20, alpha: 1)
-    })
+    /// A live prediction on the countdown, which is always dark.
+    static let liveGreen = Color(uiColor: .liveGreen)
+
+    /// A live prediction in the app and on the widgets: darker on a light
+    /// background so it stays readable, `liveGreen` on a dark one.
+    static let liveText = Color(light: UIColor(red: 0.08, green: 0.50, blue: 0.20, alpha: 1), dark: .liveGreen)
+}
+
+extension UIColor {
+    /// A live prediction on a dark background.
+    fileprivate static let liveGreen = UIColor(red: 0.30, green: 0.85, blue: 0.39, alpha: 1)
+}
+
+extension LineStyle {
+    /// The line's colour, and its `uiColor` for drawing with UIKit.
+    var swiftUIColor: Color { Color(hex: color) }
+
+    var uiColor: UIColor {
+        let rgb = Self.rgb(color)
+        return UIColor(red: rgb.red, green: rgb.green, blue: rgb.blue, alpha: 1)
+    }
+
+    /// The colour of the letter or number on its bullet: black on the light
+    /// bullets, white on the rest.
+    var textColor: Color { usesDarkText ? .black : .white }
+
+    var textUIColor: UIColor { usesDarkText ? .black : .white }
+}
+
+extension Arrival {
+    /// Its time's colour: green for a live prediction, or for a timetable
+    /// time `scheduled`, the colour of the text around it.
+    func statusColor(scheduled: Color) -> Color {
+        isLive ? .liveText : scheduled
+    }
 }
 
 /// A line's round bullet: its letter or number on the MTA's color for it.
@@ -46,25 +74,29 @@ struct LineBullet: View {
     var body: some View {
         let style = LineStyle.of(route)
         let size = scales ? min(scaledSize, self.size * 2) : self.size
-        let fontSize = size * (style.label.count > 1 ? 0.45 : 0.62)
-        let label = Text(style.label)
-            .font(.system(size: fontSize, weight: .bold))
-            .offset(y: -Self.capitalsOffset(fontSize: fontSize))
         if renderingMode == .fullColor {
-            label
-                .foregroundStyle(style.usesDarkText ? Color.black : Color.white)
+            Self.label(style, size: size)
+                .foregroundStyle(style.textColor)
                 .frame(width: size, height: size)
-                .background(Circle().fill(Color(hex: style.color)))
-                .accessibilityLabel("\(style.label) train")
+                .background(Circle().fill(style.swiftUIColor))
+                .accessibilityLabel(Lines.spokenName(of: route))
         } else {
             // Tinted and clear Home Screens draw a widget in one color, which
             // would fill the bullet over its letter; an outline stays readable.
-            label
+            Self.label(style, size: size)
                 .frame(width: size, height: size)
                 .overlay(Circle().stroke(lineWidth: 1.5))
                 .widgetAccentable()
-                .accessibilityLabel("\(style.label) train")
+                .accessibilityLabel(Lines.spokenName(of: route))
         }
+    }
+
+    /// The letter or number of a bullet `size` across, in its middle.
+    static func label(_ style: LineStyle, size: CGFloat) -> some View {
+        let fontSize = style.labelSize(bullet: size)
+        return Text(style.label)
+            .font(.system(size: fontSize, weight: .bold))
+            .offset(y: -capitalsOffset(fontSize: fontSize))
     }
 
     /// How far below the middle of its line a bold label's capitals sit. SwiftUI
@@ -85,6 +117,16 @@ extension VerticalAlignment {
     }
 
     static let textMiddle = VerticalAlignment(TextMiddle.self)
+}
+
+extension View {
+    /// Puts this block of text's `.textMiddle` where its text's middle is,
+    /// given the height of its first line's capitals.
+    func textMiddleGuide(capHeight: CGFloat) -> some View {
+        alignmentGuide(.textMiddle) { d in
+            (d[.firstTextBaseline] - capHeight + d[.lastTextBaseline]) / 2
+        }
+    }
 }
 
 /// The bullets of the chosen lines in about the room of one: side by side for
@@ -161,6 +203,41 @@ struct ScheduledMark: View {
         Image(systemName: Self.symbol)
             .font(.system(size: size, weight: .bold))
             .accessibilityLabel("Scheduled")
+    }
+}
+
+/// A time's `LiveMark` or `ScheduledMark`, as `marks` has them, or nothing.
+struct StatusMark: View {
+    let isLive: Bool
+    let marks: TimeMarks
+    let size: CGFloat
+
+    var body: some View {
+        if marks.showsMark(isLive: isLive) {
+            if isLive {
+                LiveMark(size: size)
+            } else {
+                ScheduledMark(size: size)
+            }
+        }
+    }
+}
+
+extension TimeMarks {
+    /// The symbol of a time's mark, as there's one, for text.
+    func symbol(isLive: Bool) -> String? {
+        guard showsMark(isLive: isLive) else { return nil }
+        return isLive ? LiveMark.symbol : ScheduledMark.symbol
+    }
+}
+
+extension AppSettings {
+    /// Which times get their mark: as chosen in Settings, and live ones always
+    /// with the phone's Differentiate Without Color, or on a widget drawn in
+    /// one colour (a `renderingMode` other than full colour).
+    func timeMarks(withoutColor: Bool, renderingMode: WidgetRenderingMode = .fullColor) -> TimeMarks {
+        TimeMarks(marksLiveTimes: marksLiveTimes, marksScheduledTimes: marksScheduledTimes,
+                  withoutColor: withoutColor, inOneColor: renderingMode != .fullColor)
     }
 }
 

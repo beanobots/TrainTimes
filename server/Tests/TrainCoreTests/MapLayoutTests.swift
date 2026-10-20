@@ -82,6 +82,16 @@ import Testing
         #expect(at.spoken(clock: clock) == "R train at Prospect Av, your stop")
     }
 
+    @Test func aShuttleIsSaidByItsName() throws {
+        // Left Botanic Garden 30 seconds ago for Park Pl and Franklin Av
+        let stops = [("S04N", -0.5), ("S03N", 1.0), ("S01N", 3.0)]
+        let train = Arrival(route: "FS", time: time(3), stop: "S01N", lastStop: "S01N", isLive: true, trip: "fs1",
+                            approach: stops.map { Arrival.Stop(id: $0.0, time: time($0.1)) })
+        let layout = try #require(StopLayout(train: train, now: now))
+        #expect(layout.spoken(clock: clock)
+            == "Franklin Av Shuttle between Botanic Garden and Park Pl, 2 stops from Franklin Av")
+    }
+
     @Test func noStopsNoMap() {
         #expect(StopLayout(train: rTrain([]), now: now) == nil)
     }
@@ -129,6 +139,12 @@ import Testing
         #expect((layout.nextRow ?? 0) > 4)
         #expect(layout.nextNote == "D heading for 36 St")
         #expect(layout.spoken == "Your R train is between 25 St and Prospect Av. D heading for 36 St.")
+
+        // A shuttle is "S" on the map, and said by its name
+        let shuttle = try #require(TransferMapLayout(connection: connection(leaves: 0.5, wait: 6, line: "GS"),
+                                                     selection: prospect, now: now, maxRows: 5))
+        #expect(shuttle.nextNote == "S heading for 36 St")
+        #expect(shuttle.spoken == "Your R train is between 25 St and Prospect Av. 42 St Shuttle heading for 36 St.")
     }
 
     @Test func foldedStopsAndPlatformsSharedOnTheWay() throws {

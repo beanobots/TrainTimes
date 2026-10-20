@@ -323,12 +323,10 @@ struct TrainWidgetView: View {
     /// yet; it's lit until then.
     var mapPending = false
 
-    /// Whether live times get their symbol as well as their green: always
+    /// Which times get their symbol: live ones as well as their green, always
     /// where the widget is drawn in one colour, as on tinted and clear Home
     /// Screens and StandBy at night, which would leave out the green.
-    private var marksLive: Bool { withoutColor || renderingMode != .fullColor || entry.settings.marksLiveTimes }
-    /// Whether timetable times get their symbol.
-    private var marksScheduled: Bool { entry.settings.marksScheduledTimes }
+    private var marks: TimeMarks { entry.settings.timeMarks(withoutColor: withoutColor, renderingMode: renderingMode) }
 
     private var next: Arrival? { entry.trains.first }
     /// The train the widget counts down to: on the Transfers widget, the next
@@ -728,9 +726,7 @@ struct TrainWidgetView: View {
                     .minimumScaleFactor(style.headingScale)
             }
             .frame(maxWidth: textWidth, alignment: .leading)
-            .alignmentGuide(.textMiddle) { d in
-                (d[.firstTextBaseline] - style.nameUIFont.capHeight + d[.lastTextBaseline]) / 2
-            }
+            .textMiddleGuide(capHeight: style.nameUIFont.capHeight)
         }
     }
 
@@ -765,13 +761,10 @@ struct TrainWidgetView: View {
 
     /// A live train's mark, or a timetable train's, as marked. VoiceOver has
     /// the time's `status` instead, marked or not.
-    @ViewBuilder
     private func statusMark(_ train: Arrival, size: CGFloat) -> some View {
-        if marksLive && train.isLive {
-            LiveMark(size: size).foregroundStyle(train.statusColor).accessibilityHidden(true)
-        } else if marksScheduled && !train.isLive {
-            ScheduledMark(size: size).foregroundStyle(train.statusColor).accessibilityHidden(true)
-        }
+        StatusMark(isLive: train.isLive, marks: marks, size: size)
+            .foregroundStyle(train.statusColor)
+            .accessibilityHidden(true)
     }
 
     /// A train's mark stacked over its bullet, where it could be another line,
@@ -842,18 +835,7 @@ struct TrainWidgetView: View {
                                markSlot: Bool = false) -> some View {
         HStack(spacing: 3) {
             if markSlot {
-                let live = marksLive && train.isLive
-                let scheduled = marksScheduled && !train.isLive
-                // Both are there, so the slot's as wide as the wider
-                ZStack {
-                    LiveMark(size: bulletSize * 0.7)
-                        .opacity(live ? 1 : 0)
-                        .accessibilityHidden(!live)
-                    ScheduledMark(size: bulletSize * 0.7)
-                        .opacity(scheduled ? 1 : 0)
-                        .accessibilityHidden(!scheduled)
-                }
-                .foregroundStyle(train.statusColor)
+                self.markSlot(train, size: bulletSize * 0.7)
             }
             Text(train.time.clock)
                 .font(font)
@@ -883,7 +865,7 @@ struct TrainWidgetView: View {
         let bulletsWidth = timeWidth + (bulletSlot ? 3 + style.timeBullet : 0)
         let markWidth = Self.markWidth(size: style.timeBullet * 0.7) + 3
         let markSlot = shown.contains(where: isMarked) && markWidth + bulletsWidth <= style.columnWidth
-        let minutesWidth = shown.map { minutesToGo(until: $0).width(in: style.minutesUIFont) }.max() ?? 0
+        let minutesWidth = shown.map { minutesToGo(until: $0).label.width(in: style.minutesUIFont) }.max() ?? 0
         let timesWidth = (markSlot ? markWidth : 0) + bulletsWidth
         let showsMinutes = timesWidth + style.minutesGap + minutesWidth <= style.columnWidth
         return VStack(alignment: .leading, spacing: 0) {
@@ -896,7 +878,7 @@ struct TrainWidgetView: View {
                     timeAndBullet(train, font: style.timeFont, width: timeWidth,
                                   bulletSize: style.timeBullet, bulletSlot: bulletSlot, markSlot: markSlot)
                     if showsMinutes {
-                        Text(minutesToGo(until: train))
+                        Text(minutesToGo(until: train).label)
                             .font(style.minutesFont)
                             .monospacedDigit()
                             .foregroundStyle(Color.boardGray)
@@ -916,13 +898,14 @@ struct TrainWidgetView: View {
     /// in 12 minutes, live".
     private func spokenLater(_ train: Arrival) -> String {
         let at = Spoken.clock(train.time)
-        let which = entry.selection.marksLine(of: train) ? "\(train.lineLabel) train at \(at)" : at
+        let which = entry.selection.marksLine(of: train) ? "\(Lines.spokenName(of: train.route)) at \(at)" : at
         return "\(which), \(spokenWhen(train.time)), \(status(train).lowercased())"
     }
 
     /// "in 12 minutes", or "now" within the minute.
     private func spokenWhen(_ date: Date) -> String {
-        Spoken.minutes(until: date, from: entry.date) == 0 ? "now" : "in \(Spoken.duration(until: date, from: entry.date))"
+        let minutes = MinutesToGo(until: date, from: entry.date)
+        return minutes.isNow ? "now" : "in \(minutes.spoken)"
     }
 
     /// How wide the mark slot is with marks `size` points: the wider of the two marks.
@@ -933,13 +916,9 @@ struct TrainWidgetView: View {
             .max() ?? size * 1.5
     }
 
-    /// "12 min"
-    private func minutesToGo(until train: Arrival) -> String {
-        "\(minutes(until: train)) min"
-    }
-
-    private func minutes(until train: Arrival) -> Int {
-        max(0, Int(train.time.timeIntervalSince(entry.date) / 60))
+    /// The minutes until `train`: "12 min", or "Now" within the minute.
+    private func minutesToGo(until train: Arrival) -> MinutesToGo {
+        MinutesToGo(until: train.time, from: entry.date)
     }
 
     /// "8:12", or "N 8:12" where it could be more than one line.
@@ -953,10 +932,8 @@ struct TrainWidgetView: View {
         var text = Text("then ")
         for (index, train) in trains.enumerated() {
             if index > 0 { text = Text("\(text)\(Text(verbatim: ", "))") }
-            if marksLive && train.isLive {
-                text = Text("\(text)\(Image(systemName: LiveMark.symbol)) ")
-            } else if marksScheduled && !train.isLive {
-                text = Text("\(text)\(Image(systemName: ScheduledMark.symbol)) ")
+            if let symbol = marks.symbol(isLive: train.isLive) {
+                text = Text("\(text)\(Image(systemName: symbol)) ")
             }
             text = Text("\(text)\(Text(verbatim: time(train)))")
         }
@@ -1089,7 +1066,7 @@ struct TrainWidgetView: View {
         let later = Array(connections.dropFirst().prefix(3))
         // A live or timetable mark after the minutes, as marked
         let mark = later.contains { isMarked($0.first) } ? Self.markWidth(size: style.timeBullet * 0.7) + 3 : 0
-        let lead = (later.map { "\(minutesToLeave($0.first)) min".width(in: style.timeUIFont) }.max() ?? 0) + mark
+        let lead = (later.map { minutesToLeave($0.first).label.width(in: style.timeUIFont) }.max() ?? 0) + mark
         let columns = TransferColumns(connections: later, lead: max(lead, "THEN IN".width(in: style.labelUIFont)), width: width,
                                       nextMark: nextMarkWidth(later), style: style)
         return VStack(alignment: .leading, spacing: 0) {
@@ -1137,7 +1114,7 @@ struct TrainWidgetView: View {
             ForEach(Array(connections.enumerated()), id: \.offset) { _, connection in
                 transferRow(connection, change: change, columns: columns, height: 28) {
                     HStack(spacing: 3) {
-                        Text("\(minutesToLeave(connection.first)) min")
+                        Text(minutesToLeave(connection.first).label)
                             .font(style.timeFont)
                             .foregroundStyle(connection.first.statusColor)
                             .liveAccent(connection.first)
@@ -1154,9 +1131,9 @@ struct TrainWidgetView: View {
         entry.problem ?? "No \(entry.lineLabel) trains to \(change.station?.name ?? "the change") predicted"
     }
 
-    /// Whole minutes until it's time to leave for `train`.
-    private func minutesToLeave(_ train: Arrival) -> Int {
-        max(0, Int(entry.selection.leaveTime(for: train).timeIntervalSince(entry.date) / 60))
+    /// The minutes until it's time to leave for `train`.
+    private func minutesToLeave(_ train: Arrival) -> MinutesToGo {
+        MinutesToGo(until: entry.selection.leaveTime(for: train), from: entry.date)
     }
 
     /// "Prospect Av → Atlantic Av-Barclays Ctr", which VoiceOver reads as
@@ -1189,9 +1166,7 @@ struct TrainWidgetView: View {
                 .font(style.headingFont)
                 .foregroundStyle(Color.boardGray)
             }
-            .alignmentGuide(.textMiddle) { d in
-                (d[.firstTextBaseline] - style.nameUIFont.capHeight + d[.lastTextBaseline]) / 2
-            }
+            .textMiddleGuide(capHeight: style.nameUIFont.capHeight)
         }
     }
 
@@ -1235,7 +1210,7 @@ struct TrainWidgetView: View {
                 .padding(.leading, 5)
             // The ride, in the line's colour
             Capsule()
-                .fill(Color(hex: LineStyle.of(connection.first.route).color))
+                .fill(LineStyle.of(connection.first.route).swiftUIColor)
                 .frame(minWidth: 12)
                 .frame(height: 3)
                 .padding(.horizontal, 8)
@@ -1362,15 +1337,15 @@ struct TrainWidgetView: View {
         let first = connection.first
         let when = spokenWhen(entry.selection.leaveTime(for: first))
         var sentences = [walking
-            ? "Leave \(when) for the \(Spoken.clock(first.time)) \(first.lineLabel), \(status(first).lowercased())."
-            : "\(first.lineLabel) \(when), at \(Spoken.clock(first.time)), \(status(first).lowercased())."]
+            ? "Leave \(when) for the \(Spoken.clock(first.time)) \(Lines.name(of: first.route)), \(status(first).lowercased())."
+            : "\(Lines.name(of: first.route)) \(when), at \(Spoken.clock(first.time)), \(status(first).lowercased())."]
         let station = change.station?.name ?? "the change"
         let wait = connection.spokenWait(quick: connection.isQuick(within: change.quickMinutes))
         let how = saysHow && connection.next != nil && !connection.staysOn
             ? ", \(howToChange(connection, change: change))" : ""
         sentences.append("At \(station) at \(Spoken.clock(connection.arrival.time)), \(wait)\(how).")
         if let next = connection.next, !connection.staysOn {
-            sentences.append("\(next.lineLabel) at \(Spoken.clock(next.time)), \(status(next).lowercased()).")
+            sentences.append("\(Lines.name(of: next.route)) at \(Spoken.clock(next.time)), \(status(next).lowercased()).")
         }
         return sentences.joined(separator: " ")
     }
@@ -1439,7 +1414,7 @@ struct TrainWidgetView: View {
 
     /// Whether `train`'s time gets a live or timetable mark, as marked.
     private func isMarked(_ train: Arrival) -> Bool {
-        marksLive && train.isLive || marksScheduled && !train.isLive
+        marks.showsMark(isLive: train.isLive)
     }
 
     /// The room `nextCell` keeps for the marks of `connections`' trains met,
@@ -1452,8 +1427,8 @@ struct TrainWidgetView: View {
     /// `train`'s mark, as marked, or for one without, the room for it, so the
     /// times after it still line up.
     private func markSlot(_ train: Arrival, size: CGFloat) -> some View {
-        let live = marksLive && train.isLive
-        let scheduled = marksScheduled && !train.isLive
+        let live = train.isLive && marks.live
+        let scheduled = !train.isLive && marks.scheduled
         // Both are there, so the slot's as wide as the wider
         return ZStack {
             LiveMark(size: size)
@@ -1557,7 +1532,7 @@ struct TrainWidgetView: View {
         }
         .lineLimit(1)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(([notice.label] + brief.routes.map { "\(LineStyle.of($0).label) train" } + [brief.direction].compactMap { $0 })
+        .accessibilityLabel(([notice.label] + brief.routes.map(Lines.spokenName(of:)) + [brief.direction].compactMap { $0 })
             .joined(separator: ", "))
     }
 
@@ -1741,14 +1716,19 @@ extension Notice {
     }
 }
 
+extension UIColor {
+    /// The station board's black.
+    fileprivate static let boardBlack = UIColor(white: 0.07, alpha: 1)
+}
+
 extension Color {
     /// The Lock Screen countdown's background, dark in light mode too.
-    static let boardBlack = Color(white: 0.07)
+    static let boardBlack = Color(uiColor: .boardBlack)
 
     // The home screen widgets follow the phone's light or dark setting: the
     // station board's black in dark mode, white in light
 
-    static let boardBackground = Color(light: UIColor.white, dark: UIColor(white: 0.07, alpha: 1))
+    static let boardBackground = Color(light: UIColor.white, dark: .boardBlack)
     /// Station names and timetable times.
     static let boardText = Color(light: UIColor.black, dark: UIColor.white)
     /// Directions, labels and minutes to go.
@@ -1757,16 +1737,11 @@ extension Color {
     static let boardDim = Color(light: UIColor(red: 0.63, green: 0.63, blue: 0.65, alpha: 1), dark: UIColor(white: 0.5, alpha: 1))
     /// A button's face when it isn't lit.
     static let boardButton = Color(light: UIColor(white: 0, alpha: 0.06), dark: UIColor(white: 1, alpha: 0.15))
-
-    init(light: UIColor, dark: UIColor) {
-        // Assigned rather than self.init(_:), which Xcode's previews can't build
-        self = Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? dark : light })
-    }
 }
 
 extension Arrival {
     /// Green for a live prediction, white (black in light mode) for a timetable time.
-    var statusColor: Color { isLive ? .liveText : .boardText }
+    var statusColor: Color { statusColor(scheduled: .boardText) }
 }
 
 extension View {

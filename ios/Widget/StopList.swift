@@ -53,7 +53,7 @@ struct StopList: View {
                 .foregroundStyle(Color.boardGray)
                 .lineLimit(1)
             ZStack(alignment: .topLeading) {
-                StopRail(layout: layout, color: Color(hex: LineStyle.of(train.route).color), style: style, rowHeight: rowHeight, lead: lead)
+                StopRail(layout: layout, color: LineStyle.of(train.route).swiftUIColor, style: style, rowHeight: rowHeight, lead: lead)
                     .frame(width: style.railColumn, height: lead + CGFloat(layout.rows.count) * rowHeight)
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(layout.rows) { row in
@@ -200,32 +200,21 @@ struct TrainMarker: View {
             // of it. The rail leaves room around it.
             Circle()
                 .frame(width: size, height: size)
-                .overlay(label(style).blendMode(.destinationOut))
+                .overlay(LineBullet.label(style, size: size).blendMode(.destinationOut))
                 .compositingGroup()
                 .widgetAccentable()
                 .accessibilityElement(children: .ignore)
-                .accessibilityLabel("\(style.label) train")
+                .accessibilityLabel(Lines.spokenName(of: route))
         } else {
-            // An outline, as LineBullet is there
-            label(style)
-                .frame(width: size, height: size)
-                .overlay(Circle().stroke(lineWidth: 1.5))
-                .widgetAccentable()
-                .accessibilityLabel("\(style.label) train")
+            // An outline, as LineBullet draws itself there
+            LineBullet(route: route, size: size)
         }
     }
 
-    private func label(_ style: LineStyle) -> some View {
-        let fontSize = size * (style.label.count > 1 ? 0.45 : 0.62)
-        return Text(style.label)
-            .font(.system(size: fontSize, weight: .bold))
-            .offset(y: -LineBullet.capitalsOffset(fontSize: fontSize))
-    }
-
     private func fullColor(_ style: LineStyle) -> some View {
-        let color = Color(hex: style.color)
-        return label(style)
-            .foregroundStyle(isLive ? (style.usesDarkText ? Color.black : Color.white) : color)
+        let color = style.swiftUIColor
+        return LineBullet.label(style, size: size)
+            .foregroundStyle(isLive ? style.textColor : color)
             .frame(width: size, height: size)
             .background(Circle().fill(isLive ? color : Color.boardBackground))
             .overlay {
@@ -233,6 +222,6 @@ struct TrainMarker: View {
             }
             // A ring of the widget's background parts it from the rail
             .background(Circle().fill(Color.boardBackground).padding(-2))
-            .accessibilityLabel("\(style.label) train")
+            .accessibilityLabel(Lines.spokenName(of: route))
     }
 }
