@@ -15,15 +15,23 @@ same name in the same complex into one station. The equipment list ties each ele
 station complex, so the outage feed, which names only the equipment, can be
 matched to a station, and to the stops whose platforms it serves: those where
 the lines it serves stop.
+
+Written to ios/Shared, both files are also copied to the server's resources:
+SwiftPM bundles a symlinked resource as the link, which doesn't resolve from
+the built bundle, so the server keeps copies, and CI checks they match.
 """
 import csv
 import json
+import os
 import re
+import shutil
 import sys
 from collections import Counter
 
 BOROUGHS = {"M": "Manhattan", "Bk": "Brooklyn", "Q": "Queens", "Bx": "Bronx", "SI": "Staten Island"}
 STREET = re.compile(r"\b(St|Av|Blvd|Pkwy|Rd|Tpke)$")
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SERVER_RESOURCES = os.path.join(REPO, "server", "Sources", "TrainResources", "Resources")
 
 
 def route_ids(row):
@@ -173,6 +181,11 @@ def main(source, entrances_path, equipment_path, target_dir):
     with open(target, "w", encoding="utf-8") as file:
         file.write("{\n" + ",\n".join(f"{json.dumps(k)}: {json.dumps(v, ensure_ascii=False)}" for k, v in machines.items()) + "\n}\n")
     print(f"{len(machines)} elevators and escalators -> {target}")
+
+    if os.path.samefile(target_dir, os.path.join(REPO, "ios", "Shared")):
+        for name in ("stations.json", "equipment.json"):
+            shutil.copyfile(f"{target_dir}/{name}", os.path.join(SERVER_RESOURCES, name))
+        print(f"and copied to {os.path.relpath(SERVER_RESOURCES, REPO)}")
 
 
 if __name__ == "__main__":

@@ -22,11 +22,17 @@ concurrency:
 
 jobs:
   server:
-    # The server compiles eight of ios/Shared's files in Swift 6 mode, which the
+    # The server compiles nine of ios/Shared's files in Swift 6 mode, which the
     # app's build doesn't. It needs macOS for SQLite.
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check the server's copies of the station lists
+        # make_stations.py writes both; a symlink wouldn't survive bundling
+        run: |
+          cmp ios/Shared/stations.json server/Sources/TrainResources/Resources/stations.json
+          cmp ios/Shared/equipment.json server/Sources/TrainResources/Resources/equipment.json
 
       - name: Build the server
         run: swift build --package-path server

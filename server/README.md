@@ -270,7 +270,11 @@ rotation needs `LOG_FILE` added (the script reminds you). Delete its
 - **Update:** `git pull`, then `sudo ./deploy/install.sh`. It rebuilds, swaps
   in the new binary and restarts the daemon, keeping the plist and the
   database. An old `registrations.json` in `DATA_DIR` is moved into the
-  database once, then deleted. After editing the plist, reload it:
+  database once, then deleted. The countdown's state is the app's own type
+  (`ios/Shared/Countdown.swift`), and running countdowns and the database
+  hold states made before an update, so a field added to it must be
+  optional; update the server before releasing an app that sends one. After
+  editing the plist, reload it:
 
       sudo launchctl bootout system/com.traintimes.server
       sudo ./deploy/install.sh

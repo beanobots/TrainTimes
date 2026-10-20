@@ -223,7 +223,8 @@ Built into the app (refresh them now and then):
 
 To refresh them, follow the download steps at the top of `tools/make_stations.py`,
 then run `python3 tools/make_stations.py Stations.csv entrances.json equipment.json ios/Shared`.
-`lines.json` keeps only the stops `stations.json` lists, so then follow the
+It also copies the first two into the push server's resources, which can't
+link to them. `lines.json` keeps only the stops `stations.json` lists, so then follow the
 download steps at the top of `tools/make_lines.py` and run
 `python3 tools/make_lines.py gtfs ios/Shared/stations.json ios/Shared`. Push all
 three.

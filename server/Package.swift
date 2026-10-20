@@ -19,8 +19,10 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-http-types.git", from: "1.0.0"),
     ],
     targets: [
-        // stations.json and equipment.json, symlinked from ../ios/Shared. A target
-        // of their own, so TrainCore can stand in for `Bundle` (see Shims.swift).
+        // stations.json and equipment.json, copies of ../ios/Shared's that
+        // tools/make_stations.py writes (a symlinked resource is bundled as the
+        // link, which doesn't resolve from the bundle). A target of their own,
+        // so TrainCore can stand in for `Bundle` (see Shims.swift).
         .target(
             name: "TrainResources",
             resources: [.copy("Resources/stations.json"), .copy("Resources/equipment.json")]
