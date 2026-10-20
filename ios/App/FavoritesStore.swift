@@ -39,10 +39,7 @@ final class FavoritesStore {
         // left out rather than falling back to Prospect Av
         var seen = Set<String>()
         favorites = saved
-            .filter { selection in
-                selection.station.map { $0.routes.contains(where: selection.routes.contains) } ?? false
-            }
-            .map { $0.validated() }
+            .compactMap { $0.validatedIfKnown() }
             .filter { seen.insert($0.trainID).inserted }
     }
 

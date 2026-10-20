@@ -93,7 +93,6 @@ private struct StationStep: View {
     /// The bullet label of the line to filter by, e.g. "R" or "S".
     @State private var filter: String?
     @State private var location = NearbyLocation()
-    @Environment(SettingsStore.self) private var settings
 
     /// The closest stations, or with a line filtered by, the closest it stops at.
     private var nearby: [Nearby.Result] {
@@ -104,11 +103,10 @@ private struct StationStep: View {
 
     /// Every station, alphabetically, or with a line filtered by, its stations in the order it stops at them.
     private var matches: [Station] {
-        let words = search.lowercased().split(separator: " ")
+        let query = StationSearch(search)
         let stations = StationDirectory.all.filter { station in
             let onLine = filter.map { station.serves(label: $0) } ?? true
-            let text = "\(station.name) \(station.borough)".lowercased()
-            return onLine && words.allSatisfy { text.contains($0) }
+            return onLine && query.matches(station)
         }
         return filter.map { StationDirectory.inLineOrder(stations, label: $0) } ?? stations
     }
@@ -144,7 +142,7 @@ private struct StationStep: View {
                     Button {
                         pick(station, filter)
                     } label: {
-                        StationRow(station: station, isSelected: station.id == chosenID, marksStepFree: settings.settings.stepFree)
+                        StationRow(station: station, isSelected: station.id == chosenID)
                     }
                     .accessibilityAddTraits(station.id == chosenID ? .isSelected : [])
                 }
@@ -207,7 +205,7 @@ private struct StationStep: View {
                             pick(result.station, filter)
                         } label: {
                             StationRow(station: result.station, isSelected: result.station.id == chosenID,
-                                       marksStepFree: settings.settings.stepFree, distance: result.distance)
+                                       distance: result.distance)
                         }
                         .accessibilityAddTraits(result.station.id == chosenID ? .isSelected : [])
                     }
@@ -222,22 +220,11 @@ private struct StationStep: View {
 private struct StationRow: View {
     let station: Station
     let isSelected: Bool
-    /// With Settings › Step-free mode, whether it says so where some or all of
-    /// its platforms have no step-free access.
-    var marksStepFree = false
     /// "0.3 mi", in the stations near you.
     var distance: String? = nil
     /// The bullets grow with the text beside them, up to where nine still fit
     /// on the narrowest iPhone.
     @ScaledMetric(relativeTo: .caption) private var bulletSize: CGFloat = 16
-
-    /// "No step-free access", or "Step-free on some platforms", if either.
-    private var stepFreeNote: String? {
-        let stepFree = station.platforms.filter { $0.ada != 0 }.count
-        if stepFree == 0 { return "No step-free access" }
-        if stepFree < station.platforms.count { return "Step-free on some platforms" }
-        return nil
-    }
 
     var body: some View {
         HStack {
@@ -249,11 +236,8 @@ private struct StationRow: View {
                     }
                     Text(station.borough).font(.caption).foregroundStyle(.secondary)
                 }
-                if marksStepFree, let stepFreeNote {
-                    Label(stepFreeNote, systemImage: "figure.stairs")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                }
+                StepFreeNote(platforms: station.platforms)
+                    .font(.caption)
             }
             Spacer()
             if let distance {
@@ -277,7 +261,6 @@ private struct LinesStep: View {
     let station: Station
     let next: ([String]) -> Void
     @State private var chosen: [String]
-    @Environment(SettingsStore.self) private var settings
 
     init(station: Station, chosen: [String], next: @escaping ([String]) -> Void) {
         self.station = station
@@ -297,8 +280,7 @@ private struct LinesStep: View {
                     .multilineTextAlignment(.center)
                     .padding(.horizontal)
                 ForEach(station.platforms) { platform in
-                    platformCard(station.routes.filter(platform.routes.contains),
-                                 stepFree: !settings.settings.stepFree || platform.ada != 0)
+                    platformCard(platform)
                 }
                 if station.platforms.count > 1 {
                     everyLine
@@ -307,20 +289,7 @@ private struct LinesStep: View {
             .padding(16)
         }
         .background(Color(.systemGroupedBackground))
-        .safeAreaInset(edge: .bottom) {
-            Button {
-                next(ordered)
-            } label: {
-                Text(nextLabel)
-                    .font(.headline)
-                    .frame(maxWidth: .infinity, minHeight: 34)
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(chosen.isEmpty)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-            .background(.bar)
-        }
+        .chosenLinesButton(nextLabel, disabled: chosen.isEmpty) { next(ordered) }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .principal) { StepTitle(title: "Lines", step: 1) }
@@ -333,36 +302,33 @@ private struct LinesStep: View {
         return "Next: \(Lines.list(ordered))"
     }
 
-    /// `stepFree` false marks the platform as having no step-free access.
-    private func platformCard(_ routes: [String], stepFree: Bool) -> some View {
+    private func platformCard(_ platform: Platform) -> some View {
+        let routes = station.lines(on: platform)
         let allChosen = routes.allSatisfy(chosen.contains)
         return VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("\(routes.map { LineStyle.of($0).label }.joined(separator: " ")) platform".uppercased())
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                if !stepFree {
-                    Label("No step-free access", systemImage: "figure.stairs")
-                        .font(.footnote)
-                        .foregroundStyle(.orange)
-                }
-                Spacer()
-                if routes.count > 1 {
-                    let title = allChosen ? "Clear" : "Select all"
-                    // Each platform has one, so VoiceOver says whose
-                    let label = allChosen ? "Clear the \(Lines.list(routes)) platform"
-                        : "Select all on the \(Lines.list(routes)) platform"
-                    Button(title) {
-                        if allChosen {
-                            chosen.removeAll(where: routes.contains)
-                        } else {
-                            chosen += routes.filter { !chosen.contains($0) }
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    PlatformTitle(routes: routes)
+                    Spacer()
+                    if routes.count > 1 {
+                        let title = allChosen ? "Clear" : "Select all"
+                        // Each platform has one, so VoiceOver says whose
+                        let label = allChosen ? "Clear the \(Lines.list(routes)) platform"
+                            : "Select all on the \(Lines.list(routes)) platform"
+                        Button(title) {
+                            if allChosen {
+                                chosen.removeAll(where: routes.contains)
+                            } else {
+                                chosen += routes.filter { !chosen.contains($0) }
+                            }
                         }
+                        .font(.subheadline)
+                        .accessibilityLabel(label)
+                        .accessibilityInputLabels([title])
                     }
-                    .font(.subheadline)
-                    .accessibilityLabel(label)
-                    .accessibilityInputLabels([title])
                 }
+                StepFreeNote(platforms: [platform])
+                    .font(.footnote)
             }
             HStack(spacing: 12) {
                 ForEach(routes, id: \.self) { route in
@@ -376,9 +342,7 @@ private struct LinesStep: View {
                 }
             }
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+        .pickerCard()
     }
 
     private var everyLine: some View {
@@ -403,6 +367,61 @@ private struct LinesStep: View {
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(allChosen ? .isSelected : [])
+    }
+}
+
+/// "N Q R W PLATFORM" over a platform's lines on a lines step, with the name
+/// of the station it's at first where that's another: "59 ST · 4 5 6 PLATFORM".
+struct PlatformTitle: View {
+    let routes: [String]
+    var station: String? = nil
+
+    var body: some View {
+        let place = station.map { "\($0) · " } ?? ""
+        let labels = routes.map { LineStyle.of($0).label }.joined(separator: " ")
+        Text("\(place)\(labels) platform".uppercased())
+            .font(.footnote.weight(.semibold))
+            .foregroundStyle(.secondary)
+    }
+}
+
+/// With Settings › Step-free mode, where `platforms` have no step-free
+/// access, going `direction` once it's chosen; nothing where they all have it.
+struct StepFreeNote: View {
+    let platforms: [Platform]
+    var direction: Direction? = nil
+    @Environment(SettingsStore.self) private var settings
+
+    var body: some View {
+        if settings.settings.stepFree, let note = platforms.stepFreeNote(going: direction) {
+            Label(note, systemImage: "figure.stairs")
+                .foregroundStyle(.orange)
+        }
+    }
+}
+
+extension View {
+    /// A card on a lines step, such as a platform's.
+    func pickerCard() -> some View {
+        padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    /// The button at the foot of a lines step that goes on with the lines chosen.
+    func chosenLinesButton(_ title: String, disabled: Bool, action: @escaping () -> Void) -> some View {
+        safeAreaInset(edge: .bottom) {
+            Button(action: action) {
+                Text(title)
+                    .font(.headline)
+                    .frame(maxWidth: .infinity, minHeight: 34)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(disabled)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(.bar)
+        }
     }
 }
 
@@ -484,6 +503,9 @@ private struct DirectionStep: View {
                                 Text(direction == .north ? "Northbound" : "Southbound")
                                     .font(.footnote)
                                     .foregroundStyle(.secondary)
+                                // A partly accessible platform can be step-free one way only
+                                StepFreeNote(platforms: station.platforms(serving: routes), direction: direction)
+                                    .font(.footnote)
                             }
                             Spacer()
                             if direction == current {

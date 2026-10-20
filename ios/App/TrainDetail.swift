@@ -44,9 +44,7 @@ struct TrainDetail: View {
         List {
             trainSection
             Section {
-                Stepper(value: $selection.walkMinutes, in: 0...60) {
-                    Text(selection.walkMinutes == 0 ? "Walk to the station: not set" : "Walk to the station: \(selection.walkMinutes) min")
-                }
+                WalkStepper(minutes: $selection.walkMinutes)
             } header: {
                 Text("Getting there")
             } footer: {
@@ -90,12 +88,7 @@ struct TrainDetail: View {
                 try? await Task.sleep(for: .seconds(30))
             }
         }
-        .task {
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(10))
-                now = .now
-            }
-        }
+        .ticking($now)
     }
 
     /// The train the picker changes: a favorite moves to the new train, keeping
@@ -119,24 +112,7 @@ struct TrainDetail: View {
             Button {
                 choosingTrain = true
             } label: {
-                HStack(spacing: 12) {
-                    LineBullets(routes: selection.routes, size: 36)
-                        .frame(width: 46)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(station?.name ?? "Train").font(.headline)
-                        if let station {
-                            Text("\(Lines.list(selection.routes)) \(selection.heading) · \(station.borough)")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(.tertiary)
-                }
-                .padding(.vertical, 4)
-                .contentShape(Rectangle())
+                TrainChoiceRow(selection: selection, placeholder: "Train")
             }
             .buttonStyle(.plain)
             .accessibilityElement(children: .combine)
@@ -270,11 +246,11 @@ struct TrainDetail: View {
                             Text(platform.accessibility ?? "No step-free access")
                         }
                     } icon: {
-                        Image(systemName: platform.ada == 0 ? "figure.stairs" : "figure.roll")
+                        Image(systemName: stepFreeSymbol(platform))
                     }
                 }
             } else if let platform = platforms.first {
-                Label(platform.accessibility ?? "No step-free access", systemImage: platform.ada == 0 ? "figure.stairs" : "figure.roll")
+                Label(platform.accessibility ?? "No step-free access", systemImage: stepFreeSymbol(platform))
             }
             if EquipmentDirectory.hasEquipment(atComplex: station.complex) {
                 let outages = board?.outages ?? []
@@ -282,7 +258,8 @@ struct TrainDetail: View {
                     if board.outages == nil {
                         Text("Couldn't load elevator status from the MTA").foregroundStyle(.secondary)
                     } else if outages.isEmpty {
-                        Label("All elevators and escalators are working", systemImage: "checkmark.circle")
+                        // Only those that serve the lines chosen are listed
+                        Label("No elevator or escalator outages for the \(Lines.list(selection.routes))", systemImage: "checkmark.circle")
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -297,6 +274,12 @@ struct TrainDetail: View {
         } footer: {
             Text("Elevator and escalator status from the MTA.")
         }
+    }
+
+    /// Stairs where there's no step-free access to `platform` going this
+    /// train's way, as at 28 St's 6 uptown, which is step-free downtown only.
+    private func stepFreeSymbol(_ platform: Platform) -> String {
+        platform.isStepFree(going: selection.direction) == false ? "figure.stairs" : "figure.roll"
     }
 
     private func mapSection(_ station: Station) -> some View {

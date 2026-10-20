@@ -69,15 +69,15 @@ struct TrainWidgetIntent: WidgetConfigurationIntent {
 
     /// The train a widget set up before saved widgets was given, with the
     /// default widget's walking time and alerts, as it had the app's then.
-    /// Nil until all three are chosen, or where the line doesn't stop at the station.
+    /// Nil until all three are chosen, or where the station has none of the
+    /// lines left; one it's lost is left out.
     private func earlierTrain(basedOn base: Selection) -> Selection? {
         guard station != nil || line != nil || direction != nil else {
             return stop?.selection(basedOn: base)
         }
-        guard let station = station?.station, let routes = line?.routes, let direction = direction?.direction,
-              !routes.isEmpty, routes.allSatisfy(station.routes.contains) else { return nil }
+        guard let station = station?.station, let routes = line?.routes, let direction = direction?.direction else { return nil }
         return Selection(stationID: station.id, routes: routes, direction: direction, elevatorAlerts: base.elevatorAlerts,
-                         serviceAlerts: base.serviceAlerts, walkMinutes: base.walkMinutes).validated()
+                         serviceAlerts: base.serviceAlerts, walkMinutes: base.walkMinutes).validatedIfKnown()
     }
 }
 
@@ -98,7 +98,7 @@ struct SavedWidgetEntity: AppEntity {
         id = widget.id.uuidString
         title = widget.title
         let selection = widget.selection
-        var subtitle = "\(selection.station?.name ?? "") · \(Lines.list(selection.routes)) \(selection.heading)"
+        var subtitle = "\(selection.station?.name ?? "") · \(selection.caption)"
         if let change = widget.change, let station = change.station {
             subtitle += ", then \(Lines.list(change.routes, joinedBy: "or")) at \(station.name)"
         }
@@ -106,17 +106,29 @@ struct SavedWidgetEntity: AppEntity {
         routes = selection.routes
     }
 
+    /// One picked that's since been deleted in the app. It stays picked, so
+    /// the widget shows what `TrainWidgetIntent` shows for a deleted one,
+    /// not the train it had before saved widgets.
+    init(deleted id: UUID) {
+        self.id = id.uuidString
+        title = "Deleted widget"
+        subtitle = "Pick another in its place"
+        routes = []
+    }
+
     var displayRepresentation: DisplayRepresentation {
-        let image = BulletImage.data(for: routes).map { DisplayRepresentation.Image(data: $0) }
+        let image = routes.isEmpty ? nil : BulletImage.data(for: routes).map { DisplayRepresentation.Image(data: $0) }
         return DisplayRepresentation(title: "\(title)", subtitle: "\(subtitle)", image: image)
     }
 }
 
 struct SavedWidgetQuery: EntityQuery {
+    /// A deleted one too, as `SavedWidgetEntity(deleted:)`: left out, the
+    /// widget's choice would be empty.
     func entities(for identifiers: [SavedWidgetEntity.ID]) async throws -> [SavedWidgetEntity] {
         let saved = SharedStore.loadWidgets()
         return identifiers.compactMap { id in
-            UUID(uuidString: id).flatMap(saved.widget).map(SavedWidgetEntity.init)
+            UUID(uuidString: id).map { uuid in saved.widget(uuid).map(SavedWidgetEntity.init) ?? SavedWidgetEntity(deleted: uuid) }
         }
     }
 

@@ -57,11 +57,27 @@ struct SavedWidget: Codable, Hashable, Identifiable, Sendable {
         shown.change = commute.change
         return shown
     }
+
+    /// Another train, keeping the change only where it's still on its way,
+    /// in the one change to the widget.
+    mutating func setSelection(_ new: Selection) {
+        change = keptChange(change, from: selection, to: new)
+        selection = new
+    }
+}
+
+/// What becomes of `change` when its train goes from `old` to `new`. Another
+/// line or direction goes another way, which the change isn't on, so it goes;
+/// another station the same way keeps it while it's still ahead.
+private func keptChange(_ change: Change?, from old: Selection, to new: Selection) -> Change? {
+    guard old != new else { return change }
+    guard old.routes == new.routes, old.direction == new.direction else { return nil }
+    return change?.validated(for: new)
 }
 
 /// The saved widgets, in the order the Widgets tab lists them, and which one
-/// is the default: the one widgets show until they pick another, and the
-/// one the Live tab, Siri and the countdown go by.
+/// is the default: the one widgets show until they pick another, and whose
+/// train, as it shows it at the time, Siri and its countdown go by.
 struct SavedWidgets: Codable, Hashable, Sendable {
     /// Never empty.
     private(set) var widgets: [SavedWidget]
@@ -156,6 +172,13 @@ struct CommutingHours: Codable, Hashable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case selection, change, start, end, weekdays
+    }
+
+    /// Another train in these hours, keeping their change only where it's
+    /// still on its way, as a saved widget's own train does.
+    mutating func setSelection(_ new: Selection) {
+        change = keptChange(change, from: selection, to: new)
+        selection = new
     }
 
     /// Whether `date` is in these hours. One that starts after midnight is

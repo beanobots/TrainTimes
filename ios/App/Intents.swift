@@ -6,13 +6,14 @@ struct NextTrainIntent: AppIntent {
     static let title: LocalizedStringResource = "When's my next train?"
     static let description = IntentDescription("Says when your next train comes, and when to leave if you've set a walking time.")
 
-    @Parameter(title: "Train", description: "Leave empty for the train chosen in the app.")
+    @Parameter(title: "Train", description: "Leave empty for the train your default widget shows.")
     var stop: StopEntity?
 
     func perform() async throws -> some IntentResult & ProvidesDialog & ShowsSnippetView {
-        let app = SharedStore.load()
-        let selection = stop?.selection(basedOn: app) ?? app
         let now = Date.now
+        // In the default widget's commuting hours, their train, as the widget shows
+        let app = Selection.defaultWidgetTrain(at: now)
+        let selection = stop?.selection(basedOn: app) ?? app
         guard let board = try? await TrainService.board(for: selection, includingOutages: selection.elevatorAlerts, now: now) else {
             return .result(dialog: "I couldn't reach the MTA. Try again in a moment.", view: NextTrainSnippet(selection: selection, trains: []))
         }
@@ -30,11 +31,11 @@ struct StartCountdownIntent: LiveActivityIntent {
     static let title: LocalizedStringResource = "Start my train countdown"
     static let description = IntentDescription("Counts down to your next train on the Lock Screen and in the Dynamic Island.")
 
-    @Parameter(title: "Train", description: "Leave empty for the train chosen in the app.")
+    @Parameter(title: "Train", description: "Leave empty for the train your default widget shows.")
     var stop: StopEntity?
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        let app = SharedStore.load()
+        let app = Selection.defaultWidgetTrain()
         let selection = stop?.selection(basedOn: app) ?? app
         let train = try await TrainActivityController.start(for: selection)
         return .result(dialog: "Counting down to the \(Spoken.clock(train)) train.")

@@ -70,6 +70,7 @@ private struct ChangeStationStep: View {
                                                  && Change(stationID: station.id, routes: lines.across).isExpress(for: selection),
                                              isSelected: station.id == chosenID)
                         }
+                        .accessibilityAddTraits(station.id == chosenID ? .isSelected : [])
                     }
                 } else if failed {
                     Button {
@@ -121,6 +122,8 @@ private struct ChangeStationRow: View {
     let others: [String]
     let isExpress: Bool
     let isSelected: Bool
+    /// The bullets grow with the text beside them, as the train picker's do.
+    @ScaledMetric(relativeTo: .caption) private var bulletSize: CGFloat = 16
 
     var body: some View {
         HStack {
@@ -135,10 +138,15 @@ private struct ChangeStationRow: View {
                 if !others.isEmpty {
                     lines(others, note: across.isEmpty ? "Another platform" : "Other platforms", prominent: false)
                 }
+                StepFreeNote(platforms: station.platforms)
+                    .font(.caption)
             }
             Spacer()
             if isSelected {
-                Image(systemName: "checkmark").foregroundStyle(Color.accentColor)
+                // VoiceOver says it's selected instead
+                Image(systemName: "checkmark")
+                    .foregroundStyle(Color.accentColor)
+                    .accessibilityHidden(true)
             }
         }
         .contentShape(Rectangle())
@@ -147,7 +155,7 @@ private struct ChangeStationRow: View {
     private func lines(_ routes: [String], note: String, prominent: Bool) -> some View {
         HStack(spacing: 4) {
             ForEach(routes, id: \.self) { route in
-                LineBullet(route: route, size: 16)
+                LineBullet(route: route, size: min(bulletSize, 24))
             }
             Text(note)
                 .font(.caption.weight(prominent ? .semibold : .regular))
@@ -244,19 +252,8 @@ private struct ChangeLinesStep: View {
             .padding(16)
         }
         .background(Color(.systemGroupedBackground))
-        .safeAreaInset(edge: .bottom) {
-            Button {
-                done(ordered, direction)
-            } label: {
-                Text(chosen.isEmpty ? "Done" : "Done: \(Lines.list(ordered))")
-                    .font(.headline)
-                    .frame(maxWidth: .infinity, minHeight: 34)
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(chosen.isEmpty)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-            .background(.bar)
+        .chosenLinesButton(chosen.isEmpty ? "Done" : "Done: \(Lines.list(ordered))", disabled: chosen.isEmpty) {
+            done(ordered, direction)
         }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -318,7 +315,10 @@ private struct ChangeLinesStep: View {
                             .multilineTextAlignment(.leading)
                         Spacer()
                         if way == direction {
-                            Image(systemName: "checkmark").foregroundStyle(Color.accentColor)
+                            // VoiceOver says it's selected instead
+                            Image(systemName: "checkmark")
+                                .foregroundStyle(Color.accentColor)
+                                .accessibilityHidden(true)
                         }
                     }
                     .contentShape(Rectangle())
@@ -328,21 +328,16 @@ private struct ChangeLinesStep: View {
                 .accessibilityAddTraits(way == direction ? .isSelected : [])
             }
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+        .pickerCard()
     }
 
     private func platformCard(_ platform: Platform) -> some View {
         let routes = platform.routes.filter { lines.contains($0) || selection.routes.contains($0) }
-        // Another station's platform has its name: "59 St · 4 5 6 platform"
-        let place = platform.name == station.name ? "" : "\(platform.name) · "
         let heading = platform.directionName(direction)
         return VStack(alignment: .leading, spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("\(place)\(routes.map { LineStyle.of($0).label }.joined(separator: " ")) platform".uppercased())
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(.secondary)
+                // Another station's platform has its name: "59 St · 4 5 6 platform"
+                PlatformTitle(routes: routes, station: platform.name == station.name ? nil : platform.name)
                 if isAcross(platform) {
                     Label("Across the platform from your \(Lines.list(selection.routes.filter(platform.routes.contains)))",
                           systemImage: "arrow.left.arrow.right")
@@ -351,6 +346,8 @@ private struct ChangeLinesStep: View {
                     Label("Another platform: \(walkMinutes) min walk", systemImage: "figure.walk")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                    StepFreeNote(platforms: [platform], direction: direction)
+                        .font(.footnote)
                 }
                 if showsWays {
                     Label(heading.isEmpty ? "Trains end here going this way" : "To \(heading)", systemImage: "arrow.forward")
@@ -378,8 +375,6 @@ private struct ChangeLinesStep: View {
                 }
             }
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+        .pickerCard()
     }
 }

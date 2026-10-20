@@ -53,11 +53,18 @@ struct Selection: Codable, Hashable, Sendable {
         try container.encode(walkMinutes, forKey: .walkMinutes)
     }
 
+    /// The walking times the app lets you set, and a link can give.
+    static let walkRange = 0...60
+
     /// The first chosen line, whose color stands for the choice.
     var firstRoute: String { routes.first ?? "" }
 
     /// "R", or "N/R" with more than one line chosen.
     var linesLabel: String { routes.map { LineStyle.of($0).label }.joined(separator: "/") }
+
+    /// Its lines and where they go, as the app lists a train: "R Manhattan",
+    /// "N and R Manhattan".
+    var caption: String { "\(Lines.list(routes)) \(heading)" }
 
     /// Its station, direction and lines: which train this is, whatever the
     /// walking time. Also its `StopEntity` id.
@@ -70,13 +77,13 @@ struct Selection: Codable, Hashable, Sendable {
 
     /// When to set off to reach the platform as `train` arrives.
     func leaveTime(for train: Arrival) -> Date {
-        train.time.addingTimeInterval(-TimeInterval(walkMinutes * 60))
+        train.time.addingTimeInterval(-TimeInterval(walkMinutes) * 60)
     }
 
     /// The last moment to set off and still catch `train`: `leaveTime(for:)`,
     /// or later for a train held at the platform, which leaves after it arrives.
     func lastLeaveTime(for train: Arrival) -> Date {
-        train.leaves.addingTimeInterval(-TimeInterval(walkMinutes * 60))
+        train.leaves.addingTimeInterval(-TimeInterval(walkMinutes) * 60)
     }
 
     /// Trains of the chosen lines, and of any line that doesn't usually stop at
@@ -141,6 +148,14 @@ struct Selection: Codable, Hashable, Sendable {
         selection.routes = station.routes.filter(routes.contains)
         return selection.routes.isEmpty ? .fallback : selection
     }
+
+    /// As `validated()`, but nil rather than the default where the station is
+    /// gone or has lost every line chosen: for a train that isn't the app's
+    /// own choice, such as a link's, a favorite's or a shortcut's.
+    func validatedIfKnown() -> Selection? {
+        guard let station, station.routes.contains(where: routes.contains) else { return nil }
+        return validated()
+    }
 }
 
 extension Selection {
@@ -179,7 +194,9 @@ extension Selection {
               let change = Change(stationID: stationID, routes: routes.split(separator: ",").map(String.init),
                                   direction: value("going").flatMap(Direction.init(rawValue:)))
                   .validated(for: selection) else { return nil }
-        selection.walkMinutes = value("walk").flatMap(Int.init) ?? 0
+        // As the app could set it, so a link made up with a huge one can't overflow
+        let walk = value("walk").flatMap(Int.init) ?? 0
+        selection.walkMinutes = min(max(walk, walkRange.lowerBound), walkRange.upperBound)
         return (selection, change)
     }
 
@@ -212,11 +229,11 @@ extension Selection {
         let value = { (name: String) in items.first { $0.name == name }?.value }
         guard let station = value("station"), let lines = value("lines"),
               let direction = value("direction").flatMap(Direction.init(rawValue:)) else { return nil }
-        self.init(stationID: station, routes: lines.split(separator: ",").map(String.init),
-                  direction: direction, elevatorAlerts: value("elevators") == "1")
         // Not the fallback train, as validated() would give for a station
         // that's gone or lines it doesn't have: that's not the widget's train
-        guard let known = self.station, known.routes.contains(where: routes.contains) else { return nil }
-        self = validated()
+        guard let known = Selection(stationID: station, routes: lines.split(separator: ",").map(String.init),
+                                    direction: direction, elevatorAlerts: value("elevators") == "1")
+            .validatedIfKnown() else { return nil }
+        self = known
     }
 }

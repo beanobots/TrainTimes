@@ -56,7 +56,7 @@ struct AlertsSheet: View {
                     }
                 } header: {
                     if let station = selection.station {
-                        Text("\(station.name) · \(Lines.list(selection.routes)) \(selection.heading)")
+                        Text("\(station.name) · \(selection.caption)")
                     }
                 }
             }

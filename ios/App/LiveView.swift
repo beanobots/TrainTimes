@@ -1,5 +1,6 @@
 import CoreLocation
 import MapKit
+import Observation
 import SwiftUI
 import UIKit
 
@@ -60,19 +61,12 @@ struct LiveView: View {
     @Environment(WidgetStore.self) private var widgets
     @Environment(SettingsStore.self) private var settings
     @Environment(\.accessibilityDifferentiateWithoutColor) private var withoutColor
-    @Environment(\.scenePhase) private var scenePhase
     @State private var location = NearbyLocation()
     @State private var path = NavigationPath()
     /// How many trains the widgets have opened, so each gets a page of its own.
     @State private var openings = 0
-    /// Each train's next arrivals, by `Selection.trainID`, as last fetched.
-    @State private var trains: [String: [Arrival]] = [:]
-    /// The `Selection.trainID`s whose trains couldn't be fetched the last time.
-    @State private var failed: Set<String> = []
-    /// Whether any of the last load's trains couldn't be fetched.
-    @State private var loadFailed = false
-    /// Moves along every few seconds so the minutes count down.
-    @State private var now = Date.now
+    /// The next trains of every train in both lists.
+    @State private var live = LiveTrains()
     /// Adding a favorite starts by choosing its train.
     @State private var choosingTrain = false
     @State private var chosenTrain: Selection?
@@ -178,7 +172,7 @@ struct LiveView: View {
                                     favorites.add(widget.selection)
                                 } label: {
                                     Text(widget.title)
-                                    Text("\(Lines.list(widget.selection.routes)) \(widget.selection.heading)")
+                                    Text(widget.selection.caption)
                                 }
                                 .disabled(favorites.contains(widget.selection))
                             }
@@ -223,28 +217,11 @@ struct LiveView: View {
             .onChange(of: here, initial: true) { _, here in
                 nearby = here.map { Nearby.stations(near: $0, limit: 3) } ?? []
             }
-            .refreshable {
+            // New times every minute, and straight away for a new train or
+            // station; pulled down or back in the app, it finds you again too
+            .updatingTrains(live, id: everyTrain.map(\.trainID), refreshing: {
                 if location.isAllowed && pin == nil { location.find() }
-                await load()
-            }
-            // New times every minute, and straight away for a new train or station
-            .task(id: everyTrain.map(\.trainID)) {
-                while !Task.isCancelled {
-                    await load()
-                    try? await Task.sleep(for: .seconds(60))
-                }
-            }
-            .task {
-                while !Task.isCancelled {
-                    try? await Task.sleep(for: .seconds(10))
-                    now = .now
-                }
-            }
-            .onChange(of: scenePhase) { _, phase in
-                guard phase == .active else { return }
-                if location.isAllowed && pin == nil { location.find() }
-                Task { await load() }
-            }
+            }, load: load)
             // With the last favorite gone the Edit button goes too, so editing ends with it
             .onChange(of: favorites.favorites.isEmpty) { _, isEmpty in
                 if isEmpty { editMode = .inactive }
@@ -254,9 +231,8 @@ struct LiveView: View {
 
     private var favoritesSection: some View {
         Section {
-            if loadFailed {
-                Label("Couldn't reach the MTA. Pull down to try again.", systemImage: "wifi.exclamationmark")
-                    .foregroundStyle(.secondary)
+            if !live.failed.isEmpty {
+                UnreachableNote()
             }
             if favorites.favorites.isEmpty {
                 Text("Tap ☆ on any train, or +, to keep it here.")
@@ -266,9 +242,9 @@ struct LiveView: View {
                 NavigationLink(value: selection) {
                     FavoriteRow(
                         selection: selection,
-                        trains: trains[selection.trainID].map { selection.catchable($0, now: now) },
-                        failed: failed.contains(selection.trainID),
-                        now: now,
+                        trains: live.trains[selection.trainID].map { selection.catchable($0, now: live.now) },
+                        failed: live.failed.contains(selection.trainID),
+                        now: live.now,
                         marksLive: marksLive,
                         marksScheduled: marksScheduled,
                         showsTimes: !editMode.isEditing
@@ -362,10 +338,10 @@ struct LiveView: View {
                     route: route,
                     trains: { selection in
                         // Each line's own trains, not those of another line running on its tracks
-                        trains[selection.trainID]?.filter { $0.route == route && $0.leaves > now }
+                        live.trains[selection.trainID]?.filter { $0.route == route && $0.leaves > live.now }
                     },
-                    failed: { failed.contains($0.trainID) },
-                    now: now,
+                    failed: { live.failed.contains($0.trainID) },
+                    now: live.now,
                     marksLive: marksLive,
                     marksScheduled: marksScheduled,
                     open: { path.append($0) }
@@ -378,26 +354,10 @@ struct LiveView: View {
     /// its row shows a dash.
     private func load() async {
         let selections = everyTrain
-        // With nothing to fetch, nothing failed
-        guard !selections.isEmpty else {
-            failed = []
-            loadFailed = false
-            return
-        }
         // Nearby rows show only each line's own trains, which are all in its
         // own feeds; a favorite shows those of other lines running on it too
         let nearbyOnly = Set(selections.map(\.trainID)).subtracting(favorites.favorites.map(\.trainID))
-        let fetched = await TrainService.trains(for: selections, ownLinesOnly: nearbyOnly)
-        // A newer list cancels this load; that isn't a failure
-        guard !Task.isCancelled else { return }
-        // A train left out couldn't be fetched: its old times go, rather than
-        // count down as if they were new
-        let missing = Set(selections.map(\.trainID)).subtracting(fetched.keys)
-        trains.merge(fetched) { $1 }
-        for trainID in missing { trains[trainID] = nil }
-        failed = failed.subtracting(fetched.keys).union(missing)
-        now = .now
-        loadFailed = !missing.isEmpty
+        await live.load(selections, ownLinesOnly: nearbyOnly)
     }
 }
 
@@ -420,7 +380,7 @@ private struct FavoriteRow: View {
                 .frame(width: 40)
             VStack(alignment: .leading, spacing: 2) {
                 Text(selection.station?.name ?? "Train").font(.headline)
-                Text("\(Lines.list(selection.routes)) \(selection.heading)")
+                Text(selection.caption)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -461,12 +421,7 @@ private struct StationLive: View {
     let marksLive: Bool
     let marksScheduled: Bool
     let open: (Selection) -> Void
-    /// Each train's next arrivals, by `Selection.trainID`, as last fetched.
-    @State private var trains: [String: [Arrival]] = [:]
-    /// The `Selection.trainID`s whose trains couldn't be fetched the last time.
-    @State private var failed: Set<String> = []
-    /// Moves along every few seconds so the minutes count down.
-    @State private var now = Date.now
+    @State private var live = LiveTrains()
 
     private var selections: [Selection] {
         station.routes.flatMap { route in
@@ -476,9 +431,8 @@ private struct StationLive: View {
 
     var body: some View {
         List {
-            if !failed.isEmpty {
-                Label("Couldn't reach the MTA. Pull down to try again.", systemImage: "wifi.exclamationmark")
-                    .foregroundStyle(.secondary)
+            if !live.failed.isEmpty {
+                UnreachableNote()
             }
             Section {
                 ForEach(routes, id: \.self) { route in
@@ -487,10 +441,10 @@ private struct StationLive: View {
                         route: route,
                         trains: { selection in
                             // Each line's own trains, not those of another line running on its tracks
-                            trains[selection.trainID]?.filter { $0.route == route && $0.leaves > now }
+                            live.trains[selection.trainID]?.filter { $0.route == route && $0.leaves > live.now }
                         },
-                        failed: { failed.contains($0.trainID) },
-                        now: now,
+                        failed: { live.failed.contains($0.trainID) },
+                        now: live.now,
                         marksLive: marksLive,
                         marksScheduled: marksScheduled,
                         open: open
@@ -501,31 +455,10 @@ private struct StationLive: View {
             }
         }
         .navigationTitle(station.name)
-        .refreshable { await load() }
-        // New times every minute
-        .task(id: station.id) {
-            while !Task.isCancelled {
-                await load()
-                try? await Task.sleep(for: .seconds(60))
-            }
+        .updatingTrains(live, id: station.id) {
+            // Each line's own trains are all in its own feeds
+            await live.load(selections, includingOtherLines: false)
         }
-        .task {
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(10))
-                now = .now
-            }
-        }
-    }
-
-    private func load() async {
-        // Each line's own trains are all in its own feeds
-        let fetched = await TrainService.trains(for: selections, includingOtherLines: false)
-        guard !Task.isCancelled else { return }
-        // One left out couldn't be fetched: its old times go, rather than
-        // count down as if they were new
-        trains = fetched
-        failed = Set(selections.map(\.trainID)).subtracting(fetched.keys)
-        now = .now
     }
 }
 
@@ -535,20 +468,14 @@ private struct TransferLive: View {
     let page: TransferPage
     let marksLive: Bool
     let marksScheduled: Bool
-    /// Each train's next arrivals, by `Selection.trainID`, as last fetched.
-    @State private var trains: [String: [Arrival]] = [:]
-    /// The `Selection.trainID`s whose trains couldn't be fetched the last time.
-    @State private var failed: Set<String> = []
-    /// Moves along every few seconds so the minutes count down.
-    @State private var now = Date.now
+    @State private var live = LiveTrains()
 
     private var selections: [Selection] { [page.selection] + page.changeTrains }
 
     var body: some View {
         List {
-            if !failed.isEmpty {
-                Label("Couldn't reach the MTA. Pull down to try again.", systemImage: "wifi.exclamationmark")
-                    .foregroundStyle(.secondary)
+            if !live.failed.isEmpty {
+                UnreachableNote()
             }
             Section("Your train") {
                 row(page.selection)
@@ -560,19 +487,8 @@ private struct TransferLive: View {
             }
         }
         .navigationTitle("Transfer")
-        .refreshable { await load() }
-        // New times every minute
-        .task(id: selections.map(\.trainID)) {
-            while !Task.isCancelled {
-                await load()
-                try? await Task.sleep(for: .seconds(60))
-            }
-        }
-        .task {
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(10))
-                now = .now
-            }
+        .updatingTrains(live, id: selections.map(\.trainID)) {
+            await live.load(selections)
         }
     }
 
@@ -581,24 +497,104 @@ private struct TransferLive: View {
         NavigationLink(value: selection) {
             FavoriteRow(
                 selection: selection,
-                trains: trains[selection.trainID].map { selection.catchable($0, now: now) },
-                failed: failed.contains(selection.trainID),
-                now: now,
+                trains: live.trains[selection.trainID].map { selection.catchable($0, now: live.now) },
+                failed: live.failed.contains(selection.trainID),
+                now: live.now,
                 marksLive: marksLive,
                 marksScheduled: marksScheduled,
                 showsTimes: true
             )
         }
     }
+}
 
-    private func load() async {
-        let fetched = await TrainService.trains(for: selections)
+/// The next trains of what a page of the Live tab lists, fetched together:
+/// your favorites and the stations near you, a station's every line, or a
+/// transfer's trains.
+@MainActor @Observable
+final class LiveTrains {
+    /// Each train's next arrivals, by `Selection.trainID`, as last fetched.
+    private(set) var trains: [String: [Arrival]] = [:]
+    /// The `Selection.trainID`s whose trains couldn't be fetched the last time.
+    private(set) var failed: Set<String> = []
+    /// Moves along every few seconds so the minutes count down.
+    var now = Date.now
+
+    /// New times for `selections`, as `TrainService.trains(for:)` fetches
+    /// them. One left out couldn't be fetched: its old times go, rather than
+    /// count down as if they were new.
+    func load(_ selections: [Selection], includingOtherLines: Bool = true, ownLinesOnly: Set<String> = []) async {
+        // With nothing to fetch, nothing failed
+        guard !selections.isEmpty else {
+            trains = [:]
+            failed = []
+            return
+        }
+        let fetched = await TrainService.trains(for: selections, includingOtherLines: includingOtherLines,
+                                                ownLinesOnly: ownLinesOnly)
+        // A newer list cancels this load; that isn't a failure
         guard !Task.isCancelled else { return }
-        // One left out couldn't be fetched: its old times go, rather than
-        // count down as if they were new
         trains = fetched
         failed = Set(selections.map(\.trainID)).subtracting(fetched.keys)
         now = .now
+    }
+}
+
+extension View {
+    /// Sets `now` to the time every 10 seconds while the view is up, so
+    /// between loads the minutes count down and trains you can no longer
+    /// catch drop off.
+    func ticking(_ now: Binding<Date>) -> some View {
+        task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(10))
+                now.wrappedValue = .now
+            }
+        }
+    }
+
+    /// Keeps `live` up to date with `load`: straight away and every minute,
+    /// starting over whenever `id` changes, and after `refreshing` when the
+    /// list is pulled down or the app comes back. In between, its `now` ticks.
+    fileprivate func updatingTrains<ID: Equatable>(_ live: LiveTrains, id: ID, refreshing: @escaping () -> Void = {},
+                                                   load: @escaping () async -> Void) -> some View {
+        modifier(UpdatingTrains(live: live, id: id, refreshing: refreshing, load: load))
+    }
+}
+
+private struct UpdatingTrains<ID: Equatable>: ViewModifier {
+    let live: LiveTrains
+    let id: ID
+    let refreshing: () -> Void
+    let load: () async -> Void
+    @Environment(\.scenePhase) private var scenePhase
+
+    func body(content: Content) -> some View {
+        content
+            .refreshable {
+                refreshing()
+                await load()
+            }
+            .task(id: id) {
+                while !Task.isCancelled {
+                    await load()
+                    try? await Task.sleep(for: .seconds(60))
+                }
+            }
+            .ticking(Binding { live.now } set: { live.now = $0 })
+            .onChange(of: scenePhase) { _, phase in
+                guard phase == .active else { return }
+                refreshing()
+                Task { await load() }
+            }
+    }
+}
+
+/// Over a page's trains when some of them couldn't be fetched.
+private struct UnreachableNote: View {
+    var body: some View {
+        Label("Couldn't reach the MTA. Pull down to try again.", systemImage: "wifi.exclamationmark")
+            .foregroundStyle(.secondary)
     }
 }
 

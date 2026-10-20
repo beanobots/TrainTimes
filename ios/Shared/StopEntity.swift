@@ -20,13 +20,14 @@ struct StopEntity: AppEntity {
         id = Selection.trainID(stationID: stationID, direction: direction, routes: routes)
     }
 
+    /// Nil where the station's gone or has none of the lines left, as for any
+    /// train that isn't the app's own. The lines are kept as they were, so the
+    /// id stays the same; `selection(basedOn:)` leaves out any the station has lost.
     init?(id: String) {
         let parts = id.split(separator: ":").map(String.init)
-        guard parts.count == 3,
-              let direction = Direction(rawValue: parts[1]),
-              let station = StationDirectory.station(id: parts[0]) else { return nil }
+        guard parts.count == 3, let direction = Direction(rawValue: parts[1]) else { return nil }
         let routes = parts[2].split(separator: ",").map(String.init)
-        guard !routes.isEmpty, routes.allSatisfy(station.routes.contains) else { return nil }
+        guard Selection(stationID: parts[0], routes: routes, direction: direction).validatedIfKnown() != nil else { return nil }
         self.init(stationID: parts[0], direction: direction, routes: routes)
     }
 
@@ -52,7 +53,7 @@ struct StopEntity: AppEntity {
     /// lines together, and of all its lines together, where those are more than one.
     static func choices(at station: Station) -> [StopEntity] {
         var lines = station.routes.map { [$0] }
-        let together = station.platforms.map { platform in station.routes.filter(platform.routes.contains) } + [station.routes]
+        let together = station.platforms.map(station.lines(on:)) + [station.routes]
         for routes in together where routes.count > 1 && !lines.contains(routes) {
             lines.append(routes)
         }
@@ -70,6 +71,12 @@ extension Selection {
     /// open is kept by this, so a widget that leaves an alert out doesn't close
     /// it on another that mentions it.
     var alertID: String { "\(trainID) \(elevatorAlerts) \(serviceAlerts)" }
+
+    /// What Siri and its countdown go by when no train is picked: the train
+    /// the default widget shows at `date`, in its commuting hours theirs.
+    static func defaultWidgetTrain(at date: Date = .now) -> Selection {
+        SharedStore.loadWidgets().defaultWidget.shown(at: date).selection
+    }
 }
 
 struct StopQuery: EntityStringQuery {
@@ -77,20 +84,18 @@ struct StopQuery: EntityStringQuery {
         identifiers.compactMap { StopEntity(id: $0) }
     }
 
-    /// Search by station and borough, e.g. "prospect" or "86 st brooklyn".
+    /// Search by station and borough, as the app's train picker does, e.g.
+    /// "prospect", "86 st brooklyn" or "34th street".
     func entities(matching string: String) async throws -> [StopEntity] {
-        let words = string.lowercased().split(separator: " ")
-        let matches = StopEntity.all.filter { stop in
-            guard let station = stop.station else { return false }
-            let text = "\(station.name) \(station.borough)".lowercased()
-            return words.allSatisfy { text.contains($0) }
-        }
+        let search = StationSearch(string)
+        let stations = Set(StationDirectory.all.filter(search.matches).map(\.id))
+        let matches = StopEntity.all.filter { stations.contains($0.stationID) }
         return Array(matches.prefix(60))
     }
 
-    /// The app's choice first, then the other lines and direction at that station.
+    /// The default widget's train first, then the other lines and direction at that station.
     func suggestedEntities() async throws -> [StopEntity] {
-        let app = SharedStore.load()
+        let app = Selection.defaultWidgetTrain()
         guard let station = app.station else { return [] }
         let chosen = StopEntity(stationID: station.id, direction: app.direction, routes: app.routes)
         return [chosen] + StopEntity.choices(at: station).filter { $0.id != chosen.id }

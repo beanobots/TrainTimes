@@ -45,8 +45,49 @@ struct Platform: Codable, Hashable, Identifiable, Sendable {
         direction == .north ? north : south
     }
 
+    /// The one way a partly accessible platform is step-free, where `adaNotes`
+    /// names it alone: "Downtown only", "Manhattan-bound only", "Southbound
+    /// Only". Nil for any other platform, and where the notes name neither
+    /// way or both, or only some of its trains ("Uptown & The Bronx local only").
+    var stepFreeWay: Direction? {
+        guard ada == 2 else { return nil }
+        let notes = adaNotes.lowercased()
+        guard !notes.contains("local"), !notes.contains("express") else { return nil }
+        let ways = Direction.allCases.filter { way in
+            let name = directionName(way).lowercased()
+            return notes.hasPrefix(way == .north ? "northbound" : "southbound") || (!name.isEmpty && notes.hasPrefix(name))
+        }
+        return ways.count == 1 ? ways[0] : nil
+    }
+
+    /// Whether there's step-free access to it going `direction`, or with
+    /// none, either way. Nil at a partly accessible platform where that
+    /// can't be told: with no way given, or its notes don't say which.
+    func isStepFree(going direction: Direction? = nil) -> Bool? {
+        switch ada {
+        case 1: true
+        case 2: direction.flatMap { direction in stepFreeWay.map { $0 == direction } }
+        default: false
+        }
+    }
+
     /// Where its first line comes in the MTA's order.
     fileprivate var rank: Int { routes.map(Lines.rank).min() ?? Int.max }
+}
+
+extension Array where Element == Platform {
+    /// What step-free mode says of these platforms, going `direction` once
+    /// it's chosen: nothing where every one is step-free; "No step-free
+    /// access" where none is; a partly accessible one's own note, such as
+    /// "Accessible: Downtown only", where it's the only one; and otherwise
+    /// "Step-free on some platforms".
+    func stepFreeNote(going direction: Direction? = nil) -> String? {
+        let access = map { $0.isStepFree(going: direction) }
+        if access.allSatisfy({ $0 == true }) { return nil }
+        if access.allSatisfy({ $0 == false }) { return "No step-free access" }
+        if count == 1 { return self[0].accessibility }
+        return "Step-free on some platforms"
+    }
 }
 
 /// A station as riders know it: the platforms of one name that passageways
@@ -104,6 +145,11 @@ struct Station: Hashable, Identifiable, Sendable {
     /// The platforms the lines of `routes` stop at.
     func platforms(serving routes: [String]) -> [Platform] {
         platforms.filter { $0.routes.contains(where: routes.contains) }
+    }
+
+    /// The lines that stop at `platform`, one of its own, in the station's order.
+    func lines(on platform: Platform) -> [String] {
+        routes.filter(platform.routes.contains)
     }
 
     /// Where the lines of `routes` go in `direction`: "Manhattan", or "Northbound"
@@ -242,4 +288,69 @@ enum StationDirectory {
     private static func platform(forStop stop: String) -> Platform? {
         platformsByID[stop] ?? platformsByID[String(stop.dropLast())]
     }
+}
+
+/// A search for stations by name and borough, as the train picker and a
+/// shortcut's train have it: "prospect", "86 st brooklyn", "34th street" or
+/// "times square". Each of its words starts one of the station's, whatever
+/// the case or punctuation, with the MTA's abbreviations ("St", "Av", "Sq")
+/// standing for the words written out and a number for its ordinal ("34th").
+struct StationSearch {
+    private let words: [String]
+
+    init(_ text: String) {
+        words = Self.words(in: text)
+    }
+
+    /// Whether it finds `station`: every one, with nothing searched for.
+    func matches(_ station: Station) -> Bool {
+        guard !words.isEmpty else { return true }
+        let forms = Self.formsByStation[station.id] ?? Self.forms(of: station)
+        return words.allSatisfy { word in forms.contains { $0.hasPrefix(word) } }
+    }
+
+    /// Lowercased, apostrophes dropped ("St Mary's" is "st marys"), and split
+    /// at anything else that isn't a letter or a digit.
+    private static func words(in text: String) -> [String] {
+        text.lowercased()
+            .filter { $0 != "'" && $0 != "’" }
+            .split { !$0.isLetter && !$0.isNumber }
+            .map(String.init)
+    }
+
+    /// The MTA's abbreviations in station names, and the words they stand for.
+    private static let abbreviations: [String: [String]] = [
+        "st": ["street", "saint"], "sts": ["streets"], "av": ["avenue"], "avs": ["avenues", "aves"],
+        "sq": ["square"], "blvd": ["boulevard"], "pkwy": ["parkway"], "rd": ["road"], "pl": ["place"],
+        "pk": ["park"], "dr": ["drive"], "ln": ["lane"], "hwy": ["highway"], "tpke": ["turnpike"],
+        "hts": ["heights"], "ctr": ["center", "centre"], "mt": ["mount"], "ft": ["fort"], "jct": ["junction"],
+        "plz": ["plaza"], "e": ["east"], "w": ["west"], "n": ["north"], "wash": ["washington"],
+    ]
+
+    /// The other way round, for a name with the word written out: "Avenue H", "Fort Hamilton Pkwy".
+    private static let shortenings: [String: [String]] = abbreviations.reduce(into: [:]) { shortenings, entry in
+        for word in entry.value { shortenings[word, default: []].append(entry.key) }
+    }
+
+    /// Each word of a station's name and borough, as written, abbreviated or
+    /// written out, and a number as its ordinal too: "34" is also "34th".
+    private static func forms(of station: Station) -> [String] {
+        words(in: "\(station.name) \(station.borough)").flatMap { word -> [String] in
+            var forms = [word]
+            forms += abbreviations[word] ?? []
+            forms += shortenings[word] ?? []
+            if let number = Int(word) { forms.append(ordinal(number)) }
+            return forms
+        }
+    }
+
+    /// "1st", "22nd", "103rd", "111th".
+    private static func ordinal(_ number: Int) -> String {
+        let suffix = (11...13).contains(number % 100) ? "th" : [1: "st", 2: "nd", 3: "rd"][number % 10] ?? "th"
+        return "\(number)\(suffix)"
+    }
+
+    /// Every station's forms, by its id, worked out once.
+    private static let formsByStation: [String: [String]] = Dictionary(
+        StationDirectory.all.map { ($0.id, forms(of: $0)) }, uniquingKeysWith: { first, _ in first })
 }
