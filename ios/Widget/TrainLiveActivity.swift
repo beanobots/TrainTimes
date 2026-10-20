@@ -149,11 +149,9 @@ private func countdown(_ context: ActivityViewContext<TrainActivityAttributes>) 
 /// takes all the width it's offered, and iOS drops anything joined to its text,
 /// so it's held to the width of its digits by a hidden stand-in for them.
 private func markedCountdown(_ context: ActivityViewContext<TrainActivityAttributes>, markSize: CGFloat, size: CGFloat) -> some View {
-    let remaining = shownState(context).train.timeIntervalSinceNow
-    let placeholder = remaining >= 3600 ? "0:00:00" : remaining >= 600 ? "00:00" : "0:00"
-    return HStack(spacing: 4) {
+    HStack(spacing: 4) {
         statusMark(context, size: markSize)
-        Text(placeholder)
+        Text(TimerText.placeholder(seconds: shownState(context).train.timeIntervalSinceNow))
             .hidden()
             .overlay(alignment: .trailing) {
                 countdown(context).multilineTextAlignment(.trailing)

@@ -204,17 +204,34 @@ struct TrainDetail: View {
         } header: {
             Text("On your way")
         } footer: {
-            Text("Counts down to your train on the Lock Screen and in the Dynamic Island until you stop it, in place of any other countdown. A widget's walk button starts and stops it too. Tap ↻ on it, or open the app, for new times.")
+            Text("Counts down to your train on the Lock Screen and in the Dynamic Island until you stop it, in place of any other countdown. A widget's walk button starts and stops it too. While this page is open, it gets the times shown here; otherwise tap ↻ on it, or open the app, for new times.")
+                .accessibilityLabel("Counts down to your train on the Lock Screen and in the Dynamic Island until you stop it, in place of any other countdown. A widget's walk button starts and stops it too. While this page is open, it gets the times shown here; otherwise tap Refresh on it, or open the app, for new times.")
+        }
+        // A problem starting one is the other train's
+        .onChange(of: selection.trainID) { countdownProblem = nil }
+        // The countdown gets the times this page fetches, so it moves on with them
+        .onChange(of: timesFetched) {
+            guard countdownTrain != nil, let board, let fetched = timesFetched else { return }
+            let shown = selection
+            Task {
+                let train = await TrainActivityController.update(for: shown, from: board, fetched: fetched)
+                if selection.trainID == shown.trainID { countdownTrain = train }
+            }
         }
     }
 
     private func startCountdown() async {
+        let trainID = selection.trainID
         startingCountdown = true
         defer { startingCountdown = false }
         do {
-            countdownTrain = try await TrainActivityController.start(for: selection)
+            let train = try await TrainActivityController.start(for: selection)
+            // Unless another train was chosen meanwhile
+            guard selection.trainID == trainID else { return }
+            countdownTrain = train
             countdownProblem = nil
         } catch {
+            guard selection.trainID == trainID else { return }
             countdownProblem = error.localizedDescription
         }
     }

@@ -10,7 +10,13 @@ final class SettingsStore {
         didSet {
             guard settings != oldValue else { return }
             SharedStore.saveSettings(settings)
-            WidgetCenter.shared.reloadAllTimelines()
+            // Only the widgets that read what changed: no widget reads
+            // step-free mode, and Trains near you doesn't read Larger widget text
+            var read = settings
+            read.stepFree = oldValue.stepFree
+            if read != oldValue { WidgetCenter.shared.reloadTrainWidgets() }
+            read.largerWidgetText = oldValue.largerWidgetText
+            if read != oldValue { WidgetCenter.shared.reloadTimelines(ofKind: Nearby.widgetKind) }
             // The countdown's alert changes only with new times; its live and
             // scheduled marks are redrawn at once, without waiting on the network
             if settings.alertKinds != oldValue.alertKinds {
@@ -80,14 +86,19 @@ struct SettingsView: View {
                     }
                     Toggle(isOn: withoutColor ? .constant(true) : $store.settings.marksLiveTimes) {
                         Text("Mark live times")
+                        // The mark is read as the widgets have it, "Live"
                         Text(withoutColor
                              ? "On while Differentiate Without Color is on in the Settings app."
-                             : "Live predictions get \(Image(systemName: "dot.radiowaves.up.forward")) as well as their green.")
+                             : "Live predictions get \(Image(systemName: LiveMark.symbol)) as well as their green.")
+                            .accessibilityLabel(withoutColor
+                                                ? "On while Differentiate Without Color is on in the Settings app."
+                                                : "Live predictions are marked Live as well as green.")
                     }
                     .disabled(withoutColor)
                     Toggle(isOn: $store.settings.marksScheduledTimes) {
                         Text("Mark scheduled times")
-                        Text("Timetable times get \(Image(systemName: "clock")), so they stand out from live predictions.")
+                        Text("Timetable times get \(Image(systemName: ScheduledMark.symbol)), so they stand out from live predictions.")
+                            .accessibilityLabel("Timetable times are marked Scheduled, so they stand out from live predictions.")
                     }
                 } header: {
                     Text("Accessibility")

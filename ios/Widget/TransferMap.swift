@@ -21,19 +21,26 @@ struct TransferTrack: View {
     private var height: CGFloat { otherY + (showsNote ? 28 : 14) }
 
     var body: some View {
+        let layout = TransferMapLayout(connection: connection, selection: selection, now: now, maxRows: 5)
         VStack(alignment: .leading, spacing: 8) {
             labels
-            if let layout = TransferMapLayout(connection: connection, selection: selection, now: now, maxRows: 5) {
+            if let layout {
                 GeometryReader { geometry in
                     diagram(layout, width: geometry.size.width)
                 }
                 .frame(height: height)
+                // Its names and times sit at set places along the tracks, which
+                // larger text would run into each other
+                .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
             } else {
                 Text("The MTA hasn't said yet")
                     .font(BoardStyle.large.stopFont)
                     .foregroundStyle(Color.boardGray)
             }
         }
+        // The tracks and the trains on them are drawn, so VoiceOver has them in words
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(layout?.spoken ?? "Where they are: the MTA hasn't said yet")
     }
 
     private var localColor: Color { Color(hex: LineStyle.of(selection.firstRoute).color) }
@@ -127,9 +134,7 @@ struct TransferTrack: View {
         let isTrainStop = row.id == min(layout.rows.count - 1, Int(layout.firstRow.rounded(.down)))
         let yours = row.kind == .origin
         return Text(row.name)
-            .font(.caption2.weight(yours ? .bold : isTrainStop ? .semibold : .medium))
-            .italic(row.kind == .folded)
-            .foregroundStyle(yours || isTrainStop ? Color.boardText : passed ? Color.boardDim : Color.boardGray)
+            .mapStop(.caption2, yours: yours, trainStop: isTrainStop, folded: row.kind == .folded, passed: passed)
             .lineLimit(1)
             .minimumScaleFactor(0.7)
     }
@@ -147,147 +152,6 @@ struct TransferTrack: View {
     }
 }
 
-/// Where the track's stops go across the widget: the change near the right
-/// edge, the others evenly spaced to its left, with room before the first for
-/// a train still on its way to it.
-struct TrackGeometry {
-    let right: CGFloat
-    let spacing: CGFloat
-
-    /// The change's way in from the right edge, past the platform's outline.
-    static let changeInset: CGFloat = 12
-    /// The furthest left a train is drawn.
-    static let leftmost: CGFloat = 10
-
-    init(width: CGFloat, stops: Int) {
-        right = width - Self.changeInset
-        spacing = (right - Self.leftmost) / (CGFloat(max(1, stops - 1)) + 0.6)
-    }
-
-    /// Where a stop is, or a train between stops, counted from the change.
-    func x(_ row: CGFloat) -> CGFloat {
-        right - row * spacing
-    }
-}
-
-/// Which stops the map shows, from the change back to where your train is, and
-/// where the two trains are among them, in stops from the change.
-struct TransferMapLayout {
-    enum Kind: Equatable {
-        case change, origin, stop, folded
-    }
-
-    struct Row: Identifiable {
-        /// Its place in the list, from the top.
-        let id: Int
-        let name: String
-        let kind: Kind
-        /// When your train is due there; for folded stops, midway between them.
-        let time: Date
-        /// The train it meets stops here too.
-        let shared: Bool
-    }
-
-    /// From the change, at the right end of the track, back to the left end.
-    let rows: [Row]
-    /// Where your train is: 0 at the change, 1.5 midway between the second and
-    /// third stops, and past the last while it's on its way to it.
-    let firstRow: CGFloat
-    /// Where the train it meets would be on your train's way with as long to
-    /// go to the change; nil without one.
-    let nextRow: CGFloat?
-    /// Where the train it meets is, when it's further off than the map shows:
-    /// "D at 9 Av", "D between 9 Av and 36 St".
-    let nextNote: String?
-
-    /// `maxRows` is 4 or more.
-    init?(connection: Connection, selection: Selection, now: Date, maxRows: Int = 6) {
-        let stops = connection.arrival.approach
-        let yours = Set(selection.stopIDs)
-        guard let origin = stops.firstIndex(where: { yours.contains($0.id) }), origin < stops.count - 1 else { return nil }
-        let last = stops.count - 1
-
-        // The change first, then the stops between it and yours, yours, the
-        // stops between yours and where the train is, and that. When there are
-        // too many, the longer of the runs between folds into one row, then
-        // the other.
-        let between = Array((origin + 1)..<last)
-        let before = origin > 1 ? Array(1..<origin) : []
-        let room = maxRows - (origin > 0 ? 3 : 2)
-        var foldBetween = false
-        var foldBefore = false
-        var shown = between.count + before.count
-        for run in [between, before].sorted(by: { $0.count > $1.count }) where shown > room && run.count >= 2 {
-            if run == between { foldBetween = true } else { foldBefore = true }
-            shown -= run.count - 1
-        }
-        var groups: [[Int]] = [[last]]
-        groups += foldBetween ? [Array(between.reversed())] : between.reversed().map { [$0] }
-        groups.append([origin])
-        groups += foldBefore ? [Array(before.reversed())] : before.reversed().map { [$0] }
-        if origin > 0 { groups.append([0]) }
-
-        // Stations the train it meets calls at on its way, where the two share a platform
-        let station = { (stop: String) in StationDirectory.station(id: String(stop.dropLast()))?.id }
-        let theirs = Set((connection.next?.approach ?? []).compactMap { station($0.id) })
-
-        let rows = groups.enumerated().map { (index, group) -> Row in
-            if group.count > 1 {
-                let times = group.map { stops[$0].time.timeIntervalSince1970 }
-                let middle = Date(timeIntervalSince1970: ((times.min() ?? 0) + (times.max() ?? 0)) / 2)
-                return Row(id: index, name: "\(group.count) more stops", kind: .folded, time: middle, shared: false)
-            }
-            let stop = group[0]
-            let kind: Kind = stop == last ? .change : stop == origin ? .origin : .stop
-            let shared = stop == last || (station(stops[stop].id).map(theirs.contains) ?? false)
-            return Row(id: index, name: stops[stop].name, kind: kind, time: stops[stop].time, shared: shared)
-        }
-        self.rows = rows
-        firstRow = Self.row(at: now, in: rows)
-
-        if let next = connection.next {
-            // Your train gets to the change at the top row's time; the train it
-            // meets is where yours would be with as long to go
-            let row = Self.row(at: connection.arrival.time.addingTimeInterval(-next.time.timeIntervalSince(now)), in: rows)
-            nextRow = row
-            nextNote = row > CGFloat(rows.count - 1) ? Self.note(for: next, now: now) : nil
-        } else {
-            nextRow = nil
-            nextNote = nil
-        }
-    }
-
-    /// Where your train is at `time`: between two stops by how far it has come
-    /// from one to the next, or before the last while it's on its way there.
-    private static func row(at time: Date, in rows: [Row]) -> CGFloat {
-        guard let top = rows.first, time < top.time else { return 0 }
-        for index in rows.indices.dropLast() where time >= rows[index + 1].time {
-            let upper = rows[index].time
-            let lower = rows[index + 1].time
-            let span = upper.timeIntervalSince(lower)
-            let fraction = span > 0 ? upper.timeIntervalSince(time) / span : 0
-            return CGFloat(index) + CGFloat(min(1, max(0, fraction)))
-        }
-        return CGFloat(rows.count - 1) + 0.6
-    }
-
-    /// "D at 36 St", "D between 9 Av and 36 St"; the feed leaves out the stops
-    /// a train has passed, so often just "D heading for 36 St"
-    private static func note(for train: Arrival, now: Date) -> String? {
-        guard let place = train.place(now: now) else { return nil }
-        switch place {
-        case .starting:
-            return train.approach.first.map { "\(train.lineLabel) starting at \($0.name)" }
-        case .at(let index):
-            return "\(train.lineLabel) at \(train.approach[index].name)"
-        case .approaching(let index) where index > 0:
-            return "\(train.lineLabel) between \(train.approach[index - 1].name) and \(train.approach[index].name)"
-        case .approaching(let index):
-            return "\(train.lineLabel) heading for \(train.approach[index].name)"
-        }
-    }
-}
-
 /// The two tracks: your train's along the top, dashed past folded stops, with a
 /// dot at each stop and a ring at yours; below it a line for each colour of the
 /// lines changed to; and a platform's outline across both where they stop
@@ -302,13 +166,8 @@ private struct TrackRails: View {
     @Environment(\.widgetRenderingMode) private var renderingMode
 
     var body: some View {
-        // Tinted and clear Home Screens draw the widget in one color, keeping
-        // only how opaque each part is: there, what's filled with the widget's
-        // background here is cut out of the tracks instead
         let tinted = renderingMode != .fullColor
         Canvas { context, _ in
-            var eraser = context
-            eraser.blendMode = .destinationOut
             let right = track.x(0)
             let left = track.x(CGFloat(layout.rows.count - 1))
             let bar = { (y: CGFloat, thickness: CGFloat, from: CGFloat, to: CGFloat) in
@@ -319,16 +178,9 @@ private struct TrackRails: View {
             }
 
             for row in layout.rows.dropLast() {
-                let from = track.x(CGFloat(row.id + 1))
-                let to = track.x(CGFloat(row.id))
-                if row.kind == .folded || layout.rows[row.id + 1].kind == .folded {
-                    var dashes = Path()
-                    dashes.move(to: CGPoint(x: from, y: localY))
-                    dashes.addLine(to: CGPoint(x: to, y: localY))
-                    context.stroke(dashes, with: .color(localColor), style: StrokeStyle(lineWidth: 4, dash: [3, 3]))
-                } else {
-                    context.fill(bar(localY, 4, from, to), with: .color(localColor))
-                }
+                context.strokeRail(from: CGPoint(x: track.x(CGFloat(row.id + 1)), y: localY),
+                                   to: CGPoint(x: track.x(CGFloat(row.id)), y: localY), color: localColor,
+                                   dashed: row.kind == .folded || layout.rows[row.id + 1].kind == .folded)
             }
             context.fill(bar(localY, 4, 0, left), with: Self.fading(localColor, y: localY, to: left))
 
@@ -343,33 +195,24 @@ private struct TrackRails: View {
                 let x = track.x(CGFloat(row.id))
                 if row.shared {
                     let outline = CGRect(x: x - 9, y: localY - 12, width: 18, height: otherY - localY + 24)
-                    let platform = Path(roundedRect: outline, cornerRadius: 9)
-                    if tinted {
-                        eraser.fill(platform, with: .color(.black))
-                    } else {
-                        context.fill(platform, with: .color(Color.boardBackground))
-                    }
+                    context.fillBackground(Path(roundedRect: outline, cornerRadius: 9), tinted: tinted)
                     context.stroke(Path(roundedRect: outline.insetBy(dx: 1.25, dy: 1.25), cornerRadius: 7.75),
                                    with: .color(Color.boardText), lineWidth: 2.5)
                 } else if row.kind == .origin {
-                    if tinted {
-                        eraser.fill(circle(x, localY, 16), with: .color(.black))
-                    } else {
-                        context.fill(circle(x, localY, 16), with: .color(Color.boardBackground))
-                    }
+                    context.fillBackground(circle(x, localY, 16), tinted: tinted)
                     context.stroke(circle(x, localY, 13), with: .color(Color.boardText), lineWidth: 3)
                 } else {
                     context.fill(circle(x, localY, 8), with: .color(Color.boardText))
                 }
             }
 
-            // Room for the trains' outlines, which can't have a background to part them from the tracks
+            // Room around the trains, which can't have a background to part them from the tracks
             if tinted {
                 let room = BoardStyle.large.markerSize + 4
                 let edge = BoardStyle.large.markerSize / 2
-                eraser.fill(circle(max(edge, track.x(layout.firstRow)), localY, room), with: .color(.black))
+                context.fillBackground(circle(max(edge, track.x(layout.firstRow)), localY, room), tinted: true)
                 if let row = layout.nextRow {
-                    eraser.fill(circle(max(edge, track.x(row)), otherY, room), with: .color(.black))
+                    context.fillBackground(circle(max(edge, track.x(row)), otherY, room), tinted: true)
                 }
             }
         }
@@ -379,20 +222,5 @@ private struct TrackRails: View {
     private static func fading(_ color: Color, y: CGFloat, to x: CGFloat) -> GraphicsContext.Shading {
         .linearGradient(Gradient(colors: [color.opacity(0), color]),
                         startPoint: CGPoint(x: 0, y: y), endPoint: CGPoint(x: x, y: y))
-    }
-}
-
-extension String {
-    /// A station's name up to any second name: "Atlantic Av" for Atlantic
-    /// Av-Barclays Ctr, "47-50 Sts" for 47-50 Sts-Rockefeller Ctr. A hyphen
-    /// after a single word or number joins it to the next, so
-    /// Hoyt-Schermerhorn Sts and 174-175 Sts stay whole.
-    var mainStationName: String {
-        var rest = self[...]
-        while let hyphen = rest.firstIndex(of: "-") {
-            if self[..<hyphen].contains(" ") { return String(self[..<hyphen]) }
-            rest = self[index(after: hyphen)...]
-        }
-        return self
     }
 }

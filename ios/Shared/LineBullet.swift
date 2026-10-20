@@ -28,10 +28,24 @@ struct LineBullet: View {
     /// A real-time route id; see `LineStyle.of`.
     let route: String
     let size: CGFloat
+    /// Beside text of a text style, it grows as that does with the phone's
+    /// text size, up to twice `size`; otherwise it stays `size`.
+    private let scales: Bool
+    @ScaledMetric private var scaledSize: CGFloat
     @Environment(\.widgetRenderingMode) private var renderingMode
+
+    /// `textStyle` is the style of the text it's beside, for it to grow as
+    /// that does; nil where it has a set room.
+    init(route: String, size: CGFloat, relativeTo textStyle: Font.TextStyle? = nil) {
+        self.route = route
+        self.size = size
+        scales = textStyle != nil
+        _scaledSize = ScaledMetric(wrappedValue: size, relativeTo: textStyle ?? .body)
+    }
 
     var body: some View {
         let style = LineStyle.of(route)
+        let size = scales ? min(scaledSize, self.size * 2) : self.size
         let fontSize = size * (style.label.count > 1 ? 0.45 : 0.62)
         let label = Text(style.label)
             .font(.system(size: fontSize, weight: .bold))

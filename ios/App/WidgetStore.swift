@@ -1,9 +1,12 @@
 import Observation
 import SwiftUI
+import UIKit
 import WidgetKit
 
 /// The saved widgets, shared by the app's tabs. Every change is saved for the
-/// widgets to read, and they redraw with it.
+/// widgets to read, and they redraw with it: once the changes pause, as typing
+/// a name or holding a stepper makes many a second, or at once as the app
+/// goes from the screen.
 @MainActor @Observable
 final class WidgetStore {
     /// Each train checked against the station list, as the widgets show them.
@@ -13,6 +16,15 @@ final class WidgetStore {
     /// As saved, unchecked. A change saves these, with just what it changes,
     /// so a train at a station the list lacks just now stays as it was chosen.
     private var stored: SavedWidgets
+    /// Waits for the changes to pause, then saves them.
+    @ObservationIgnored private var saving: Task<Void, Never>?
+    /// Whether there are changes not saved yet.
+    @ObservationIgnored private var unsaved = false
+    /// Whether they change what a widget draws, so the widgets redraw.
+    @ObservationIgnored private var redraws = false
+
+    /// How long the changes pause before they're saved.
+    private static let pause: Duration = .seconds(0.6)
 
     init() {
         let stored: SavedWidgets
@@ -35,6 +47,14 @@ final class WidgetStore {
         // Each time the app starts, whether or not the Widgets tab is opened,
         // so a widget set up like one removed doesn't open on its map or alert
         Task { await countPlaced() }
+        // The app may not run again before it's ended
+        _ = NotificationCenter.default.addObserver(forName: UIApplication.willResignActiveNotification, object: nil,
+                                                   queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.saveNow()
+            }
+        }
     }
 
     var defaultWidget: SavedWidget { saved.defaultWidget }
@@ -69,12 +89,12 @@ final class WidgetStore {
         guard let infos = try? result.get() else { return }
         var counts: [UUID: Int] = [:]
         var widgetIDs = Set<String>()
-        for info in infos where info.kind == "RTrainWidget" || info.kind == "TransfersWidget" {
+        for info in infos where info.kind == WidgetKind.train || info.kind == WidgetKind.transfers {
             // One set up before saved widgets, with its own train, shows none of them
             let shown: SavedWidget?
             let intent = info.widgetConfigurationIntent(of: TrainWidgetIntent.self)
             widgetIDs.insert(Self.widgetID(kind: info.kind, family: info.family, configuration: intent ?? TrainWidgetIntent()))
-            if info.kind == "TransfersWidget" {
+            if info.kind == WidgetKind.transfers {
                 shown = (intent ?? TrainWidgetIntent()).transfersWidget(in: saved)
             } else if let intent {
                 shown = intent.savedWidget(in: saved)
@@ -98,13 +118,45 @@ final class WidgetStore {
     }
 
     /// `body` changes the widgets as shown and, if that changes anything, as
-    /// saved too: every widget is in both, in the same order.
+    /// saved too, once the changes pause: every widget is in both, in the
+    /// same order.
     private func change(_ body: (inout SavedWidgets) -> Void) {
         let before = saved
         body(&saved)
         guard saved != before else { return }
         body(&stored)
+        unsaved = true
+        redraws = redraws || Self.drawn(saved) != Self.drawn(before)
+        saving?.cancel()
+        saving = Task { [weak self] in
+            try? await Task.sleep(for: WidgetStore.pause)
+            guard !Task.isCancelled else { return }
+            self?.saveNow()
+        }
+    }
+
+    /// Saves the changes not saved yet, for the widgets, Siri and the
+    /// countdown to read. Only the Next train and Transfers widgets show saved
+    /// widgets, and they redraw only if what they draw has changed.
+    private func saveNow() {
+        saving?.cancel()
+        saving = nil
+        guard unsaved else { return }
+        unsaved = false
         SharedStore.saveWidgets(stored)
-        WidgetCenter.shared.reloadAllTimelines()
+        if redraws {
+            redraws = false
+            WidgetCenter.shared.reloadTrainWidgets()
+        }
+    }
+
+    /// What the widgets draw of `saved`: everything but the names, which only
+    /// their Edit menus show, and iOS asks for those as it opens them.
+    private static func drawn(_ saved: SavedWidgets) -> SavedWidgets {
+        SavedWidgets(widgets: saved.widgets.map { widget in
+            var widget = widget
+            widget.name = ""
+            return widget
+        }, defaultID: saved.defaultID)
     }
 }

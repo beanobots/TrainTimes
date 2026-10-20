@@ -22,7 +22,7 @@ struct TrainActivityAttributes: ActivityAttributes {
 
 /// The ↻ on the widgets and the countdown: new times for both. iOS reloads
 /// a widget tapped, after this, and no other; the countdown's redraws the
-/// widgets, which it doesn't belong to.
+/// Next train and Transfers widgets, which it doesn't belong to.
 struct RefreshIntent: LiveActivityIntent {
     static let title: LocalizedStringResource = "Refresh train times"
     static let isDiscoverable = false
@@ -41,7 +41,7 @@ struct RefreshIntent: LiveActivityIntent {
         #if APP
         if let widgetID { SharedStore.recordTap(\.refreshed, for: widgetID) }
         await TrainActivityController.refresh()
-        if widgetID == nil { WidgetCenter.shared.reloadAllTimelines() }
+        if widgetID == nil { WidgetCenter.shared.reloadTrainWidgets() }
         #endif
         return .result()
     }
@@ -71,7 +71,10 @@ struct RefreshWidgetsIntent: AppIntent {
 }
 
 // iOS reloads only the widget tapped, and the map and the alert are kept by
-// widget, so these leave the others as they are.
+// widget, so these leave the others as they are. Each stores what its toggle
+// flips to, the other way from what the widget showed, rather than flip what's
+// stored: widgets alike in kind, size and Edit menu share it, and one still
+// showing the other state would flip it back.
 
 /// The medium and large widgets' map button: shows where the next train is,
 /// or the later trains again.
@@ -87,15 +90,20 @@ struct ToggleMapIntent: AppIntent {
     @Parameter(title: "Train")
     var trainID: String
 
+    /// Whether it's to show the stops.
+    @Parameter(title: "Shows the stops", default: false)
+    var shows: Bool
+
     init() {}
 
-    init(selection: Selection, widgetID: String) {
+    init(selection: Selection, widgetID: String, shows: Bool) {
         self.widgetID = widgetID
         trainID = selection.trainID
+        self.shows = shows
     }
 
     func perform() async throws -> some IntentResult {
-        SharedStore.toggleMap(for: trainID, in: widgetID)
+        SharedStore.setMap(shows, for: trainID, in: widgetID)
         SharedStore.recordTap(\.toggled, for: widgetID)
         return .result()
     }
@@ -115,15 +123,20 @@ struct ToggleAlertIntent: AppIntent {
     @Parameter(title: "Train")
     var trainID: String
 
+    /// Whether it's to show the alert in full.
+    @Parameter(title: "Shows the alert", default: false)
+    var shows: Bool
+
     init() {}
 
-    init(selection: Selection, widgetID: String) {
+    init(selection: Selection, widgetID: String, shows: Bool) {
         self.widgetID = widgetID
         trainID = selection.alertID
+        self.shows = shows
     }
 
     func perform() async throws -> some IntentResult {
-        SharedStore.toggleAlert(for: trainID, in: widgetID)
+        SharedStore.setAlert(shows, for: trainID, in: widgetID)
         SharedStore.recordTap(\.toggled, for: widgetID)
         return .result()
     }
@@ -154,14 +167,21 @@ struct ToggleCountdownIntent: LiveActivityIntent {
     @Parameter(title: "Service alerts", default: true)
     var serviceAlerts: Bool
 
+    /// The trip to count down to: on the Transfers widget, the next train
+    /// that gets to the change, which needn't be the next at your station.
+    /// Nil for the first you can catch.
+    @Parameter(title: "Trip")
+    var trip: String?
+
     init() {}
 
-    init(selection: Selection, widgetID: String) {
+    init(selection: Selection, widgetID: String, trip: String? = nil) {
         self.widgetID = widgetID
         trainID = selection.trainID
         walkMinutes = selection.walkMinutes
         elevatorAlerts = selection.elevatorAlerts
         serviceAlerts = selection.serviceAlerts
+        self.trip = trip
     }
 
     func perform() async throws -> some IntentResult {
@@ -171,7 +191,7 @@ struct ToggleCountdownIntent: LiveActivityIntent {
             selection.walkMinutes = walkMinutes
             selection.elevatorAlerts = elevatorAlerts
             selection.serviceAlerts = serviceAlerts
-            try await TrainActivityController.toggle(for: selection, widgetID: widgetID)
+            try await TrainActivityController.toggle(for: selection, widgetID: widgetID, trip: trip)
         }
         #endif
         return .result()

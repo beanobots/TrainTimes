@@ -99,8 +99,11 @@ enum SharedStore {
         trains(in: mapFile).contains("\(widgetID) \(trainID)")
     }
 
-    static func toggleMap(for trainID: String, in widgetID: String) {
-        toggle("\(widgetID) \(trainID)", in: mapFile)
+    /// Shows the stops (`on`), or the times, on this widget. Set rather than
+    /// flipped: two widgets alike can share a widget id, and one still showing
+    /// the other state would flip it back.
+    static func setMap(_ on: Bool, for trainID: String, in widgetID: String) {
+        set("\(widgetID) \(trainID)", to: on, in: mapFile)
     }
 
     /// Whether this widget shows the alert of this train, with these alerts
@@ -110,19 +113,14 @@ enum SharedStore {
         trains(in: alertFile).contains("\(widgetID) \(alertID)")
     }
 
-    static func toggleAlert(for alertID: String, in widgetID: String) {
-        toggle("\(widgetID) \(alertID)", in: alertFile)
+    /// Opens the widget's alert in full (`on`), or closes it, as `setMap` does the map.
+    static func setAlert(_ on: Bool, for alertID: String, in widgetID: String) {
+        set("\(widgetID) \(alertID)", to: on, in: alertFile)
     }
 
-    /// Closes the widget's alert. Unlike a toggle, two reloads doing this at
-    /// once can't open it again.
+    /// Closes the widget's alert, as a reload does once it's over.
     static func closeAlert(for alertID: String, in widgetID: String) {
-        guard let alertFile else { return }
-        changing(alertFile) {
-            var trains = trains(in: alertFile)
-            guard trains.remove("\(widgetID) \(alertID)") != nil else { return }
-            write(trains, to: alertFile)
-        }
+        setAlert(false, for: alertID, in: widgetID)
     }
 
     /// Forgets the maps and alerts opened on widgets that are gone, so a new
@@ -149,12 +147,14 @@ enum SharedStore {
         }
     }
 
-    private static func toggle(_ trainID: String, in file: URL?) {
+    /// Puts `key` in `file`'s set, or with `on` false takes it out, writing it
+    /// only if that changes it.
+    private static func set(_ key: String, to on: Bool, in file: URL?) {
         guard let file else { return }
         changing(file) {
             var trains = trains(in: file)
-            if trains.remove(trainID) == nil { trains.insert(trainID) }
-            write(trains, to: file)
+            let changed = on ? trains.insert(key).inserted : trains.remove(key) != nil
+            if changed { write(trains, to: file) }
         }
     }
 

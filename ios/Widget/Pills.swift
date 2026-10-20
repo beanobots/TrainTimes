@@ -17,6 +17,8 @@ struct Pill: View {
     var body: some View {
         Image(systemName: symbol)
             .font(large ? .subheadline.weight(.bold) : .footnote.weight(.bold))
+            // Held to what fits its face, which stays the height of the row of buttons
+            .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
             .foregroundStyle(iconColor)
             .frame(width: fills ? nil : 44, height: large ? BoardStyle.large.buttonHeight : BoardStyle.compact.buttonHeight)
             .frame(maxWidth: fills ? .infinity : nil)
