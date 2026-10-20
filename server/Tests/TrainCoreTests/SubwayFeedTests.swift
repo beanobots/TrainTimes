@@ -335,4 +335,25 @@ import Testing
         #expect(try TrainService.stations(after: r, in: [feed]).map(\.name) == ["Bay Ridge Av", "77 St", "86 St",
                                                                                   "Bay Ridge-95 St"])
     }
+
+    @Test func anExpressAndItsLocalHaveTheirStopsListedInOrder() throws {
+        // From 96 St, the 1 runs local to South Ferry and the 2, the longer, express to Flatbush Av
+        let one = ["120S", "121S", "122S", "123S", "124S", "125S", "126S", "127S", "128S", "129S", "130S", "131S",
+                   "132S", "133S", "134S", "135S", "136S", "137S", "138S", "139S", "142S"]
+        let two = ["120S", "123S", "127S", "128S", "132S", "137S", "228S", "229S", "230S", "231S", "232S", "233S",
+                   "234S", "235S", "236S", "237S", "238S", "239S", "241S", "242S", "243S", "244S", "245S", "246S", "247S"]
+        func trip(_ id: String, route: String, stops: [String]) -> Protobuf {
+            GTFSFeed.trip(id, route: route, stops: stops.enumerated().map { FeedStop($0.element, at: Double($0.offset) * 2 + 1) })
+        }
+        let feed = GTFSFeed.feed([trip("1A", route: "1", stops: one), trip("2A", route: "2", stops: two)])
+        let both = Selection(stationID: "120", routes: ["1", "2"], direction: .south)
+        let stations = try TrainService.stations(after: both, in: [feed])
+        // The 1's own stops among the 2's, nearest first, then where they part
+        // after Chambers St, the 1's on to South Ferry and the 2's to Flatbush Av
+        let expected = (one.dropFirst() + two.drop(while: { $0 != "228S" })).compactMap(StationDirectory.station(forStop:))
+        #expect(stations.map(\.id) == expected.map(\.id))
+        #expect(stations.prefix(5).map(\.name) == ["86 St", "79 St", "72 St", "66 St-Lincoln Center",
+                                                   "59 St-Columbus Circle"])
+        #expect(stations.count == 39)
+    }
 }

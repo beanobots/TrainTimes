@@ -183,10 +183,13 @@ enum TrainService {
 
     /// The stations `selection`'s train calls at after yours in `feeds`, its
     /// lines' own: for each of its lines, those of its running trip that lists
-    /// the most of them, in order, so that where the lines part, each one's
-    /// are there. The longest list comes first, then each other's stations
-    /// not yet listed: toward Manhattan from Marcy Av, the M's on to Forest
-    /// Hills, then the J's Canal St, Chambers St and Fulton St.
+    /// the most of them, so that where the lines part, each one's are there.
+    /// Each line's stations keep their order: the longest list's, with each
+    /// other's not yet listed put in after the one before them on its list,
+    /// or before the first it shares, or where it shares none, at the end.
+    /// So the 1's local stops from 96 St come between the 2's, and toward
+    /// Manhattan from Marcy Av, the J's Bowery, Canal St, Chambers St, Fulton
+    /// St and Broad St come after Delancey St-Essex St, then the M's on to Forest Hills.
     static func stations(after selection: Selection, in feeds: [Data]) throws -> [Station] {
         // Each line from where it calls going its own way: toward Manhattan
         // from Marcy Av, the J from M16S and the M from M16N
@@ -207,15 +210,25 @@ enum TrainService {
                 }
             }
         }
-        // A station once, where the first list with it calls at it, and never yours
-        var seen = Set([selection.station?.id ?? ""])
         let lists = selection.routes.compactMap { longest[$0] }.enumerated()
             .sorted { (-$0.element.count, $0.offset) < (-$1.element.count, $1.offset) }
-        return lists.flatMap(\.element).compactMap { stop in
-            guard let station = StationDirectory.station(forStop: stop),
-                  seen.insert(station.id).inserted else { return nil }
-            return station
+        // A station once, and never yours
+        let yours = selection.station?.id
+        var listed: [Station] = []
+        for (_, stops) in lists {
+            let stations = stops.compactMap(StationDirectory.station(forStop:)).filter { $0.id != yours }
+            var at = stations.lazy.compactMap { station in listed.firstIndex { $0.id == station.id } }.first
+                ?? listed.endIndex
+            for station in stations {
+                if let index = listed.firstIndex(where: { $0.id == station.id }) {
+                    at = max(at, index + 1)
+                } else {
+                    listed.insert(station, at: at)
+                    at += 1
+                }
+            }
         }
+        return listed
     }
 
     /// Just the alerts and outages for `selection`, when asked for, as `board`

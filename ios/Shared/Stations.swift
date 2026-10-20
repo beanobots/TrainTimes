@@ -86,24 +86,51 @@ struct Platform: Codable, Hashable, Identifiable, Sendable {
 
     /// The feeds' N or S for `route`'s trains here going `direction` with the
     /// lines of `routes`, as a train or change of several lines goes, so they
-    /// all stop on one side (`side(going:with:)`): `direction`, but the other
-    /// where the line is `reversed` and some of `routes` here aren't. A line
-    /// alone, or with only lines `reversed` like it, goes by its own, and
-    /// another line's train on their side by the other: going with the M
-    /// alone toward Manhattan from Flushing Av, a Z running local is S, the M N.
+    /// all stop on one side: `direction`, but the other where the line is
+    /// `reversed` and some of `routes` here aren't. A line alone, or with only
+    /// lines `reversed` like it, goes by its own, and another line's train
+    /// running with them by `side(going:with:)`: going with the M alone toward
+    /// Manhattan from Flushing Av, a Z running local is S, the M N; with the G
+    /// alone toward Church Av at Hoyt-Schermerhorn Sts, an F is S, as the G is.
     func direction(_ direction: Direction, of route: String, with routes: [String]) -> Direction {
-        guard routes.contains(where: self.routes.contains) else { return direction }
+        let here = routes.filter(self.routes.contains)
+        guard !here.isEmpty else { return direction }
+        if routes.contains(route), here.allSatisfy({ reversed?.contains($0) == true }) { return direction }
         // The N or S of `route`'s trains on that side: the other where it's `reversed`
         return side(of: route, going: side(going: direction, with: routes))
     }
 
-    /// The side the lines of `routes` stop on here going `direction`
-    /// together, by the way whose name it has: `direction`, or where every
-    /// one of them here is `reversed`, as the M alone is at Marcy Av, the
-    /// other, so each goes by its own N or S.
+    /// The N or S of another line's train running here with the lines of
+    /// `routes` going `direction` together, on their track: theirs,
+    /// `direction`, or where every one of them here is `reversed` on the
+    /// track of lines that aren't (`sharesTrack(_:)`), the other, those
+    /// lines'. On the M's track toward Manhattan at Marcy Av, the J's, it's
+    /// S, as the J is, though the M is N; on the G's own toward Church Av at
+    /// Hoyt-Schermerhorn Sts, S, as the G is.
     func side(going direction: Direction, with routes: [String]) -> Direction {
         let here = routes.filter(self.routes.contains)
-        return !here.isEmpty && here.allSatisfy { reversed?.contains($0) == true } ? direction.opposite : direction
+        let turned = !here.isEmpty && here.allSatisfy { reversed?.contains($0) == true }
+        return turned && sharesTrack(here) ? direction.opposite : direction
+    }
+
+    /// Whether a line of `routes` that's `reversed` here runs on the track of
+    /// one that isn't, by lines.json's order: a stop next to this one on its
+    /// line is next to it on theirs, as Hewes St and Delancey St-Essex St are
+    /// on the M's and the J's at Marcy Av. At Hoyt-Schermerhorn Sts the G has
+    /// a track of its own, on to Fulton St and Bergen St, and the A and C
+    /// theirs, on to Jay St-MetroTech.
+    func sharesTrack(_ routes: [String]) -> Bool {
+        let turned = routes.filter { self.routes.contains($0) && reversed?.contains($0) == true }
+        let others = Set(self.routes.filter { reversed?.contains($0) != true }.flatMap { neighbours(on: $0) })
+        return turned.contains { !others.isDisjoint(with: neighbours(on: $0)) }
+    }
+
+    /// The stops before and after this one on `route`'s line, as lines.json
+    /// orders them; none where it has no order for it.
+    private func neighbours(on route: String) -> [String] {
+        guard let stops = StationDirectory.stops(onLine: LineStyle.of(route).label),
+              let at = stops.firstIndex(of: id) else { return [] }
+        return [at - 1, at + 1].filter(stops.indices.contains).map { stops[$0] }
     }
 
     /// Where the lines of `routes` call here going `direction` together
