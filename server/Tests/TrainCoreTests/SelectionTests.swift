@@ -76,9 +76,12 @@ import Testing
         // Without the walk, you're there as it gets in
         #expect(prospect.firstReachable(trains, now: now)?.trip == "held")
 
-        // With a change, by the train at your station
+        // With a change, by the train at your station. The first change the
+        // Transfers widget shows can be one you'd catch only while it's held
         let connections = trains.map { Connection(first: $0, arrival: arrival(20, trip: $0.trip), next: nil) }
+        #expect(walking.catchable(connections, now: now).first?.first.trip == "held")
         #expect(walking.firstReachable(connections, now: now)?.first.trip == "next")
+        #expect(walking.firstReachable(Array(connections.prefix(1)), now: now) == nil)
         #expect(prospect.firstReachable(connections, now: now)?.first.trip == "held")
     }
 

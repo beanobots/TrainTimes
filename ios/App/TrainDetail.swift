@@ -337,11 +337,14 @@ struct TrainDetail: View {
     /// otherwise lose a newer notice to them; otherwise those shown stay.
     private func loadBoard(includingNotices: Bool = false) async {
         if board == nil { loadState = .loading }
-        now = .now
+        // The times are as of when the fetch begins; `now` ticks on while it
+        // runs, and a countdown refreshed meanwhile keeps its newer times
+        let started = Date.now
+        now = started
         countdownTrain = TrainActivityController.currentTrain(for: selection)
         let trainID = selection.trainID
         let fetchesNotices = includingNotices || board == nil || countdownTrain != nil
-            || noticesFetched.map { !$0.isWithin(10 * 60, before: now) } ?? true
+            || noticesFetched.map { !$0.isWithin(10 * 60, before: started) } ?? true
         do {
             var fetched = try await TrainService.board(for: selection, includingAlerts: fetchesNotices,
                                                        includingOutages: fetchesNotices)
@@ -351,12 +354,12 @@ struct TrainDetail: View {
             // Only once both have come are they good for 10 minutes; until
             // then, any shown before stay, and the next load tries again
             if fetchesNotices && fetched.alerts != nil && fetched.outages != nil {
-                noticesFetched = now
+                noticesFetched = started
             }
             fetched.alerts = fetched.alerts ?? board?.alerts
             fetched.outages = fetched.outages ?? board?.outages
             board = fetched
-            timesFetched = now
+            timesFetched = started
             refreshFailed = false
             loadState = .loaded
         } catch {

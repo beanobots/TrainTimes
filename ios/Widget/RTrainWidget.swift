@@ -349,12 +349,15 @@ struct TrainWidgetView: View {
 
     private var next: Arrival? { entry.trains.first }
     /// The train the widget counts down to: on the Transfers widget, the next
-    /// one that gets to the change, which needn't be the next at your station,
-    /// and that you reach as it gets in. The countdown its walk button starts
-    /// moves on as that train gets in, so not one you'd catch only while it's
-    /// held there.
-    private var countedDown: Arrival? {
-        entry.transfers ? entry.selection.firstReachable(entry.connections ?? [], now: entry.date)?.first : next
+    /// one that gets to the change, which needn't be the next at your station.
+    private var countedDown: Arrival? { entry.transfers ? entry.connections?.first?.first : next }
+    /// The trip the Transfers widget's walk button starts its countdown on: the
+    /// first train that gets to the change that you reach as it gets in. That
+    /// countdown moves on as its train gets in, so not one you'd catch only
+    /// while it's held there. Nil without one, and on the Next train widget,
+    /// for the first at your station you reach as it gets in.
+    private var walkTrip: String? {
+        entry.transfers ? entry.selection.firstReachable(entry.connections ?? [], now: entry.date)?.first.trip : nil
     }
     private var later: ArraySlice<Arrival> { entry.trains.dropFirst() }
     /// With a walking time, the countdown is to when to leave.
@@ -480,9 +483,7 @@ struct TrainWidgetView: View {
             if hasMap {
                 Pill(symbol: "map", fills: true, large: style.isLarge).hidden()
             }
-            // On the Transfers widget, the train it counts down to, which needn't be the next at your station
-            WalkButton(intent: ToggleCountdownIntent(selection: entry.selection, widgetID: entry.widgetID,
-                                                     trip: entry.transfers ? countedDown?.trip : nil),
+            WalkButton(intent: ToggleCountdownIntent(selection: entry.selection, widgetID: entry.widgetID, trip: walkTrip),
                        route: entry.selection.firstRoute, running: entry.countingDown, fills: true, large: style.isLarge)
         }
         .frame(maxHeight: .infinity, alignment: .bottom)

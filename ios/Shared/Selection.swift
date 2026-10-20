@@ -134,8 +134,8 @@ struct Selection: Codable, Hashable, Sendable {
     }
 
     /// With a change, the first connection whose train at your station you
-    /// reach as it gets in: the one the Transfers widget counts down to, as
-    /// its walk button's countdown does.
+    /// reach as it gets in: the one the Transfers widget's walk button starts
+    /// its countdown on, which needn't be the first the widget shows.
     func firstReachable(_ connections: [Connection], now: Date) -> Connection? {
         connections.first { leaveTime(for: $0.first) > now }
     }
