@@ -522,11 +522,11 @@ final class LiveTrains {
 
     /// New times for `selections`, as `TrainService.trains(for:)` fetches
     /// them. One left out couldn't be fetched: its old times go, rather than
-    /// count down as if they were new.
+    /// count down as if they were new. Other trains keep theirs, so a load of
+    /// an older list that ends after the newer one's doesn't clear its rows.
     func load(_ selections: [Selection], includingOtherLines: Bool = true, ownLinesOnly: Set<String> = []) async {
         // With nothing to fetch, nothing failed
         guard !selections.isEmpty else {
-            trains = [:]
             failed = []
             return
         }
@@ -534,8 +534,10 @@ final class LiveTrains {
                                                 ownLinesOnly: ownLinesOnly)
         // A newer list cancels this load; that isn't a failure
         guard !Task.isCancelled else { return }
-        trains = fetched
-        failed = Set(selections.map(\.trainID)).subtracting(fetched.keys)
+        let missing = Set(selections.map(\.trainID)).subtracting(fetched.keys)
+        trains.merge(fetched) { $1 }
+        for trainID in missing { trains[trainID] = nil }
+        failed = missing
         now = .now
     }
 }

@@ -125,6 +125,13 @@ private struct ChangeStationRow: View {
     /// The bullets grow with the text beside them, as the train picker's do.
     @ScaledMetric(relativeTo: .caption) private var bulletSize: CGFloat = 16
 
+    /// The platforms walked to for `others`, here and at the stations joined
+    /// to this one; none for a change only across the platform.
+    private var otherPlatforms: [Platform] {
+        StationDirectory.stations(inComplexOf: station).flatMap(\.platforms)
+            .filter { $0.routes.contains(where: others.contains) }
+    }
+
     var body: some View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
@@ -138,7 +145,7 @@ private struct ChangeStationRow: View {
                 if !others.isEmpty {
                     lines(others, note: across.isEmpty ? "Another platform" : "Other platforms", prominent: false)
                 }
-                StepFreeNote(platforms: station.platforms)
+                StepFreeNote(platforms: otherPlatforms)
                     .font(.caption)
             }
             Spacer()
