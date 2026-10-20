@@ -264,6 +264,11 @@ enum SubwayFeed {
             return true
         }
         guard let lastStop else { return [] }
+        // Only a trip that lists a stop twice in a row, up to its last match,
+        // has approaches to merge
+        let doubled = matches.last.map { last in
+            (0..<last.at).contains { StationDirectory.isSameStop(stops[$0].id, stops[$0 + 1].id) }
+        } ?? false
         return matches.map { match in
             Arrival(
                 route: Lines.normalized(route),
@@ -273,7 +278,7 @@ enum SubwayFeed {
                 lastStop: lastStop,
                 isLive: isLive,
                 trip: trip,
-                approach: once(stops[...match.at])
+                approach: doubled ? once(stops[...match.at]) : Array(stops[...match.at])
             )
         }
     }

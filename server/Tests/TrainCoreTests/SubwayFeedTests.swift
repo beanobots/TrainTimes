@@ -142,6 +142,9 @@ import Testing
         #expect(arrivals.map { $0.approach.map(\.id) } == [["H04S"], ["H04S", "H12S"]])
         #expect(arrivals.last?.approach.map(\.name) == ["Broad Channel", "Beach 90 St"])
         #expect(arrivals.last?.approach.map(\.time) == [time(0.5), time(5)])
+        // Asked about its own track too, that arrival still ends there
+        let both = try SubwayFeed.arrivals(at: ["H19S", "H12S"], in: GTFSFeed.feed([hTrip]), now: now)
+        #expect(both.map { $0.approach.map(\.id) } == [["H19S"], ["H04S", "H12S"]])
         // Stopped on its own track, it's at Broad Channel
         let feed = GTFSFeed.feed([hTrip, GTFSFeed.vehicle("H1", route: "H", at: "H19S", status: 1)])
         let stopped = try #require(try SubwayFeed.arrivals(at: ["H12S"], in: feed, now: now).first)

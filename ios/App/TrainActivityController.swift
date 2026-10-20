@@ -51,8 +51,9 @@ enum TrainActivityController {
         return try await task.value
     }
 
-    /// Starts counting down to the next train you can catch, replacing any
-    /// countdown already running, and returns when that train arrives.
+    /// Starts counting down to the first train you reach as it gets in,
+    /// replacing any countdown already running, and returns when that train
+    /// arrives.
     @discardableResult
     static func start(for selection: Selection) async throws -> Date {
         try await inTurn { try await startNow(for: selection) }
