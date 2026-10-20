@@ -116,9 +116,11 @@ struct Change: Codable, Hashable, Sendable {
 
     /// Lines no longer at the station, or that end their run there going this
     /// change's way, are dropped, as are `selection`'s own; nil when none are
-    /// left, or the station is gone, is `selection`'s, or is behind it.
-    func validated(for selection: Selection) -> Change? {
-        guard let station, station.id != selection.station?.id, isAhead(of: selection) else { return nil }
+    /// left, or the station is gone, is `selection`'s, or is behind it (by
+    /// `order`, as for `isAhead(of:order:)`).
+    func validated(for selection: Selection,
+                   order: (String) -> [String]? = StationDirectory.stops(onLine:)) -> Change? {
+        guard let station, station.id != selection.station?.id, isAhead(of: selection, order: order) else { return nil }
         var change = self
         change.stationID = station.id
         let direction = departureDirection(for: selection)
@@ -162,10 +164,10 @@ struct Change: Codable, Hashable, Sendable {
         }
         guard ways.count > 1 else { return ways.first ?? selection.direction }
         let arriving = arrivalPlatforms(for: selection)
-        let onward = Self.places(arriving.map { $0.directionName(selection.direction) })
-        let back = Self.places(arriving.map { $0.directionName(selection.direction.opposite) })
+        let onward = Self.places(arriving.map { $0.directionName(selection.direction) }, for: selection.routes)
+        let back = Self.places(arriving.map { $0.directionName(selection.direction.opposite) }, for: selection.routes)
         let platforms = departurePlatforms
-        let named = { (way: Direction) in Self.places(platforms.map { $0.directionName(way) }) }
+        let named = { (way: Direction) in Self.places(platforms.map { $0.directionName(way) }, for: routes) }
         return ways.first { !named($0).isDisjoint(with: onward) }
             ?? ways.first { !named($0.opposite).isDisjoint(with: back) }
             ?? selection.direction
@@ -175,18 +177,24 @@ struct Change: Codable, Hashable, Sendable {
     /// where `selection`'s train goes on to from here, so it's plainly the way
     /// to go, as from the R to the D at Atlantic Av, both toward Manhattan.
     func goesYourWay(from selection: Selection) -> Bool {
-        let onward = Self.places(arrivalPlatforms(for: selection).map { $0.directionName(selection.direction) })
+        let onward = Self.places(arrivalPlatforms(for: selection).map { $0.directionName(selection.direction) },
+                                 for: selection.routes)
         let way = departureDirection(for: selection)
         let names = departurePlatforms.map { $0.directionName(way) }.filter { !$0.isEmpty }
-        return !names.isEmpty && names.allSatisfy { !Self.places([$0]).isDisjoint(with: onward) }
+        return !names.isEmpty && names.allSatisfy { !Self.places([$0], for: routes).isDisjoint(with: onward) }
     }
 
-    /// The places directions' names list: "Uptown & The Bronx" is Uptown and
-    /// The Bronx, "Broad St (JZ) - Uptown (M)" Broad St and Uptown.
-    private static func places(_ names: [String]) -> Set<String> {
+    /// The places directions' names list for the lines of `routes`: "Uptown &
+    /// The Bronx" is Uptown and The Bronx; "Broad St (JZ) - Uptown (M)" is
+    /// Broad St for the J and Z, and Uptown for the M.
+    private static func places(_ names: [String], for routes: [String]) -> Set<String> {
+        let labels = routes.map { LineStyle.of($0).label }
         let places = names.flatMap { name in
-            name.replacingOccurrences(of: " & ", with: " - ").components(separatedBy: " - ").map {
-                $0.components(separatedBy: "(")[0].trimmingCharacters(in: .whitespaces)
+            name.replacingOccurrences(of: " & ", with: " - ").components(separatedBy: " - ").compactMap { part -> String? in
+                let pieces = part.components(separatedBy: "(")
+                // A place named for some lines only is just theirs
+                if pieces.count > 1 && !labels.contains(where: { pieces[1].contains($0) }) { return nil }
+                return pieces[0].trimmingCharacters(in: .whitespaces)
             }
         }
         return Set(places.filter { !$0.isEmpty })
@@ -251,7 +259,8 @@ struct Change: Codable, Hashable, Sendable {
                 departure.trip != train.trip
                     && departure.leaves >= arrival.time.addingTimeInterval(walk(from: arrival, to: departure))
             }
-            return Connection(first: train, arrival: arrival, next: next)
+            return Connection(first: train, arrival: arrival, next: next,
+                              walk: next.map { walk(from: arrival, to: $0) } ?? 0)
         }
     }
 }
@@ -266,9 +275,11 @@ struct Connection: Codable, Hashable, Sendable {
     /// The train it can change to, or the same trip where it goes on as one of
     /// the lines changed to; nil when the feeds have none yet.
     var next: Arrival?
+    /// Seconds to walk from your train to `next`: none across the platform.
+    var walk: TimeInterval = 0
 
     private enum CodingKeys: String, CodingKey {
-        case first, arrival, next
+        case first, arrival, next, walk
     }
 
     /// Whether your train goes on from the change as one of the lines changed
@@ -276,8 +287,8 @@ struct Connection: Codable, Hashable, Sendable {
     var staysOn: Bool { next.map { !$0.trip.isEmpty && $0.trip == first.trip } ?? false }
 
     /// From getting to the change to the next train getting there, any walk
-    /// included; none when it's there already, held at the platform.
-    var wait: TimeInterval? { next.map { max(0, $0.time.timeIntervalSince(arrival.time)) } }
+    /// included; just the walk when it's there already, held at the platform.
+    var wait: TimeInterval? { next.map { max(walk, $0.time.timeIntervalSince(arrival.time)) } }
 
     /// The wait in whole minutes, to the nearest.
     var waitMinutes: Int? { wait.map { Int(($0 / 60).rounded()) } }
@@ -303,6 +314,7 @@ extension Connection {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.init(first: try container.decode(Arrival.self, forKey: .first),
                   arrival: try container.decode(Arrival.self, forKey: .arrival),
-                  next: try container.decodeIfPresent(Arrival.self, forKey: .next))
+                  next: try container.decodeIfPresent(Arrival.self, forKey: .next),
+                  walk: try container.decodeIfPresent(TimeInterval.self, forKey: .walk) ?? 0)
     }
 }

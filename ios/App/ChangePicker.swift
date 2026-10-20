@@ -160,8 +160,9 @@ private struct ChangeStationRow: View {
 /// Step 2: the change station's lines, platform by platform, with those of
 /// any station joined to it, starting with those across the platform from
 /// your train chosen. Your train's own are there but can't be chosen, nor can
-/// a line that ends its run there going the way chosen. Where the lines could
-/// go either way, and not all plainly go yours, both ways are offered. A line
+/// a line that ends its run there going the way chosen. Both ways are offered
+/// where the lines chosen could go either, unless they're all across the
+/// platform from your train and every line here plainly goes your way. A line
 /// on another platform counts the walk to it, set on the widget.
 private struct ChangeLinesStep: View {
     let selection: Selection
@@ -170,7 +171,8 @@ private struct ChangeLinesStep: View {
     let done: ([String], Direction) -> Void
     /// Every line you can change to here, in order.
     private let lines: [String]
-    /// Whether to offer both ways the lines go.
+    /// Whether to offer both ways the lines go whichever are chosen: where
+    /// the lines here go either way and don't all plainly go yours.
     private let offersBothWays: Bool
     @State private var chosen: [String]
     @State private var direction: Direction
@@ -208,8 +210,14 @@ private struct ChangeLinesStep: View {
     }
 
     /// Whether to show which way the lines go: once one is chosen, as that
-    /// sets the way to start with.
-    private var showsWays: Bool { offersBothWays && !chosen.isEmpty }
+    /// sets the way to start with; where `offersBothWays`, or the lines chosen
+    /// leave both ways and aren't all across the platform.
+    private var showsWays: Bool {
+        guard !chosen.isEmpty else { return false }
+        return offersBothWays
+            || (Direction.allCases.allSatisfy { !chosenLines(going: $0).isEmpty }
+                && !Change(stationID: station.id, routes: chosen, direction: direction).isAllAcross(from: selection))
+    }
 
     var body: some View {
         ScrollView {

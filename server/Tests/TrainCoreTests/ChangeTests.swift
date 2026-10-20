@@ -75,9 +75,28 @@ import Testing
             departures: [held, train("N", 18, trip: "n1", at: "R31N")],
             selection: prospect)
         #expect(connections.first?.next?.trip == "held")
-        // It's there already: no wait
+        // It's there already, across the platform: no wait
+        #expect(connections.first?.walk == 0)
         #expect(connections.first?.wait == 0)
         #expect(connections.first?.waitLabel == "<1 min")
+    }
+
+    @Test func aTrainHeldOnAnotherPlatformStillTakesTheWalk() {
+        // A 2 gets to its platform half a minute before your R, and waits three and a half minutes
+        let twoThree = Change(stationID: "R31", routes: ["2", "3"], walkMinutes: 3)
+        var held = train("2", 9.5, trip: "held", at: "235N")
+        held.departure = time(13.5)
+        let connections = twoThree.connections(
+            for: [train("R", 2, trip: "r1", at: "R34N")],
+            atChange: [train("R", 10, trip: "r1", at: "R31N")],
+            departures: [held, train("3", 16, trip: "t3", at: "235N")],
+            selection: prospect)
+        #expect(connections.first?.next?.trip == "held")
+        #expect(connections.first?.walk == 180)
+        // You're three minutes getting to it, so it's no quick change
+        #expect(connections.first?.wait == 180)
+        #expect(connections.first?.waitLabel == "3 min")
+        #expect(connections.first?.isQuick(within: 2) == false)
     }
 
     @Test func whetherYouWalkGoesByThePlatformsTheTwoTrainsUse() {
@@ -163,6 +182,31 @@ import Testing
         #expect(!seven.goesYourWay(from: g))
     }
 
+    @Test func aPlaceNamedForSomeLinesIsJustTheirs() {
+        // At Delancey St-Essex St the J, Z and M share a platform whose S is
+        // "Broad St (JZ) - Uptown (M)": uptown is the M's way, not the J's
+        let uptownF = Selection(stationID: "F18", routes: ["F"], direction: .north)
+        var jz = Change(stationID: "F15", routes: ["J", "Z"])
+        // Nothing there is named like Uptown & Queens, so it's away from Brooklyn, where the F came from
+        #expect(jz.suggestedDirection(for: uptownF) == .south)
+        jz.direction = .south
+        #expect(jz.departureStops(for: uptownF) == ["M18S"])
+        #expect(!jz.goesYourWay(from: uptownF))
+        // On another platform, going either way, so both are offered
+        #expect(!jz.isAllAcross(from: uptownF))
+        #expect(Change(stationID: "F15", routes: ["M"]).suggestedDirection(for: uptownF) == .south)
+        #expect(Change(stationID: "F15", routes: ["M"], direction: .south).goesYourWay(from: uptownF))
+
+        // From the downtown F, the J and Z toward Brooklyn
+        let downtownF = Selection(stationID: "F14", routes: ["F"], direction: .south)
+        #expect(Change(stationID: "F15", routes: ["J", "Z"]).suggestedDirection(for: downtownF) == .north)
+        // From the M, the J across the platform goes the M's way, though for the J it's Broad St
+        let m = Selection(stationID: "M16", routes: ["M"], direction: .south)
+        let j = Change(stationID: "M18", routes: ["J"])
+        #expect(j.suggestedDirection(for: m) == .south)
+        #expect(j.isAllAcross(from: m))
+    }
+
     @Test func aLineThatOnlyEndsHereYourWayGoesTheOtherWayOrNotAtAll() throws {
         // A Flushing-bound 7 at Court Sq: the G only leaves toward Brooklyn
         let seven = Selection(stationID: "720", routes: ["7"], direction: .north)
@@ -235,6 +279,10 @@ import Testing
         // With no order for the line, as for the server without lines.json, it's kept
         #expect(atlantic.isAhead(of: dekalb, order: { _ in nil }))
         #expect(atlantic.isAhead(of: dekalb, order: { _ in ["A02", "A03"] }))
+
+        // Checking a widget whose station was moved past its change drops the change
+        #expect(atlantic.validated(for: dekalb, order: order) == nil)
+        #expect(atlantic.validated(for: prospect, order: order)?.routes == ["D", "N"])
     }
 
     // MARK: Saving
@@ -279,6 +327,20 @@ import Testing
         let loaded = try JSONDecoder().decode(Connection.self, from: data)
         #expect(loaded == connection)
         #expect(loaded.waitLabel == "–")
+    }
+
+    @Test func aConnectionSavedWithoutItsWalkLoadsWithNone() throws {
+        let connection = Connection(first: train("R", 2, trip: "r1", at: "R34N"),
+                                    arrival: train("R", 10, trip: "r1", at: "R31N"),
+                                    next: train("2", 14, trip: "t2", at: "235N"), walk: 180)
+        let data = try JSONEncoder().encode(connection)
+        #expect(try JSONDecoder().decode(Connection.self, from: data) == connection)
+        var saved = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        saved["walk"] = nil
+        let loaded = try JSONDecoder().decode(Connection.self, from: JSONSerialization.data(withJSONObject: saved))
+        #expect(loaded.walk == 0)
+        #expect(loaded.next?.trip == "t2")
+        #expect(loaded.waitLabel == "4 min")
     }
 
     @Test func theTransfersWidgetsLinkKeepsTheWay() throws {

@@ -194,16 +194,22 @@ struct Provider: AppIntentTimelineProvider {
         // any alert it mentions; the app reloads it once one's added
         if transfers && change == nil {
             var notice: Notice?
+            // Whether the alerts and outages it mentions could be had
+            var reached = true
             if selection.serviceAlerts || selection.elevatorAlerts {
-                notice = await TrainService.notices(for: selection, includingOutages: selection.elevatorAlerts)
-                    .notice(for: selection, settings: settings)
+                let notices = await TrainService.notices(for: selection, includingOutages: selection.elevatorAlerts)
+                notice = notices.notice(for: selection, settings: settings)
+                reached = (!selection.serviceAlerts || notices.alerts != nil)
+                    && (!selection.elevatorAlerts || notices.outages != nil)
             }
-            if notice == nil {
+            // Only once the alert's known to be over
+            if notice == nil && reached {
                 SharedStore.closeAlert(for: selection.alertID, in: widgetID)
             }
             let entry = TrainEntry(date: .now, selection: selection, trains: [], notice: notice, showsAlert: showsAlert,
                                    widgetID: widgetID, largeText: largeText, settings: settings, transfers: true)
-            return Plan(entries: [entry], fetched: .now)
+            // Without them, it tries again soon
+            return Plan(entries: [entry], fetched: reached ? Date.now : nil)
         }
         let taps = SharedStore.loadTaps(for: widgetID)
         let board: SharedStore.SavedBoard
