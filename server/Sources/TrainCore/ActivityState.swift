@@ -1,9 +1,23 @@
 import Foundation
 
+/// How far times have to move for a push, and how often a countdown is
+/// refreshed anyway: PUSH_EARLIER_SECONDS and the rest.
+struct PushTiming: Sendable, Equatable {
+    /// How far the train's time has to move earlier, beyond which it's an update:
+    /// less than later, as a train coming sooner could be missed.
+    var earlier: TimeInterval = 15
+    /// How far the train's time has to move later, beyond which it's an update.
+    var later: TimeInterval = 60
+    /// How far one of the following trains has to move for an update.
+    var following: TimeInterval = 60
+    /// How old the last push can get before a low-priority refresh.
+    var refresh: TimeInterval = 5 * 60
+}
+
 /// Decides when the countdown's new state, made as the app makes it
 /// (Shared/Countdown.swift), is worth a push.
 enum ActivityState {
-    /// iOS ends a Live Activity after 8 hours (`CountdownState.lifetime`).
+    /// How long a countdown runs before it's ended (`CountdownState.lifetime`).
     static let lifetime = CountdownState.lifetime
 
     /// Out of date as the train is due, as the app posts it (`CountdownState.staleDate`).
@@ -19,28 +33,31 @@ enum ActivityState {
         case none
     }
 
-    /// How far the train's time has to move for an update.
-    static let trainThreshold: TimeInterval = 30
-    /// How far one of the following trains has to move for an update.
-    static let followingThreshold: TimeInterval = 60
-    /// How old the last push can get before a low-priority refresh.
-    static let refreshInterval: TimeInterval = 5 * 60
-
     /// Whether to push `new`, given the last state pushed and when. Not the app's:
     /// it updates whenever it refreshes, but pushes have a budget.
-    static func push(_ new: ContentState, last: ContentState?, lastPush: Date?, now: Date) -> Push {
+    static func push(_ new: ContentState, last: ContentState?, lastPush: Date?, now: Date,
+                     timing: PushTiming = PushTiming()) -> Push {
         guard let last, let lastPush else { return .update }
-        if isMeaningful(new, comparedTo: last) { return .update }
-        return now.timeIntervalSince(lastPush) >= refreshInterval ? .refresh : .none
+        if isMeaningful(new, comparedTo: last, timing: timing) { return .update }
+        return now.timeIntervalSince(lastPush) >= timing.refresh ? .refresh : .none
     }
 
-    static func isMeaningful(_ new: ContentState, comparedTo last: ContentState) -> Bool {
+    static func isMeaningful(_ new: ContentState, comparedTo last: ContentState,
+                             timing: PushTiming = PushTiming()) -> Bool {
         // Another train (or the same trip now ending somewhere else, or on another line)
         if new.trip != last.trip || new.route != last.route || new.terminal != last.terminal { return true }
-        if abs(new.train.timeIntervalSince(last.train)) >= trainThreshold { return true }
+        let moved = new.train.timeIntervalSince(last.train)
+        if moved < -timing.earlier || moved > timing.later { return true }
         if new.isLive != last.isLive || new.notice != last.notice { return true }
         if new.following.count != last.following.count || new.followingRoutes != last.followingRoutes { return true }
-        return zip(new.following, last.following).contains { abs($0.timeIntervalSince($1)) >= followingThreshold }
+        return zip(new.following, last.following).contains { abs($0.timeIntervalSince($1)) >= timing.following }
+    }
+
+    /// Whether the phone's widgets for the countdown's train would show `new` differently from
+    /// `last` (nil before the first push; `CountdownState.hasSameTrains(as:)`).
+    static func changesWidgets(_ new: ContentState, from last: ContentState?) -> Bool {
+        guard let last else { return true }
+        return !new.hasSameTrains(as: last)
     }
 
     /// The notice of a countdown with no trains and no alert that's why

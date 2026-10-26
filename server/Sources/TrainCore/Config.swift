@@ -9,6 +9,13 @@ struct APNSConfig: Sendable {
 
     static let defaultTopic = "com.rtrainwidget.app.push-type.liveactivity"
 
+    /// The topic of widget reloads: the same app's, as `<bundle ID>.push-type.widgets`.
+    var widgetTopic: String {
+        let suffix = ".push-type.liveactivity"
+        let app = topic.hasSuffix(suffix) ? String(topic.dropLast(suffix.count)) : topic
+        return app + ".push-type.widgets"
+    }
+
     init(environment env: [String: String]) throws {
         keyPath = try Config.required("APNS_KEY_PATH", in: env)
         keyID = try Config.required("APNS_KEY_ID", in: env)
@@ -32,6 +39,9 @@ struct Limits: Sendable {
     var maxRegistrationsPerKey = 5
     var requestsPerMinute = 30.0
     var requestBurst = 30.0
+    /// `GET /feeds`'s own limit: a refresh reads several feeds for each widget at once.
+    var feedRequestsPerMinute = 240.0
+    var feedRequestBurst = 120.0
     var maxChallenges = 10_000
     /// Outstanding challenges per client: one for each request the app is
     /// about to sign, with room for a few it gave up on.
@@ -39,6 +49,14 @@ struct Limits: Sendable {
     var keysPerIPPerDay = 10
     /// Attest keys unused this long are forgotten.
     var keyRetention: TimeInterval = 90 * 86400
+    /// `GET /routes` asks Google at most this often a day for each client, and for everyone,
+    /// to stay inside Google's free allowance.
+    var routesPerIPPerDay = 30
+    var routesPerDay = 300
+    /// `GET /buses` and `/buses/nearby` ask Bus Time at most this often a day for each client,
+    /// and for everyone: a Nearby asks for up to 7 at once, and what's kept doesn't count.
+    var busTimePerIPPerDay = 2_000
+    var busTimePerDay = 100_000
 }
 
 /// The server's settings, from environment variables.
@@ -51,9 +69,14 @@ struct Config: Sendable {
     var host: String
     var port: Int
     var pollInterval: TimeInterval
+    var pushTiming: PushTiming
     var pushConcurrency: Int
     var limits: Limits
     var logPushes: Bool
+    /// Google's Routes API key, for `GET /routes`; nil turns it off.
+    var googleRoutesKey: String?
+    /// MTA Bus Time's API key, for `GET /buses`; nil turns it off.
+    var busTimeKey: String?
     /// The file launchd sends stdout and stderr to, if the server's to move
     /// to the new one when newsyslog rotates it.
     var logFile: String?
@@ -93,7 +116,17 @@ struct Config: Sendable {
         // Loopback unless asked otherwise: cloudflared on this machine forwards to it
         host = Self.optional("HOST", in: env) ?? "127.0.0.1"
         port = try Self.integer("PORT", in: env, default: 8080, range: 1...65535)
-        pollInterval = TimeInterval(try Self.integer("POLL_SECONDS", in: env, default: 30, range: 5...3600))
+        pollInterval = TimeInterval(try Self.integer("POLL_SECONDS", in: env, default: 20, range: 5...3600))
+        var timing = PushTiming()
+        timing.earlier = TimeInterval(try Self.integer("PUSH_EARLIER_SECONDS", in: env, default: Int(timing.earlier),
+                                                       range: 1...3600))
+        timing.later = TimeInterval(try Self.integer("PUSH_LATER_SECONDS", in: env, default: Int(timing.later),
+                                                     range: 1...3600))
+        timing.following = TimeInterval(try Self.integer("PUSH_FOLLOWING_SECONDS", in: env, default: Int(timing.following),
+                                                         range: 1...3600))
+        timing.refresh = TimeInterval(try Self.integer("REFRESH_SECONDS", in: env, default: Int(timing.refresh),
+                                                       range: 60...3600))
+        pushTiming = timing
         pushConcurrency = try Self.integer("PUSH_CONCURRENCY", in: env, default: 100, range: 1...1000)
         var limits = Limits()
         limits.maxRegistrations = try Self.integer("MAX_REGISTRATIONS", in: env, default: limits.maxRegistrations,
@@ -104,13 +137,26 @@ struct Config: Sendable {
                                                            range: 1...100_000))
         limits.requestBurst = Double(try Self.integer("RATE_LIMIT_BURST", in: env, default: Int(limits.requestsPerMinute),
                                                       range: 1...100_000))
+        limits.feedRequestsPerMinute = Double(try Self.integer("FEED_RATE_LIMIT_PER_MINUTE", in: env,
+                                                               default: Int(limits.feedRequestsPerMinute), range: 1...100_000))
+        limits.feedRequestBurst = Double(try Self.integer("FEED_RATE_LIMIT_BURST", in: env,
+                                                          default: Int(limits.feedRequestBurst), range: 1...100_000))
         limits.maxChallenges = try Self.integer("MAX_CHALLENGES", in: env, default: limits.maxChallenges, range: 1...10_000_000)
         limits.challengesPerIP = try Self.integer("MAX_CHALLENGES_PER_IP", in: env, default: limits.challengesPerIP,
                                                   range: 1...100_000)
         limits.keysPerIPPerDay = try Self.integer("MAX_KEYS_PER_IP_PER_DAY", in: env, default: limits.keysPerIPPerDay,
                                                   range: 1...100_000)
+        limits.routesPerIPPerDay = try Self.integer("ROUTES_PER_IP_PER_DAY", in: env, default: limits.routesPerIPPerDay,
+                                                    range: 1...100_000)
+        limits.routesPerDay = try Self.integer("ROUTES_PER_DAY", in: env, default: limits.routesPerDay, range: 1...1_000_000)
+        limits.busTimePerIPPerDay = try Self.integer("BUS_TIME_PER_IP_PER_DAY", in: env, default: limits.busTimePerIPPerDay,
+                                                     range: 1...1_000_000)
+        limits.busTimePerDay = try Self.integer("BUS_TIME_PER_DAY", in: env, default: limits.busTimePerDay,
+                                                range: 1...10_000_000)
         self.limits = limits
         logPushes = Self.optional("LOG_PUSHES", in: env) == "1"
+        googleRoutesKey = Self.optional("GOOGLE_ROUTES_API_KEY", in: env)
+        busTimeKey = Self.optional("BUS_TIME_API_KEY", in: env)
         logFile = Self.optional("LOG_FILE", in: env)
     }
 

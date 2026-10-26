@@ -81,7 +81,7 @@ import Testing
         #expect(try trains(for: jz).map(\.trip) == ["076950_J..S12R", "077100_Z..S", "077750_J..S12R"])
         // And the G at Hoyt-Schermerhorn Sts, on a track of its own
         let g = Selection(stationID: "A42", routes: ["G"], direction: .south)
-        #expect(g.heading == "Manhattan - Church Av")
+        #expect(g.heading == "Church Av")
         #expect(g.stopIDs == ["A42S"])
     }
 
@@ -139,7 +139,7 @@ import Testing
         // And toward Court Sq, N
         var court = g
         court.direction = .north
-        #expect(court.heading == "Euclid Av & Queens - Court Sq")
+        #expect(court.heading == "Court Sq")
         #expect(court.stopIDs == ["A42N"])
         #expect(court.shows(train("F", at: "A42N")))
         #expect(!court.shows(train("E", at: "A42S")))
@@ -254,7 +254,7 @@ import Testing
         let arrivals = try TrainService.arrivals(at: Set(church.stopIDs), own: [gFeed], others: otherFeeds, now: now)
         let trains = TrainService.trains(for: church, in: arrivals, now: now)
         #expect(trains.map(\.trip) == ["100000_G..S", "100200_F..S"])
-        #expect(trains.allSatisfy { church.heading(of: $0) == "Manhattan - Church Av" })
+        #expect(trains.allSatisfy { church.heading(of: $0) == "Church Av" })
         // And toward Court Sq, the F going N, but no E
         var court = church
         court.direction = .north
@@ -300,7 +300,7 @@ import Testing
 
         var away = toManhattan
         away.direction = .south
-        #expect(away.heading == "Jamaica - Middle Village")
+        #expect(away.heading == "Middle Village")
         let awayFeeds = TrainService.arrivals(at: Set(away.stopIDs), in: [jzURL: jzFeed, mURL: mFeed], now: now)
         #expect(TrainService.trains(for: [away], in: awayFeeds, now: now)[away.trainID]?.map(\.trip)
             == ["100000_Z..N", "100400_M..S24R"])
@@ -322,10 +322,11 @@ import Testing
             ]),
         ])
         let names = try TrainService.stations(after: jzm, in: [jzFeed, mFeed]).map(\.name)
-        // Each line's in its order: where the J parts from the M at Delancey St-Essex St,
-        // its stops just after it, then the M's. Delancey St-Essex St once, and never Marcy Av
-        #expect(names.prefix(7) == ["Delancey St-Essex St", "Bowery", "Canal St", "Chambers St", "Fulton St", "Broad St",
-                                    "Broadway-Lafayette St"])
+        // In the order the trains get there, where the J parts from the M at Delancey St-Essex
+        // St: the J's Bowery, the M's Broadway-Lafayette St, the J's Canal St, and so on.
+        // Delancey St-Essex St once, and never Marcy Av
+        #expect(names.prefix(7) == ["Delancey St-Essex St", "Bowery", "Broadway-Lafayette St", "Canal St",
+                                    "W 4 St-Wash Sq", "Chambers St", "14 St"])
         #expect(names.last == "Forest Hills-71 Av")
         #expect(names.filter { $0 == "Delancey St-Essex St" }.count == 1)
         #expect(!names.contains("Marcy Av"))

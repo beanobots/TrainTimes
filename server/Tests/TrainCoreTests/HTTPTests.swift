@@ -17,7 +17,8 @@ func testLimits() -> Limits {
 }
 
 func registrationBody(token: String = sampleToken, started: Date? = nil, selection: Selection = prospect,
-                      trip: String = "091200_R..N", state: ContentState? = nil) throws -> [UInt8] {
+                      trip: String = "091200_R..N", state: ContentState? = nil,
+                      widgetToken: String? = nil) throws -> [UInt8] {
     var json: [String: Any] = [
         "token": token.uppercased(),
         "environment": "sandbox",
@@ -28,6 +29,7 @@ func registrationBody(token: String = sampleToken, started: Date? = nil, selecti
     ]
     if let started { json["started"] = started.timeIntervalSinceReferenceDate }
     if let state { json["state"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(state)) }
+    if let widgetToken { json["widgetToken"] = widgetToken }
     return Array(try JSONSerialization.data(withJSONObject: json))
 }
 
@@ -153,6 +155,57 @@ func text(_ response: TestResponse) -> String {
                 #expect(response.status == .noContent)
             }
             #expect(await store.registration(for: sampleToken)?.lastState == nil)
+        }
+    }
+
+    @Test func keepsThePhonesWidgetTokenAndRejectsAMalformedOne() async throws {
+        let widgetToken = String(repeating: "cd34", count: 16)
+        try await withApp { (client, store) async throws in
+            try await client.execute(uri: "/activities", method: .post, headers: bearer,
+                                     body: ByteBuffer(bytes: try registrationBody(widgetToken: widgetToken.uppercased()))) { response in
+                #expect(response.status == .noContent)
+            }
+            #expect(await store.registration(for: sampleToken)?.widgetToken == widgetToken)
+
+            try await client.execute(uri: "/activities", method: .post, headers: bearer,
+                                     body: ByteBuffer(bytes: try registrationBody(widgetToken: "not hex"))) { response in
+                #expect(response.status == .badRequest)
+            }
+            // Without one, as from an older app, there's none
+            try await client.execute(uri: "/activities", method: .post, headers: bearer,
+                                     body: ByteBuffer(bytes: try registrationBody())) { response in
+                #expect(response.status == .noContent)
+            }
+            #expect(await store.registration(for: sampleToken)?.widgetToken == nil)
+        }
+    }
+
+    @Test func givesTheLastPushedStateToAnyoneWithTheToken() async throws {
+        try await withApp { (client, store) async throws in
+            // Unknown, then known but not yet pushed to: nothing to show
+            try await client.execute(uri: "/activities/\(sampleToken)/state", method: .get) { response in
+                #expect(response.status == .notFound)
+            }
+            try await client.execute(uri: "/activities", method: .post, headers: bearer,
+                                     body: ByteBuffer(bytes: try registrationBody())) { _ in }
+            try await client.execute(uri: "/activities/\(sampleToken)/state", method: .get) { response in
+                #expect(response.status == .notFound)
+            }
+
+            let revision = try #require(await store.registration(for: sampleToken)).revision
+            let pushed = state(train: 4, trip: "z")
+            try await store.apply([.pushed(token: sampleToken, revision: revision, state: pushed, at: now)])
+            // No signature needed: the widgets have none to give
+            try await client.execute(uri: "/activities/\(sampleToken.uppercased())/state", method: .get) { response in
+                #expect(response.status == .ok)
+                #expect(response.headers[.cacheControl] == "no-store")
+                // As ActivityKit decodes it
+                let decoded = try JSONDecoder().decode(ContentState.self, from: Data(response.body.readableBytesView))
+                #expect(decoded == pushed)
+            }
+            try await client.execute(uri: "/activities/xyz/state", method: .get) { response in
+                #expect(response.status == .badRequest)
+            }
         }
     }
 

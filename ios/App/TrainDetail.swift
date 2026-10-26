@@ -2,29 +2,29 @@ import CoreLocation
 import MapKit
 import SwiftUI
 
-/// One train, opened from the Live tab: its times, countdown, alerts and map.
-/// A favorite's walking time is saved with it; ☆ adds or removes it.
+/// One train's times, countdown, alerts and map.
 struct TrainDetail: View {
-    @Environment(FavoritesStore.self) private var favorites
     @Environment(SettingsStore.self) private var settings
     @Environment(\.accessibilityDifferentiateWithoutColor) private var withoutColor
     @State private var selection: Selection
     @State private var board: Board?
     @State private var loadState = LoadState.loading
-    /// When the board's times were fetched.
     @State private var timesFetched: Date?
-    /// Whether the last try for new times failed, so those shown are older.
+    /// The last refresh failed, so the times shown are stale.
     @State private var refreshFailed = false
-    /// When the board's alerts and elevator outages were fetched, which change
-    /// far less often than the times.
+    /// When alerts and elevator outages were fetched; they change far less often than times.
     @State private var noticesFetched: Date?
-    /// Moves along every few seconds so trains you can no longer catch drop off the list.
+    /// When the times shown were fetched, if they're a widget's or the countdown's (saved by
+    /// `SharedStore`), shown until this page gets its own: below ground that can take a while.
+    @State private var savedFetched: Date?
+    /// The MTA couldn't be reached and there were no times to catch, so the timetable's are shown.
+    @State private var fromTimetable = false
+    /// Ticks every few seconds so uncatchable trains drop off.
     @State private var now = Date.now
-    /// The train this train's Lock Screen countdown is for, while one is running.
+    /// The arrival time the running Lock Screen countdown is for, if any.
     @State private var countdownTrain: Date?
     @State private var countdownProblem: String?
-    /// While a countdown's starting, so a second tap doesn't start another,
-    /// and a load begun meanwhile gets the notices too.
+    /// Blocks a second tap, and makes loads during startup fetch notices too.
     @State private var startingCountdown = false
     @State private var choosingTrain = false
 
@@ -35,24 +35,13 @@ struct TrainDetail: View {
         _countdownTrain = State(initialValue: TrainActivityController.currentTrain(for: selection))
     }
 
-    private var isFavorite: Bool { favorites.contains(selection) }
-
     private var station: Station? { selection.station }
-    /// The trains you can still catch, given the walking time.
+    /// Trains you can still catch given the walking time.
     private var trains: [Arrival] { selection.catchable(board?.trains ?? [], now: now) }
 
     var body: some View {
         List {
             trainSection
-            Section {
-                WalkStepper(minutes: $selection.walkMinutes)
-            } header: {
-                Text("Getting there")
-            } footer: {
-                Text(isFavorite
-                     ? "Trains you can't reach in time are left out, here and in Favorites."
-                     : "Trains you can't reach in time are left out. Add this train to Favorites to keep its walking time.")
-            }
             trainsSection
             countdownSection
             if loadState == .loaded, let board {
@@ -65,37 +54,25 @@ struct TrainDetail: View {
         }
         .navigationTitle(station?.name ?? "Train")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button(isFavorite ? "Remove from Favorites" : "Add to Favorites", systemImage: isFavorite ? "star.fill" : "star") {
-                    if isFavorite {
-                        favorites.remove(selection)
-                    } else {
-                        favorites.add(selection)
-                    }
-                }
-            }
-        }
         .sheet(isPresented: $choosingTrain) {
             TrainPicker(selection: chosenTrain)
         }
-        // The walking time is a favorite's own
-        .onChange(of: selection) { _, selection in favorites.update(selection) }
         .refreshable { await loadBoard(includingNotices: true) }
-        // New times every 30 seconds, and alerts every 10 minutes, or with the times while
-        // counting down; a new walking time needs none
+        // Times every 30 s; alerts every 10 min (or with the times while counting down).
+        // Keyed on trainID, so a walking-time change doesn't reload
         .task(id: selection.trainID) {
             while !Task.isCancelled {
                 await loadBoard()
-                try? await Task.sleep(for: .seconds(30))
+                // After a failure, sooner; and as soon as the network's back (a station after a
+                // tunnel)
+                await Connectivity.shared.pause(for: .seconds(refreshFailed || loadState == .failed ? 10 : 30))
             }
         }
         .ticking($now)
-        // The countdown's, on the list: on its section, each of its rows,
-        // header and footer would run them. A problem starting one is the
-        // other train's
+        // Countdown handlers live on the List: on the Section, each row, header and footer
+        // would run them. A start error belongs to the previous train
         .onChange(of: selection.trainID) { countdownProblem = nil }
-        // The countdown gets the times this page fetches, so it moves on with them
+        // Feed this page's fetched times to the countdown
         .onChange(of: timesFetched) {
             guard countdownTrain != nil, let board, let fetched = timesFetched else { return }
             let shown = selection
@@ -106,22 +83,22 @@ struct TrainDetail: View {
         }
     }
 
-    /// The train the picker changes: a favorite moves to the new train, keeping
-    /// its place and walking time, and the old train's times and alerts go.
+    /// Picking a new train clears the old train's times and alerts.
     private var chosenTrain: Binding<Selection> {
         Binding {
             selection
         } set: { chosen in
             guard chosen.trainID != selection.trainID else { return }
-            favorites.replace(selection, with: chosen)
             board = nil
             noticesFetched = nil
             refreshFailed = false
-            selection = favorites.favorite(matching: chosen) ?? chosen
+            savedFetched = nil
+            fromTimetable = false
+            selection = chosen
         }
     }
 
-    /// Which train this is; the arrow chooses another, in three steps.
+    /// The current train; tapping opens the picker to choose another.
     private var trainSection: some View {
         Section {
             Button {
@@ -137,7 +114,7 @@ struct TrainDetail: View {
 
     private var trainsSection: some View {
         Section {
-            // Old times that have all gone say nothing of what's coming
+            // Stale times that have all passed tell you nothing
             if loadState == .failed || (refreshFailed && trains.isEmpty) {
                 Text("Couldn't reach the MTA").foregroundStyle(.secondary)
             } else if loadState == .loading && trains.isEmpty {
@@ -149,8 +126,26 @@ struct TrainDetail: View {
                     Text("No \(selection.linesLabel) trains predicted").foregroundStyle(.secondary)
                 }
             } else {
-                if refreshFailed, let timesFetched {
+                if fromTimetable {
+                    Label("Couldn't reach the MTA, so these are timetable times.", systemImage: "wifi.exclamationmark")
+                        .foregroundStyle(.secondary)
+                } else if let savedFetched {
+                    if refreshFailed {
+                        Label("Couldn't reach the MTA, so these times are from \(Spoken.clock(savedFetched)).",
+                              systemImage: "wifi.exclamationmark")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Label("These times are from \(Spoken.clock(savedFetched)). Getting new ones…",
+                              systemImage: "clock.arrow.circlepath")
+                            .foregroundStyle(.secondary)
+                    }
+                } else if refreshFailed, let timesFetched {
                     Label("Couldn't reach the MTA, so these times are from \(Spoken.clock(timesFetched)).",
+                          systemImage: "wifi.exclamationmark")
+                        .foregroundStyle(.secondary)
+                }
+                if let scheduled = board?.scheduledRoutes, !scheduled.isEmpty, !fromTimetable {
+                    Label("Couldn't get live times for the \(Lines.list(scheduled)), so \(scheduled.count == 1 ? "its" : "their") times are the timetable's.",
                           systemImage: "wifi.exclamationmark")
                         .foregroundStyle(.secondary)
                 }
@@ -205,7 +200,7 @@ struct TrainDetail: View {
         defer { startingCountdown = false }
         do {
             let train = try await TrainActivityController.start(for: selection)
-            // Unless another train was chosen meanwhile
+            // Ignore if another train was chosen meanwhile
             guard selection.trainID == trainID else { return }
             countdownTrain = train
             countdownProblem = nil
@@ -235,8 +230,8 @@ struct TrainDetail: View {
 
     private func accessibilitySection(_ station: Station) -> some View {
         Section {
-            // The chosen lines' platforms, each with its lines where they differ:
-            // the N's is step-free at 14 St-Union Sq, the 4's isn't
+            // Per-platform rows only when access differs (e.g. at 14 St-Union Sq the N is
+            // step-free, the 4 isn't)
             let platforms = selection.platforms
             if Set(platforms.map(\.accessibility)).count > 1 {
                 ForEach(platforms) { platform in
@@ -260,7 +255,7 @@ struct TrainDetail: View {
                     if board.outages == nil {
                         CouldntLoadNote(what: "elevator status")
                     } else if outages.isEmpty {
-                        // Only those that serve the lines chosen are listed
+                        // Outages are filtered to the chosen lines
                         Label("No elevator or escalator outages for the \(Lines.list(selection.routes))", systemImage: "checkmark.circle")
                             .foregroundStyle(.secondary)
                     }
@@ -269,7 +264,7 @@ struct TrainDetail: View {
                     OutageRow(outage: outage)
                 }
             } else if EquipmentDirectory.hasEquipment(atComplex: station.complex) {
-                // The station's go to other platforms: Canal St's to the 6's, not the R's
+                // The station's equipment serves other platforms (e.g. Canal St: the 6, not the R)
                 Text("No elevators or escalators for the \(Lines.list(selection.routes))").foregroundStyle(.secondary)
             } else {
                 Text("No elevators or escalators at this station").foregroundStyle(.secondary)
@@ -281,8 +276,8 @@ struct TrainDetail: View {
         }
     }
 
-    /// Stairs where there's no step-free access to `platform` going this
-    /// train's way, as at 28 St's 6 uptown, which is step-free downtown only.
+    /// Stairs if `platform` isn't step-free in this train's direction (e.g. 28 St's 6 is
+    /// step-free downtown only).
     private func stepFreeSymbol(_ platform: Platform) -> String {
         platform.isStepFree(going: selection.direction) == false ? "figure.stairs" : "figure.roll"
     }
@@ -293,7 +288,7 @@ struct TrainDetail: View {
                 .frame(height: 240)
                 .listRowInsets(EdgeInsets())
             Button {
-                // Named, so Maps says the station rather than the street address
+                // Named so Maps shows the station, not the street address
                 let item = MKMapItem(placemark: MKPlacemark(coordinate: walkingDestination(station)))
                 item.name = station.name
                 item.openInMaps(launchOptions: [MKLaunchOptionsDirectionsModeKey: MKLaunchOptionsDirectionsModeWalking])
@@ -311,17 +306,16 @@ struct TrainDetail: View {
         }
     }
 
-    /// Where walking directions go: the way in to this train's platforms
-    /// nearest you, or without a recent fix on you, nearest the middle of the
-    /// station; in step-free mode, one with an elevator where there is one.
-    /// The middle of the station where the MTA lists no way in.
+    /// The entrance to this train's platforms nearest you (or the station centre, without a
+    /// recent fix). In step-free mode, prefers elevators. Falls back to the station centre
+    /// if the MTA lists no entrances.
     private func walkingDestination(_ station: Station) -> CLLocationCoordinate2D {
         let platforms = selection.platforms.isEmpty ? station.platforms : selection.platforms
         let ways = platforms.flatMap(\.entrances).filter { $0.exitOnly != true }
         let elevators = ways.filter(\.isElevator)
         let candidates = settings.settings.stepFree && !elevators.isEmpty ? elevators : ways
         let middle = CLLocation(latitude: station.lat, longitude: station.lon)
-        // Where you were a while ago says little about which side you'll come from
+        // Ignore fixes older than 10 minutes
         let here = CLLocationManager().location.flatMap { Date.now.timeIntervalSince($0.timestamp) < 10 * 60 ? $0 : nil }
         let from = here ?? middle
         let nearest = candidates.min { a, b in
@@ -331,15 +325,22 @@ struct TrainDetail: View {
         return nearest.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) } ?? middle.coordinate
     }
 
-    /// Times already shown stay up while new ones load, and if they don't come,
-    /// saying how old they are. Alerts and outages come with them only when
-    /// `includingNotices`, or when the ones shown are 10 minutes old, or while
-    /// this train's countdown is running or starting, which gets them too and
-    /// would otherwise lose a newer notice to them; otherwise those shown stay.
+    /// Shown times stay up while loading, and on failure are kept with their age noted.
+    /// Alerts and outages are refetched only if `includingNotices`, if they're 10 minutes old,
+    /// or while this train's countdown is running or starting (it gets them too, and would
+    /// otherwise have a newer notice overwritten by older ones).
+    /// Before this page's own times, any a widget or the countdown saved still catchable
+    /// (`savedFetched`).
     private func loadBoard(includingNotices: Bool = false) async {
-        if board == nil { loadState = .loading }
-        // The times are as of when the fetch begins; `now` ticks on while it
-        // runs, and a countdown refreshed meanwhile keeps its newer times
+        if board == nil {
+            loadState = .loading
+            if let saved = SharedStore.loadBoard(for: selection), !selection.catchable(saved.trains, now: .now).isEmpty {
+                board = Board(trains: saved.trains)
+                savedFetched = saved.fetched
+            }
+        }
+        // Times are stamped at fetch start; `now` ticks on meanwhile, and a countdown
+        // refreshed during the fetch keeps its newer times
         let started = Date.now
         now = started
         countdownTrain = TrainActivityController.currentTrain(for: selection)
@@ -347,13 +348,14 @@ struct TrainDetail: View {
         let fetchesNotices = includingNotices || board == nil || countdownTrain != nil || startingCountdown
             || noticesFetched.map { !$0.isWithin(10 * 60, before: started) } ?? true
         do {
+            // A line whose feed can't be had gets the timetable's times, if another's can
             var fetched = try await TrainService.board(for: selection, includingAlerts: fetchesNotices,
-                                                       includingOutages: fetchesNotices)
-            // A newer choice cancels this load, but can't stop the fetch: what
-            // it brings is the other train's
+                                                       includingOutages: fetchesNotices,
+                                                       fillingFrom: { TimetableStore.load() })
+            // A newer choice cancels the task but not the fetch; drop the old train's result
             guard !Task.isCancelled, trainID == selection.trainID else { return }
-            // Only once both have come are they good for 10 minutes; until
-            // then, any shown before stay, and the next load tries again
+            // Notices count as fresh for 10 minutes only once both arrive; otherwise keep the
+            // old ones and retry next load
             if fetchesNotices && fetched.alerts != nil && fetched.outages != nil {
                 noticesFetched = started
             }
@@ -361,15 +363,27 @@ struct TrainDetail: View {
             fetched.outages = fetched.outages ?? board?.outages
             board = fetched
             timesFetched = started
+            savedFetched = nil
+            fromTimetable = false
             refreshFailed = false
             loadState = .loaded
         } catch {
-            // a newer choice cancels this load; that isn't a failure
+            // Cancelled by a newer choice; not a failure
             guard !Task.isCancelled, trainID == selection.trainID else { return }
+            // Nothing shown you can still catch: the timetable's times, if there's a timetable
+            if selection.catchable(board?.trains ?? [], now: .now).isEmpty, let timetable = TimetableStore.load() {
+                var timed = TrainService.board(for: selection, from: timetable)
+                timed.alerts = board?.alerts
+                timed.outages = board?.outages
+                board = timed
+                savedFetched = nil
+                fromTimetable = true
+            }
             if board == nil {
                 loadState = .failed
             } else {
                 refreshFailed = true
+                loadState = .loaded
             }
         }
     }
@@ -377,11 +391,11 @@ struct TrainDetail: View {
 
 private struct TrainRow: View {
     let train: Arrival
-    /// When to set off, if a walking time is set.
+    /// When to set off; nil without a walking time.
     let leave: Date?
-    /// Shown with its bullet: one of several lines chosen, or an N running local on the R, say.
+    /// Show the line bullet (several lines chosen, or e.g. an N running local on the R).
     let marksLine: Bool
-    /// Which times get their symbol: a live prediction as well as its green.
+    /// Which times get a symbol in addition to colour.
     let marks: TimeMarks
 
     var body: some View {
@@ -399,7 +413,7 @@ private struct TrainRow: View {
                 Text(terminal).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer()
-            // Stopping at 0:00: a train held at the platform is still listed after its time
+            // Clamp at 0:00: a train held at the platform stays listed past its time
             if let leave {
                 Text("leave in").font(.footnote).foregroundStyle(.secondary)
                 Text(timerInterval: min(leave, Date.now)...leave, countsDown: true)
@@ -419,7 +433,7 @@ private struct AlertRow: View {
     let alert: ServiceAlert
 
     var body: some View {
-        // Folded away only where there's more to read
+        // Disclosure only when there's more to show
         if alert.period == nil && alert.details.isEmpty {
             summary
         } else {
@@ -440,7 +454,6 @@ private struct AlertRow: View {
         }
     }
 
-    /// Its kind and headline.
     private var summary: some View {
         VStack(alignment: .leading, spacing: 4) {
             NoticeKindLabel(kind: .alert(alert.kind))
@@ -531,7 +544,7 @@ private struct EntranceMark: View {
                     .overlay(Circle().stroke(Color.white, lineWidth: 2))
             }
         }
-        // What its colour and fill say
+        // Speak what the colour and fill show
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(entrance.isElevator ? "Elevator entrance" : entrance.exitOnly == true ? "Exit only" : "Entrance")
     }

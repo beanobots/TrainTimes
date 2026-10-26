@@ -14,14 +14,25 @@ import Testing
         #expect(ActivityState.push(last, last: nil, lastPush: nil, now: now) == .update)
     }
 
-    @Test func trainTimeMovingUnder30sIsNotEnough() {
-        #expect(decision(state(train: 5 + 29.0 / 60)) == .none)
-        #expect(decision(state(train: 5 - 29.0 / 60)) == .none)
+    @Test func trainTimeMovingEarlier15sOrLessIsNotEnough() {
+        #expect(decision(state(train: 5 - 14.0 / 60)) == .none)
+        #expect(decision(state(train: 4.75)) == .none)
     }
 
-    @Test func trainTimeMoving30sOrMoreIsAnUpdate() {
-        #expect(decision(state(train: 5.5)) == .update)
+    @Test func trainTimeMovingEarlierOver15sIsAnUpdate() {
+        #expect(decision(state(train: 5 - 16.0 / 60)) == .update)
         #expect(decision(state(train: 4.5)) == .update)
+        #expect(decision(state(train: 4)) == .update)
+    }
+
+    @Test func trainTimeMovingLater60sOrLessIsNotEnough() {
+        #expect(decision(state(train: 5.5)) == .none)
+        #expect(decision(state(train: 6)) == .none)
+    }
+
+    @Test func trainTimeMovingLaterOver60sIsAnUpdate() {
+        #expect(decision(state(train: 5 + 61.0 / 60)) == .update)
+        #expect(decision(state(train: 7)) == .update)
     }
 
     @Test func anotherTrainIsAnUpdate() {
@@ -49,6 +60,21 @@ import Testing
         var new = last
         new.updated = now.addingTimeInterval(100)
         #expect(decision(new) == .none)
+    }
+
+    @Test func timingCanBeChanged() {
+        let timing = PushTiming(earlier: 60, later: 120, following: 180, refresh: 600)
+        func decision(_ new: ContentState, at time: Date = now) -> ActivityState.Push {
+            ActivityState.push(new, last: last, lastPush: pushed, now: time, timing: timing)
+        }
+        #expect(decision(state(train: 4.5)) == .none)
+        #expect(decision(state(train: 3.9)) == .update)
+        #expect(decision(state(train: 7)) == .none)
+        #expect(decision(state(train: 7.1)) == .update)
+        #expect(decision(state(train: 5, following: [8, 10])) == .none)
+        #expect(decision(state(train: 5, following: [9, 10])) == .update)
+        #expect(decision(last, at: pushed.addingTimeInterval(599)) == .none)
+        #expect(decision(last, at: pushed.addingTimeInterval(600)) == .refresh)
     }
 
     @Test func lowPriorityRefreshAfterFiveMinutes() {

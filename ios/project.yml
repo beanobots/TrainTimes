@@ -1,15 +1,17 @@
-# Describes the Xcode project; XcodeGen turns it into NextRTrain.xcodeproj on the
-# build machine (see ../.github/workflows/build-ios.yml), so no .xcodeproj is stored.
+# Describes the Xcode project; run `xcodegen generate` here to make
+# NextRTrain.xcodeproj, so no .xcodeproj is stored.
 name: NextRTrain
 options:
   deploymentTarget:
-    iOS: "17.0"
+    # WidgetKit push updates (the push server reloading widgets with the countdown's times), and
+    # New Trip's Show on Widget as the tab bar's accessory (26.1)
+    iOS: "26.1"
 settings:
   base:
     SWIFT_VERSION: "5.0"
     MARKETING_VERSION: "1.0"
     CURRENT_PROJECT_VERSION: "1"
-    # Signing for builds from Xcode; the CI build is unsigned and ignores it
+    # Signing for builds from Xcode
     DEVELOPMENT_TEAM: XUU899AG4D
 targets:
   NextRTrain:
@@ -18,23 +20,43 @@ targets:
     sources:
       - App
       - Shared
+      # The Widgets tab draws the Next train and Transfers widgets as on the Home Screen
+      - Widget/RTrainWidget.swift
+      - Widget/NextTrainBoard.swift
+      - Widget/WaysBoard.swift
+      - Widget/Pills.swift
+      - Widget/BoardStyle.swift
+      - Widget/StopCard.swift
     dependencies:
       - target: RTrainWidget
+        embed: true
+      - target: ShareExtension
         embed: true
     info:
       path: App/Info.plist
       properties:
-        CFBundleDisplayName: Train Times
+        CFBundleDisplayName: Leeway
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         # traintimes:// links, such as the widget's alert opening it in the app
         CFBundleURLTypes:
-          - CFBundleURLName: Train Times
+          - CFBundleURLName: Leeway
             CFBundleURLSchemes:
               - traintimes
         # The Lock Screen and Dynamic Island countdown
         NSSupportsLiveActivities: true
-        # Stations near you, in the Live tab and on the Nearby widget
+        # The push server's countdown updates, at high priority without iOS throttling them
+        NSSupportsLiveActivitiesFrequentUpdates: true
+        # The push server (ActivityPush, PushServer)
+        TrainTimesServerURL: https://api.dctp.dev
+        # A countdown the push server doesn't have refreshes in the background, and the
+        # timetable to fall back on (TimetableStore) about once a day
+        BGTaskSchedulerPermittedIdentifiers:
+          - com.rtrainwidget.app.refresh
+          - com.rtrainwidget.app.timetable
+        UIBackgroundModes:
+          - fetch
+        # Stations near you, in the Nearby tab and on the Nearby widget
         NSLocationWhenInUseUsageDescription: Your location shows the stations near you and their next trains, in the app and on the Nearby widget.
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
@@ -45,13 +67,15 @@ targets:
       properties:
         com.apple.security.application-groups:
           - group.com.rtrainwidget.app
+        # The countdown's push token; Xcode signs distribution builds with production
+        aps-environment: development
+        # App Attest, for the push server. Ignored once distributed (TestFlight, App Store),
+        # which always use production
+        com.apple.developer.devicecheck.appattest-environment: development
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.rtrainwidget.app
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        # Every line's bullet, for the icon to follow the default widget's line
-        # (AppIcon.swift); the build lists them in Info.plist
-        ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS: YES
         # Code shared with the widget checks this: only the app may start or update Live Activities
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) APP
   RTrainWidget:
@@ -63,7 +87,7 @@ targets:
     info:
       path: Widget/Info.plist
       properties:
-        CFBundleDisplayName: Train Times
+        CFBundleDisplayName: Leeway
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSExtension:
@@ -72,12 +96,52 @@ targets:
         # permission, which then reads "While Using the App or Widgets"
         NSWidgetWantsLocation: true
         NSLocationWhenInUseUsageDescription: Your location shows the stations near you and their next trains, in the app and on the Nearby widget.
+        # The push server, for the countdown's times as last pushed (CountdownLookup)
+        TrainTimesServerURL: https://api.dctp.dev
     entitlements:
       path: Config/Widget.entitlements
       properties:
         com.apple.security.application-groups:
           - group.com.rtrainwidget.app
+        # WidgetKit push updates: the push server reloads the widgets as the countdown's times change
+        aps-environment: development
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.rtrainwidget.app.widget
+        SKIP_INSTALL: YES
+  # The Share sheet's action for Apple Maps and Google Maps directions, which the Transit
+  # Directions widget then shows for an hour
+  ShareExtension:
+    type: app-extension
+    platform: iOS
+    # Shared, and the widget's drawing to show it as the Home Screen will, through symlinks in
+    # Share/Linked: Xcode can't host previews in a share extension, so its files' previews would
+    # all fail if it saw them in this target
+    sources:
+      - Share
+    info:
+      path: Share/Info.plist
+      properties:
+        CFBundleDisplayName: Leeway
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.share-services
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ShareViewController
+          NSExtensionAttributes:
+            # A link, or text with one in it (Google Maps shares "Directions from … https://…")
+            NSExtensionActivationRule:
+              NSExtensionActivationSupportsWebURLWithMaxCount: 1
+              NSExtensionActivationSupportsText: true
+        # Where a place shared on its own is reached from
+        NSLocationWhenInUseUsageDescription: Your location is where directions to a shared place start.
+        TrainTimesServerURL: https://api.dctp.dev
+    entitlements:
+      path: Config/Share.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.rtrainwidget.app
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.rtrainwidget.app.share
         SKIP_INSTALL: YES

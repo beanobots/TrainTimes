@@ -68,6 +68,14 @@ actor DailyLimiter {
         counts[client, default: 0] += 1
     }
 
+    /// Counts one more for `client` if it's under the limit (`allows`), in the one step, so
+    /// requests at the same time can't all get the last one; whether it was.
+    func take(_ client: String, now: Date = .now) -> Bool {
+        guard allows(client, now: now) else { return false }
+        record(client, now: now)
+        return true
+    }
+
     var tracked: Int { counts.count }
 
     /// Whole seconds until the counts start again, at midnight UTC.

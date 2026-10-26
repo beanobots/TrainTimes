@@ -204,6 +204,28 @@ import Testing
                                      toggled: tapped, anyToCatch: some, now: now))
     }
 
+    @Test func aWidgetAskedToShowAnothersTimesReusesThemHoweverLateItReloads() {
+        let some = { true }
+        // Another widget saved them, then had this one reload; iOS got to it 3 minutes later
+        let saved = time(-3)
+        let synced = saved.addingTimeInterval(2)
+        #expect(TimelinePlan.reuses(saved: saved, refreshed: nil, toggled: nil, synced: synced, anyToCatch: some, now: now))
+        #expect(!TimelinePlan.reuses(saved: saved, refreshed: nil, toggled: nil, synced: synced, anyToCatch: { false },
+                                     now: now))
+        // Not times saved long before it was asked, nor after
+        #expect(!TimelinePlan.reuses(saved: time(-10), refreshed: nil, toggled: nil, synced: synced, anyToCatch: some,
+                                     now: now))
+        #expect(!TimelinePlan.reuses(saved: synced.addingTimeInterval(60), refreshed: nil, toggled: nil, synced: synced,
+                                     anyToCatch: some, now: now.addingTimeInterval(120)))
+        // Only for a reload interval after: then, its own
+        let later = synced.addingTimeInterval(TimelinePlan.reloadInterval(at: now) + 1)
+        #expect(!TimelinePlan.reuses(saved: saved, refreshed: nil, toggled: nil, synced: synced, anyToCatch: some,
+                                     now: later))
+        // Never from before the widget's ↻
+        #expect(!TimelinePlan.reuses(saved: saved, refreshed: saved.addingTimeInterval(1), toggled: nil, synced: synced,
+                                     anyToCatch: some, now: now))
+    }
+
     // MARK: The clock set back
 
     @Test func aTimeFromAfterNowIsOld() {

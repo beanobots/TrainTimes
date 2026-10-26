@@ -108,8 +108,9 @@ import Testing
         #expect(alert.period == "Until further notice")
         #expect(alert.brief?.routes == ["R"])
 
+        // Every kind has the lines it's for, for the banner
         let notice = try AlertsFeed.entries(in: feed([self.alert("2", type: "Station Notice")]), now: now)
-        #expect(AlertsFeed.alerts(for: prospect, in: notice, now: now).first?.brief == nil)
+        #expect(AlertsFeed.alerts(for: prospect, in: notice, now: now).first?.brief?.routes == ["R"])
     }
 
     @Test func theSameWordsWorkedOutAhead() throws {

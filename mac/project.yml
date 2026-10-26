@@ -1,0 +1,56 @@
+# Describes the Xcode project; run `xcodegen generate` here to make
+# TrainTimesAdmin.xcodeproj, so no .xcodeproj is stored.
+name: TrainTimesAdmin
+options:
+  deploymentTarget:
+    macOS: "15.0"
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    # Signed to run on this Mac only: it's not sandboxed, as it reads the
+    # server's files in /usr/local/traintimes and runs launchctl
+    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGN_STYLE: Manual
+    ENABLE_HARDENED_RUNTIME: NO
+targets:
+  TrainTimesAdmin:
+    type: application
+    platform: macOS
+    sources:
+      - App
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.traintimes.admin
+        PRODUCT_NAME: Train Times Server
+        # The app's icon (App/Assets.xcassets)
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Train Times Server
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+  TrainTimesAdminTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - Tests
+    dependencies:
+      - target: TrainTimesAdmin
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.traintimes.admin.tests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Train Times Server.app/Contents/MacOS/Train Times Server"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+schemes:
+  TrainTimesAdmin:
+    build:
+      targets:
+        TrainTimesAdmin: all
+        TrainTimesAdminTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - TrainTimesAdminTests

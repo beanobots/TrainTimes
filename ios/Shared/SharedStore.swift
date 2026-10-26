@@ -1,51 +1,40 @@
+import CryptoKit
 import Foundation
 
-/// Where the app leaves the choice for the widget: a file in an App Group
-/// container that both belong to (a widget can't read the app's own files).
+/// Files in the App Group container shared by the app and widgets (widgets can't read the app's
+/// own files).
 enum SharedStore {
-    static let fallbackGroupID = "group.com.rtrainwidget.app"
+    /// As in Config/App.entitlements and Config/Widget.entitlements.
+    static let groupID = "group.com.rtrainwidget.app"
 
-    /// AltStore swaps the group for one unique to your Apple ID and lists it in
-    /// Info.plist as ALTAppGroups, so look there first, in the widget's and then the app's.
-    private static var candidateGroups: [String] {
-        var groups = altGroups(in: Bundle.main)
-        if Bundle.main.bundleURL.pathExtension == "appex" {
-            let appURL = Bundle.main.bundleURL.deletingLastPathComponent().deletingLastPathComponent()
-            if let app = Bundle(url: appURL) { groups += altGroups(in: app) }
-        }
-        return groups + [fallbackGroupID]
+    /// Nil if not in the App Group (e.g. signed without the entitlement).
+    private static let container: URL? = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: groupID)
+    private static let file = url(named: "selection.json")
+    private static let countdownFile = url(named: "countdown.json")
+    private static let postedCountdownFile = url(named: "posted-countdown.json")
+    private static let tapsFile = url(named: "taps.json")
+    private static let boardsFile = url(named: "boards.json")
+    private static let widgetsFile = url(named: "widgets.json")
+    private static let settingsFile = url(named: "settings.json")
+    private static let placeFile = url(named: "place.json")
+    private static let nearbyFixFile = url(named: "nearby-fix.json")
+
+    /// The App Group file `name`, "quick-trip.json"; nil if not in the App Group.
+    static func url(named name: String) -> URL? {
+        container?.appendingPathComponent(name)
     }
 
-    private static func altGroups(in bundle: Bundle) -> [String] {
-        bundle.object(forInfoDictionaryKey: "ALTAppGroups") as? [String] ?? []
-    }
-
-    /// Nil when this install isn't in an App Group, e.g. it was signed without the entitlement.
-    private static let container: URL? = candidateGroups
-        .lazy
-        .compactMap { FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: $0) }
-        .first
-    private static let file = container?.appendingPathComponent("selection.json")
-    private static let countdownFile = container?.appendingPathComponent("countdown.json")
-    private static let mapFile = container?.appendingPathComponent("map.json")
-    private static let alertFile = container?.appendingPathComponent("alert.json")
-    private static let tapsFile = container?.appendingPathComponent("taps.json")
-    private static let boardsFile = container?.appendingPathComponent("boards.json")
-    private static let widgetsFile = container?.appendingPathComponent("widgets.json")
-    private static let settingsFile = container?.appendingPathComponent("settings.json")
-    private static let placeFile = container?.appendingPathComponent("place.json")
-
-    /// Whether a choice made in the app can reach the widget on this install.
+    /// Whether the app can share data with the widget on this install.
     static var isAvailable: Bool { file != nil }
 
     static func load() -> Selection {
         savedSelection()?.validated() ?? .fallback
     }
 
-    /// The app's choice as saved, before checking it against the station list.
+    /// The saved selection, unvalidated.
     private static func savedSelection() -> Selection? {
         guard let file, let data = try? Data(contentsOf: file) else { return nil }
-        return try? JSONDecoder().decode(Selection.self, from: data)
+        return (try? JSONDecoder().decode(Selection.self, from: data))?.droppingSavedWalk
     }
 
     @discardableResult
@@ -54,19 +43,17 @@ enum SharedStore {
         return (try? data.write(to: file, options: .atomic)) != nil
     }
 
-    /// The train the Lock Screen countdown is for. Widgets can't see Live
-    /// Activities, so the app leaves this for their walk buttons.
+    /// The Lock Screen countdown's train, saved by the app for widgets' walk buttons.
     struct Countdown: Codable, Equatable {
         /// A `Selection.trainID`.
         var trainID: String
         /// When iOS will have ended it.
         var ends: Date
-        /// The `TrainEntry.widgetID` of the widget whose walk button started
-        /// it, which alone shows it; nil when started in the app, when every
-        /// widget for the train does.
+        /// The `TrainEntry.widgetID` whose walk button started it; only that widget shows it. Nil if
+        /// started in the app: every widget for the train shows it.
         var widgetID: String? = nil
 
-        /// Whether it's this widget's, so its walk button stops it.
+        /// Whether this widget shows it, so its walk button stops it.
         func isShown(onWidget widgetID: String, for trainID: String) -> Bool {
             trainID == self.trainID && (self.widgetID == nil || self.widgetID == widgetID)
         }
@@ -76,12 +63,38 @@ enum SharedStore {
         }
     }
 
+    /// The countdown's state as the app last posted it, with its push token, so widgets for its
+    /// train can show its times (`CountdownLookup`) even where they can't read it from iOS.
+    struct PostedCountdown: Codable, Equatable {
+        /// A `Selection.trainID`.
+        var trainID: String
+        var state: CountdownState
+        /// The Live Activity's push token, in lowercase hex, for its state as the push server last
+        /// pushed it; nil before iOS gives it one.
+        var pushToken: String?
+    }
+
+    static func loadPostedCountdown() -> PostedCountdown? {
+        guard let postedCountdownFile, let data = try? Data(contentsOf: postedCountdownFile) else { return nil }
+        return try? JSONDecoder().decode(PostedCountdown.self, from: data)
+    }
+
+    /// Pass nil when no countdown is running.
+    static func savePostedCountdown(_ posted: PostedCountdown?) {
+        guard let postedCountdownFile else { return }
+        if let posted, let data = try? JSONEncoder().encode(posted) {
+            try? data.write(to: postedCountdownFile, options: .atomic)
+        } else {
+            try? FileManager.default.removeItem(at: postedCountdownFile)
+        }
+    }
+
     static func loadCountdown() -> Countdown? {
         guard let countdownFile, let data = try? Data(contentsOf: countdownFile) else { return nil }
         return try? JSONDecoder().decode(Countdown.self, from: data)
     }
 
-    /// Nil once no countdown is running.
+    /// Pass nil when no countdown is running.
     static func saveCountdown(_ countdown: Countdown?) {
         guard let countdownFile else { return }
         if let countdown, let data = try? JSONEncoder().encode(countdown) {
@@ -91,106 +104,56 @@ enum SharedStore {
         }
     }
 
-    /// Whether this widget (a `TrainEntry.widgetID`) shows where this train
-    /// (a `Selection.trainID`) is instead of the later trains. A widget can't
-    /// keep state of its own, so its map button leaves it here. Kept by train
-    /// too, so the other train of commuting hours starts out with its times.
-    static func showsMap(for trainID: String, in widgetID: String) -> Bool {
-        trains(in: mapFile).contains("\(widgetID) \(trainID)")
-    }
-
-    /// Shows the stops (`on`), or the times, on this widget. Set rather than
-    /// flipped: two widgets alike can share a widget id, and one still showing
-    /// the other state would flip it back.
-    static func setMap(_ on: Bool, for trainID: String, in widgetID: String) {
-        set("\(widgetID) \(trainID)", to: on, in: mapFile)
-    }
-
-    /// Whether this widget shows the alert of this train, with these alerts
-    /// (a `Selection.alertID`), in full instead of the times. Its banner
-    /// leaves it here, as the map button does.
-    static func showsAlert(for alertID: String, in widgetID: String) -> Bool {
-        trains(in: alertFile).contains("\(widgetID) \(alertID)")
-    }
-
-    /// Opens the widget's alert in full (`on`), or closes it, as `setMap` does the map.
-    static func setAlert(_ on: Bool, for alertID: String, in widgetID: String) {
-        set("\(widgetID) \(alertID)", to: on, in: alertFile)
-    }
-
-    /// Closes the widget's alert, as a reload does once it's over.
-    static func closeAlert(for alertID: String, in widgetID: String) {
-        setAlert(false, for: alertID, in: widgetID)
-    }
-
-    /// Forgets the maps and alerts opened on widgets that are gone, so a new
-    /// one set up the same way doesn't start out showing them. `widgetIDs` are
-    /// the `TrainEntry.widgetID`s of those still out there. Entries saved
-    /// before they were kept by widget go too, as no widget can find them.
-    static func forgetToggles(keeping widgetIDs: Set<String>) {
-        for file in [mapFile, alertFile] {
-            guard let file else { continue }
-            changing(file) {
-                let entries = trains(in: file)
-                let kept = entries.filter { entry in widgetIDs.contains { entry.hasPrefix("\($0) ") } }
-                if kept.count < entries.count { write(kept, to: file) }
-            }
-        }
-    }
-
-    /// Deletes what earlier versions saved and this one doesn't read:
-    /// refreshed.json and toggled.json, which taps.json replaced.
+    /// Deletes obsolete files: refreshed.json and toggled.json, replaced by taps.json; map.json
+    /// and alert.json, from when widgets' maps and alerts opened.
     static func removeOldFiles() {
         guard let container else { return }
-        for name in ["refreshed.json", "toggled.json"] {
+        for name in ["refreshed.json", "toggled.json", "map.json", "alert.json"] {
             try? FileManager.default.removeItem(at: container.appendingPathComponent(name))
         }
     }
 
-    /// Puts `key` in `file`'s set, or with `on` false takes it out, writing it
-    /// only if that changes it.
-    private static func set(_ key: String, to on: Bool, in file: URL?) {
-        guard let file else { return }
-        changing(file) {
-            var trains = trains(in: file)
-            let changed = on ? trains.insert(key).inserted : trains.remove(key) != nil
-            if changed { write(trains, to: file) }
-        }
-    }
-
-    private static func write(_ trains: Set<String>, to file: URL) {
-        if let data = try? JSONEncoder().encode(trains.sorted()) {
-            try? data.write(to: file, options: .atomic)
-        }
-    }
-
-    /// Reads and rewrites `file` in `body` with no other change to it in
-    /// between, from this process or another: several widgets reload at once,
-    /// and the app can write the same files.
+    /// Runs a read-modify-write of `file` in `body` atomically across processes: several widgets
+    /// reload at once, and the app writes the same files.
     private static func changing(_ file: URL, _ body: () -> Void) {
         var error: NSError?
         NSFileCoordinator().coordinate(writingItemAt: file, options: .forMerging, error: &error) { _ in body() }
     }
 
-    private static func trains(in file: URL?) -> Set<String> {
-        guard let file, let data = try? Data(contentsOf: file),
-              let trains = try? JSONDecoder().decode([String].self, from: data) else { return [] }
-        return Set(trains)
+    /// `file` decoded as `Value`; nil if there's none, or it's unreadable.
+    static func read<Value: Decodable>(_ type: Value.Type, from file: URL?) -> Value? {
+        guard let file, let data = try? Data(contentsOf: file) else { return nil }
+        return try? JSONDecoder().decode(type, from: data)
     }
 
-    /// When one widget's buttons were last tapped, so it alone redraws as
-    /// they ask: iOS reloads only the widget tapped.
-    struct Taps: Codable {
-        /// ↻, so it never redraws with times from before.
-        var refreshed: Date?
-        /// The map or walk button or the alert banner. Those change only how
-        /// the widget looks, so it redraws with the times it already has.
-        var toggled: Date?
+    /// A read-modify-write of `file`, atomically across processes (`changing`): `body` changes it
+    /// as saved, or `empty` if there's none or it's unreadable, and it's saved again.
+    static func change<Value: Codable>(_ file: URL?, empty: Value, _ body: (inout Value) -> Void) {
+        guard let file else { return }
+        changing(file) {
+            var value = read(Value.self, from: file) ?? empty
+            body(&value)
+            if let data = try? JSONEncoder().encode(value) {
+                try? data.write(to: file, options: .atomic)
+            }
+        }
+    }
 
-        var latest: Date? { [refreshed, toggled].compactMap { $0 }.max() }
+    /// When a widget's buttons were last tapped. iOS reloads only the tapped widget, so it alone
+    /// reacts.
+    struct Taps: Codable {
+        /// ↻, so it never redraws with older times.
+        var refreshed: Date?
+        /// Walk: appearance only, so it redraws with the times it has.
+        var toggled: Date?
+        /// Not a tap: when another widget for its train (or the countdown) had it reload to show
+        /// the same times (`WidgetCenter.reloadWidgets(showing:drawing:)`).
+        var synced: Date?
+
+        var latest: Date? { [refreshed, toggled, synced].compactMap { $0 }.max() }
 
         private enum CodingKeys: String, CodingKey {
-            case refreshed, toggled
+            case refreshed, toggled, synced
         }
     }
 
@@ -199,8 +162,7 @@ enum SharedStore {
         savedTaps()[widgetID] ?? Taps()
     }
 
-    /// Sets `tap` to now for the widget. Only the last hour's are kept: after
-    /// that, none of them changes how a widget redraws.
+    /// Sets `tap` to now. Keeps only the last hour's; older taps no longer affect redraws.
     static func recordTap(_ tap: WritableKeyPath<Taps, Date?>, for widgetID: String) {
         guard let tapsFile else { return }
         let now = Date.now
@@ -219,89 +181,133 @@ enum SharedStore {
         return taps
     }
 
-    /// A train's times and alert as last fetched, by a widget or the countdown,
-    /// so a widget redrawn soon after needn't wait on the MTA.
+    /// A train's last-fetched times and alert (by a widget or the countdown), so a redraw soon
+    /// after needn't wait on the MTA.
     struct SavedBoard: Codable {
         var fetched: Date
         var trains: [Arrival]
         var notice: Notice?
-        /// With a change, the trains that get there and the trains they meet.
+        /// With a change, the trains reaching it and their connections.
         var connections: [Connection]? = nil
-        /// When a try for newer times than these couldn't reach the MTA, so
-        /// they're old; nil while none has.
+        /// When a later fetch failed to reach the MTA, so these are old; nil if none has.
         var failed: Date? = nil
+        /// With a destination, when each train gets there (`Board.destinationTimes`).
+        var destinationTimes: [String: Date]? = nil
     }
 
-    /// With `change`, the times of the large widget showing it.
-    static func loadBoard(for selection: Selection, change: Change? = nil) -> SavedBoard? {
-        savedBoards()[boardKey(selection, change: change)]
+    /// With `change`, the board of the large widget showing it; with `destinationID`, of a Next
+    /// train widget timing its trains there.
+    static func loadBoard(for selection: Selection, change: Change? = nil, destinationID: String? = nil) -> SavedBoard? {
+        savedBoards()[boardKey(selection, change: change, destinationID: destinationID)]
     }
 
-    /// Notes that a try for newer times than those saved, begun at `tried`,
-    /// couldn't reach the MTA, so a widget redrawn with them after a tap
-    /// still says they're old. Not times saved since it began, by another
-    /// widget or the countdown, which are new.
-    static func markBoardFailed(for selection: Selection, change: Change? = nil, tried: Date) {
+    /// Records that a fetch begun at `tried` failed, so a redraw after a tap still marks the
+    /// saved times as old. Skipped if newer times were saved since (by another widget or the
+    /// countdown).
+    static func markBoardFailed(for selection: Selection, change: Change? = nil, destinationID: String? = nil,
+                                tried: Date) {
         guard let boardsFile else { return }
-        let key = boardKey(selection, change: change)
+        let key = boardKey(selection, change: change, destinationID: destinationID)
         changing(boardsFile) {
             var boards = savedBoards()
             guard let saved = boards[key], saved.fetched <= tried else { return }
             boards[key]?.failed = .now
-            if let data = try? JSONEncoder().encode(boards) {
-                try? data.write(to: boardsFile, options: .atomic)
-            }
+            write(boards, to: boardsFile)
         }
     }
 
-    /// Kept for an hour: iOS can leave a widget that long between reloads,
-    /// showing these times, and a tap redraws it with them. Not ones from
-    /// after now, saved before the clock was set back.
+    /// Boards are kept for an hour, as iOS can go that long between widget reloads and a tap
+    /// redraws with them. Boards dated after now (clock set back) are dropped.
     @discardableResult
-    static func saveBoard(_ board: Board, for selection: Selection, change: Change? = nil, fetched: Date) -> SavedBoard {
+    static func saveBoard(_ board: Board, for selection: Selection, change: Change? = nil,
+                          destinationID: String? = nil, fetched: Date) -> SavedBoard {
+        let settings = loadSettings()
         let saved = SavedBoard(fetched: fetched, trains: board.trains,
-                               notice: board.notice(for: selection, settings: loadSettings()),
-                               connections: change == nil ? nil : board.connections)
+                               notice: board.notice(for: selection, settings: settings),
+                               connections: change == nil ? nil : board.connections,
+                               destinationTimes: destinationID == nil ? nil : board.destinationTimes)
         guard let boardsFile else { return saved }
-        let key = boardKey(selection, change: change)
+        let key = boardKey(selection, change: change, destinationID: destinationID, settings: settings)
         changing(boardsFile) {
-            // Taken in turn, so a board another widget has just saved isn't after it
+            // `now` is taken inside the lock, so a board another widget just saved isn't after it
             let now = Date.now
             var boards = savedBoards().filter { $0.value.fetched.isWithin(60 * 60, before: now) }
             boards[key] = saved
-            if let data = try? JSONEncoder().encode(boards) {
-                try? data.write(to: boardsFile, options: .atomic)
-            }
+            write(boards, to: boardsFile)
         }
         return saved
     }
 
+    /// Decoded once while the file's unchanged: Transit Directions' Trip loads and saves a dozen
+    /// boards a request.
     private static func savedBoards() -> [String: SavedBoard] {
-        guard let boardsFile, let data = try? Data(contentsOf: boardsFile),
-              let boards = try? JSONDecoder().decode([String: SavedBoard].self, from: data) else { return [:] }
-        return boards
+        guard let boardsFile else { return [:] }
+        return boardsCache.value(of: boardsFile) { data in
+            data.flatMap { try? JSONDecoder().decode([String: SavedBoard].self, from: $0) } ?? [:]
+        }
     }
 
-    /// The board depends on the train, any change, and which alerts it
-    /// mentions, which Settings has a say in too.
-    private static func boardKey(_ selection: Selection, change: Change?) -> String {
-        let kinds = loadSettings().alertKinds.map(\.rawValue).sorted().map(String.init).joined(separator: ",")
+    /// Writes `boards`, keeping them as `savedBoards` so this process needn't decode them again.
+    /// Within `changing`, so no other process writes in between.
+    private static func write(_ boards: [String: SavedBoard], to boardsFile: URL) {
+        guard let data = try? JSONEncoder().encode(boards), (try? data.write(to: boardsFile, options: .atomic)) != nil
+        else { return }
+        boardsCache.wrote(boards, to: boardsFile)
+    }
+
+    private static let boardsCache = Cached<[String: SavedBoard]>()
+    private static let settingsCache = Cached<AppSettings>()
+
+    /// A file's contents as last read or written by this process, while its modification date is
+    /// the same: the app and widgets write the same files.
+    private final class Cached<Value>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var read: (changed: Date, value: Value)?
+
+        /// `reading` gets the file's data, nil if there's none.
+        func value(of file: URL, reading: (Data?) -> Value) -> Value {
+            lock.lock()
+            defer { lock.unlock() }
+            // Dated before reading: a write in between is then read again next time
+            let changed = SharedStore.modified(file)
+            if let read, let changed, read.changed == changed { return read.value }
+            let value = reading(changed == nil ? nil : (try? Data(contentsOf: file)))
+            read = changed.map { ($0, value) }
+            return value
+        }
+
+        func wrote(_ value: Value, to file: URL) {
+            lock.lock()
+            defer { lock.unlock() }
+            read = SharedStore.modified(file).map { ($0, value) }
+        }
+    }
+
+    private static func modified(_ file: URL) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: file.path))?[.modificationDate] as? Date
+    }
+
+    /// Keyed by train, change or destination, and which alerts it mentions (including Settings'
+    /// alert kinds).
+    private static func boardKey(_ selection: Selection, change: Change?, destinationID: String? = nil,
+                                 settings: AppSettings = loadSettings()) -> String {
+        let kinds = settings.alertKinds.map(\.rawValue).sorted().map(String.init).joined(separator: ",")
         let key = "\(selection.trainID) \(selection.elevatorAlerts) \(selection.serviceAlerts) \(kinds)"
-        return change.map { "\(key) change \($0.key)" } ?? key
+        if let change { return "\(key) change \(change.key)" }
+        return destinationID.map { "\(key) to \($0)" } ?? key
     }
 
-    /// What the Nearby widget last called where you were, so it looks the name
-    /// up again only once you've moved on.
+    /// The Nearby widget's last place name, so it looks it up again only after you move. Undated,
+    /// and saved only when you've moved, so not where you are now: see `loadNearbyFix`.
     struct Place: Codable {
         var latitude: Double
         var longitude: Double
-        /// "Park Slope"; nil where the lookup failed.
+        /// "Park Slope"; nil if the lookup failed.
         var name: String?
     }
 
     static func loadPlace() -> Place? {
-        guard let placeFile, let data = try? Data(contentsOf: placeFile) else { return nil }
-        return try? JSONDecoder().decode(Place.self, from: data)
+        read(Place.self, from: placeFile)
     }
 
     static func savePlace(_ place: Place) {
@@ -309,11 +315,59 @@ enum SharedStore {
         try? data.write(to: placeFile, options: .atomic)
     }
 
-    /// The choices made in the app's Settings tab; the defaults until there are any.
+    /// Where you were when either Nearby widget last found you (`NearbyLocator`, which saves it).
+    struct NearbyFix: Codable {
+        var latitude: Double
+        var longitude: Double
+        /// In meters.
+        var accuracy: Double
+        var taken: Date
+    }
+
+    /// The last nearby fix, if taken within `life` before `date`.
+    static func loadNearbyFix(at date: Date = .now, within life: TimeInterval) -> NearbyFix? {
+        guard let fix = read(NearbyFix.self, from: nearbyFixFile), fix.taken.isWithin(life, before: date)
+        else { return nil }
+        return fix
+    }
+
+    /// Alerts and outages as the app or a widget last downloaded them (`TrainService.sharedCache`),
+    /// in the container's Library/Caches, which iOS may clear. A file per name, named by its hash
+    /// and dated when saved.
+    struct FeedCache: FeedCaching {
+        private static let folder = SharedStore.container?.appendingPathComponent("Library/Caches/Feeds", isDirectory: true)
+
+        func data(for name: String, within age: TimeInterval) -> Data? {
+            guard let file = Self.file(for: name), let saved = SharedStore.modified(file),
+                  saved.isWithin(age, before: .now) else { return nil }
+            return try? Data(contentsOf: file)
+        }
+
+        /// Also deletes any saved over an hour ago, such as alerts for routes no widget shows now.
+        func save(_ data: Data, for name: String) {
+            guard let folder = Self.folder, let file = Self.file(for: name) else { return }
+            let manager = FileManager.default
+            try? manager.createDirectory(at: folder, withIntermediateDirectories: true)
+            try? data.write(to: file, options: .atomic)
+            let now = Date.now
+            for old in (try? manager.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
+            where !(SharedStore.modified(old)?.isWithin(60 * 60, before: now) ?? false) {
+                try? manager.removeItem(at: old)
+            }
+        }
+
+        private static func file(for name: String) -> URL? {
+            let hash = SHA256.hash(data: Data(name.utf8)).map { String(format: "%02x", $0) }.joined()
+            return folder?.appendingPathComponent(hash)
+        }
+    }
+
+    /// The Settings tab's choices, or defaults. Decoded once while the file's unchanged.
     static func loadSettings() -> AppSettings {
-        guard let settingsFile, let data = try? Data(contentsOf: settingsFile),
-              let saved = try? JSONDecoder().decode(AppSettings.self, from: data) else { return AppSettings() }
-        return saved
+        guard let settingsFile else { return AppSettings() }
+        return settingsCache.value(of: settingsFile) { data in
+            data.flatMap { try? JSONDecoder().decode(AppSettings.self, from: $0) } ?? AppSettings()
+        }
     }
 
     static func saveSettings(_ settings: AppSettings) {
@@ -321,51 +375,48 @@ enum SharedStore {
         try? data.write(to: settingsFile, options: .atomic)
     }
 
-    /// The widgets set up in the app, each train checked against the station
-    /// list. Before there were any, the one train chosen in the app becomes
-    /// the first, and the default. Its id is always the same, so a widget set
-    /// up before the app saves it still finds it.
+    /// The app's widgets, validated. If none are saved, the app's selection becomes the first and
+    /// default, with a fixed id so widgets set up before the app saves still find it.
     static func loadWidgets() -> SavedWidgets {
         ((try? savedWidgets()) ?? firstWidgets).validated()
     }
 
-    /// The widgets as saved, before checking them against the station list,
-    /// for the app to change and save again: saving what checking made of them
-    /// would turn a train at a station the list lacks into Prospect Av for
-    /// good. Nil before any are saved; throws when they can't be read.
+    /// The saved widgets, unvalidated, for the app to edit and re-save. Saving validated ones would
+    /// permanently turn a train at an unknown station into the fallback. Nil if none saved;
+    /// throws if unreadable.
     static func savedWidgets() throws -> SavedWidgets? {
         guard let widgetsFile, FileManager.default.fileExists(atPath: widgetsFile.path) else { return nil }
         return try JSONDecoder().decode(SavedWidgets.self, from: Data(contentsOf: widgetsFile))
     }
 
-    /// What there is before any widgets are saved: one, of the train chosen in
-    /// the app, as saved.
+    /// Before any widgets are saved: one, of the app's saved selection.
     static var firstWidgets: SavedWidgets {
         SavedWidgets(widgets: [SavedWidget(id: SavedWidget.firstID, selection: savedSelection() ?? .fallback)])
     }
 
-    /// Copies saved widgets that can't be read to widgets.json.bad, so they
-    /// aren't lost for good when a change in the app saves over them. Where
-    /// the file itself can't be read, any copy kept before stays.
+    /// Backs up undecodable widgets to widgets.json.bad before the app saves over them. If the file
+    /// can't be read at all, any earlier backup stays.
     static func keepUnreadableWidgets() {
         guard let widgetsFile, let data = try? Data(contentsOf: widgetsFile) else { return }
         try? data.write(to: widgetsFile.appendingPathExtension("bad"), options: .atomic)
     }
 
-    /// Also leaves the default's train, as saved, in selection.json: what
-    /// `firstWidgets` makes the default of, for the widgets, Siri and the app,
-    /// when widgets.json is missing or can't be read.
+    /// Settings' default train: for Siri, the countdown, Favorite Stop, and widgets that pick no
+    /// saved widget. Until one's chosen, selection.json's, where older versions saved the default
+    /// widget's train.
+    static var defaultTrain: Selection {
+        loadSettings().defaultTrain?.validatedIfKnown() ?? load()
+    }
+
     static func saveWidgets(_ saved: SavedWidgets) {
-        save(saved.defaultWidget.selection)
         guard let widgetsFile, let data = try? JSONEncoder().encode(saved) else { return }
         try? data.write(to: widgetsFile, options: .atomic)
     }
 }
 
-// Their decoders are written out, as Codable's own gives a field's default no
-// say: a field added later would keep any saved before it from being read at
-// all. Read a new one with decodeIfPresent and its default. They're in
-// extensions so the memberwise initializers stay.
+// Hand-written decoders: synthesized Codable ignores defaults, so a newly added field would make
+// older saves fail to decode. Read new fields with decodeIfPresent and a default. In extensions
+// to keep the memberwise initializers.
 
 extension SharedStore.Countdown {
     init(from decoder: Decoder) throws {
@@ -381,39 +432,63 @@ extension SharedStore.Taps {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         refreshed = try container.decodeIfPresent(Date.self, forKey: .refreshed)
         toggled = try container.decodeIfPresent(Date.self, forKey: .toggled)
+        synced = try container.decodeIfPresent(Date.self, forKey: .synced)
     }
 }
 
-/// The app's Settings: what goes for every widget, the countdown and Siri. A
-/// widget's own choices, in the Widgets tab, come first.
+/// App-wide settings for widgets, the countdown and Siri. Per-widget choices (Widgets tab) take
+/// precedence.
 struct AppSettings: Codable, Hashable, Sendable {
-    /// The kinds of MTA alert that widgets, the countdown and Siri mention. The
-    /// app always lists them all.
+    /// MTA alert kinds that widgets, the countdown and Siri mention. The app always lists all.
     var alertKinds: Set<ServiceAlert.Kind> = Set(ServiceAlert.Kind.allCases)
     /// Marks stations and platforms without step-free access when choosing a train.
     var stepFree = false
-    /// A bigger countdown on the small widget, and the medium widget's larger
-    /// layout on every iPhone.
-    var largerWidgetText = false
     /// Marks live predictions with a symbol, not only in green.
     var marksLiveTimes = false
-    /// Marks timetable times with a symbol, so they stand out from live ones.
+    /// Marks timetable times with a symbol.
     var marksScheduledTimes = false
+    /// How Transit Directions draws Favorite Stop's card, and Next train and Transfers theirs.
+    var favoriteCard = FavoriteCardStyle.bulletRow
+    /// The station, lines and direction Siri, the countdown, Favorite Stop and unconfigured
+    /// widgets use. Nil until chosen; see `SharedStore.defaultTrain`.
+    var defaultTrain: Selection?
+    /// New Trip offers trips with a bus ride too, from the push server's `GET /routes?bus=1`.
+    var includesBuses = false
 
     init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case alertKinds, stepFree, largerWidgetText, marksLiveTimes, marksScheduledTimes
+        case alertKinds, stepFree, marksLiveTimes, marksScheduledTimes, favoriteCard, defaultTrain, includesBuses
     }
 
-    /// Settings saved before any of these existed still load, with the rest at their defaults.
+    /// Older saves missing any field still load, with defaults.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let defaults = AppSettings()
         alertKinds = try container.decodeIfPresent(ServiceAlert.KnownKinds.self, forKey: .alertKinds)?.kinds ?? defaults.alertKinds
         stepFree = try container.decodeIfPresent(Bool.self, forKey: .stepFree) ?? defaults.stepFree
-        largerWidgetText = try container.decodeIfPresent(Bool.self, forKey: .largerWidgetText) ?? defaults.largerWidgetText
         marksLiveTimes = try container.decodeIfPresent(Bool.self, forKey: .marksLiveTimes) ?? defaults.marksLiveTimes
         marksScheduledTimes = try container.decodeIfPresent(Bool.self, forKey: .marksScheduledTimes) ?? defaults.marksScheduledTimes
+        // An unknown style, from a later version, falls back too
+        favoriteCard = (try? container.decodeIfPresent(FavoriteCardStyle.self, forKey: .favoriteCard)) ?? defaults.favoriteCard
+        // An unreadable train falls back to selection.json's
+        defaultTrain = (try? container.decodeIfPresent(Selection.self, forKey: .defaultTrain))?.droppingSavedWalk
+        includesBuses = try container.decodeIfPresent(Bool.self, forKey: .includesBuses) ?? defaults.includesBuses
+    }
+}
+
+/// How Transit Directions draws Favorite Stop's card on its buttons, and Next train and Transfers
+/// their card (`StopCard`). Neither gives times: those show on the board, once it's tapped.
+enum FavoriteCardStyle: String, Codable, CaseIterable, Sendable {
+    /// Station and way, then the lines in a row along the bottom, tinted with the first line.
+    case bulletRow
+    /// Like a station's sign: a white rule, the station in white on black, its lines, the way.
+    case stationSign
+
+    var name: String {
+        switch self {
+        case .bulletRow: "Bullet row"
+        case .stationSign: "Station sign"
+        }
     }
 }

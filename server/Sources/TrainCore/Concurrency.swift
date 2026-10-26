@@ -22,6 +22,16 @@ enum Concurrency {
         }
     }
 
+    /// `work` on a Dispatch thread, off Swift's few cooperative ones, for what blocks or takes a
+    /// while (waiting on a process, a build, compressing) and would hold up every request.
+    static func offPool<T: Sendable>(_ work: @escaping @Sendable () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                continuation.resume(with: Result { try work() })
+            }
+        }
+    }
+
     struct TimedOut: Error, CustomStringConvertible {
         var description: String { "timed out" }
     }

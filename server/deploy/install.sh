@@ -7,6 +7,9 @@ set -euo pipefail
 
 LABEL=com.traintimes.server
 SERVICE_USER=traintimes
+# Can read the log and the plist, for the admin app (mac/): admins could
+# with sudo anyway. The key and the database stay the service's alone.
+ADMIN_GROUP=admin
 PREFIX=/usr/local/traintimes
 PLIST=/Library/LaunchDaemons/$LABEL.plist
 BUNDLE=TrainTimesServer_TrainResources.bundle
@@ -23,11 +26,18 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-# Build as whoever ran sudo, so .build isn't left owned by root
-BUILD_USER=${SUDO_USER:-root}
-step "Building a release build as $BUILD_USER"
-sudo -H -u "$BUILD_USER" swift build -c release --package-path "$PACKAGE_DIR"
-BIN_DIR=$(sudo -H -u "$BUILD_USER" swift build -c release --package-path "$PACKAGE_DIR" --show-bin-path)
+if [[ -n ${PREBUILT_BIN_DIR:-} ]]; then
+    # Built already, as by the admin app (mac/), which runs a copy of this
+    # script from outside ~/Documents: root can't read there
+    step "Using the release build in $PREBUILT_BIN_DIR"
+    BIN_DIR=$PREBUILT_BIN_DIR
+else
+    # Build as whoever ran sudo, so .build isn't left owned by root
+    BUILD_USER=${SUDO_USER:-root}
+    step "Building a release build as $BUILD_USER"
+    sudo -H -u "$BUILD_USER" swift build -c release --package-path "$PACKAGE_DIR"
+    BIN_DIR=$(sudo -H -u "$BUILD_USER" swift build -c release --package-path "$PACKAGE_DIR" --show-bin-path)
+fi
 [[ -x "$BIN_DIR/TrainTimesServer" && -d "$BIN_DIR/$BUNDLE" ]] || { echo "Build output not found in $BIN_DIR" >&2; exit 1; }
 
 if id -u "$SERVICE_USER" >/dev/null 2>&1; then
@@ -44,7 +54,7 @@ dscl . -create "/Users/$SERVICE_USER" IsHidden 1
 # $PREFIX and the program are root's, so the service can't put links where
 # this script works. What's the service's (data/, the log and the .p8 key) is
 # never recursed into, nor followed if it's a link.
-step "Installing into $PREFIX (root's; data/, the log and the key $SERVICE_USER's)"
+step "Installing into $PREFIX (root's; data/, the log and the key $SERVICE_USER's, the log readable by $ADMIN_GROUP)"
 install -d -o root -g wheel -m 755 "$PREFIX"
 # newsyslog, as root, chowns and chmods the log's old copies as it moves them
 # down. While $PREFIX was the service's it could have put links by those
@@ -69,8 +79,8 @@ if [[ -L $LOG ]] || [[ ! -f $LOG ]] || [[ $(stat -f %l "$LOG") != 1 ]]; then
     rm -rf "$LOG"
     (umask 077 && : > "$LOG")
 fi
-chown "$SERVICE_USER" "$LOG"
-chmod 600 "$LOG"
+chown "$SERVICE_USER:$ADMIN_GROUP" "$LOG"
+chmod 640 "$LOG"
 find "$PREFIX" -maxdepth 1 -type f -links 1 -name '*.p8' -exec chown "$SERVICE_USER" {} + -exec chmod 600 {} +
 
 step "Rotating the log at 10 MB, keeping 7 ($NEWSYSLOG)"
@@ -79,16 +89,18 @@ cat > "$NEWSYSLOG" <<EOF
 # Installed by TrainTimes' deploy/install.sh. The server moves to the new file
 # itself (LOG_FILE), so N: there's nothing to signal.
 # logfile                           owner:group      mode count size(KB) when flags
-$LOG    $SERVICE_USER:    600  7     10240    *    N
+$LOG    $SERVICE_USER:$ADMIN_GROUP    640  7     10240    *    N
 EOF
 chown root:wheel "$NEWSYSLOG"
 chmod 644 "$NEWSYSLOG"
 
 if [[ -f "$PLIST" ]]; then
-    step "Keeping the existing $PLIST"
+    step "Keeping the existing $PLIST (root:$ADMIN_GROUP, mode 640)"
+    chown "root:$ADMIN_GROUP" "$PLIST"
+    chmod 640 "$PLIST"
 else
-    step "Installing $PLIST (root:wheel, mode 600)"
-    install -o root -g wheel -m 600 "$DEPLOY_DIR/$LABEL.plist" "$PLIST"
+    step "Installing $PLIST (root:$ADMIN_GROUP, mode 640)"
+    install -o root -g "$ADMIN_GROUP" -m 640 "$DEPLOY_DIR/$LABEL.plist" "$PLIST"
 fi
 
 # Placeholders in values, not the comment that mentions them
@@ -115,4 +127,4 @@ if ! grep -q '<key>LOG_FILE</key>' "$PLIST"; then
     echo "    Note: $PLIST has no LOG_FILE, so after newsyslog rotates the log the server writes to"
     echo "    the old one until it restarts. Add LOG_FILE as deploy/$LABEL.plist has it."
 fi
-step "Done. Log: sudo tail -f $PREFIX/server.log"
+step "Done. Log: tail -f $PREFIX/server.log"

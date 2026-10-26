@@ -1,0 +1,65 @@
+name: Build the iOS app
+
+# Compiles the app, its widget and its Share extension for the simulator,
+# unsigned, and checks the data files got bundled. Nothing is published:
+# the app is installed from Xcode. build-server.yml builds and tests the server.
+on:
+  push:
+    branches: [main]
+    paths:
+      - ios/**
+      - .github/workflows/build-ios-check.yml
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run at a time for each branch or pull request: a newer run cancels an
+# older one, whose changes it builds too.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate the Xcode project
+        working-directory: ios
+        run: xcodegen generate
+
+      - name: Build for the simulator, unsigned
+        working-directory: ios
+        run: |
+          xcodebuild \
+            -project NextRTrain.xcodeproj \
+            -scheme NextRTrain \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Check the bundled data
+        working-directory: ios
+        run: |
+          APP=build/Build/Products/Debug-iphonesimulator/NextRTrain.app
+          WIDGET="$APP/PlugIns/RTrainWidget.appex"
+          # the widget and Share extension must be inside the app
+          test -d "$WIDGET"
+          test -d "$APP/PlugIns/ShareExtension.appex"
+          # the station and elevator lists in both the app and the widget,
+          # and the lines' shapes for the app's maps
+          for file in stations.json equipment.json; do
+            test -f "$APP/$file"
+            test -f "$WIDGET/$file"
+          done
+          test -f "$APP/shapes.json"
+          echo "Bundled: stations.json, equipment.json (app and widget), shapes.json (app)"

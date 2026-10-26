@@ -151,10 +151,11 @@ import Testing
     }
 
     @Test func aLineRunningTheOtherWayToTheStationsNamesGoesByItsOwn() throws {
-        // At Marcy Av the MTA names the ways for the J: an M going S is on its way to Middle Village
+        // At Marcy Av the MTA names the ways for the J: an M going S is on its way to Middle Village,
+        // its part of the J and M's "Jamaica - Middle Village"
         let marcy = try station("M16")
         #expect(marcy.directionLabel(.south, routes: ["J"]) == "Manhattan")
-        #expect(marcy.directionLabel(.south, routes: ["M"]) == "Jamaica - Middle Village")
+        #expect(marcy.directionLabel(.south, routes: ["M"]) == "Middle Village")
         #expect(marcy.directionLabel(.north, routes: ["M"]) == "Manhattan")
         // With the J, the M goes the way it's named, which for the M is N
         #expect(marcy.directionLabel(.south, routes: ["J", "M"]) == "Manhattan")
@@ -169,15 +170,17 @@ import Testing
         #expect(both.heading(of: Arrival(route: "M", time: now, stop: "M16N", lastStop: "G08N", isLive: true))
             == "Manhattan")
         #expect(both.heading(of: Arrival(route: "M", time: now, stop: "M16S", lastStop: "M01S", isLive: true))
-            == "Jamaica - Middle Village")
+            == "Middle Village")
         #expect(both.heading(of: Arrival(route: "J", time: now, stop: "M16S", lastStop: "M23S", isLive: true))
             == "Manhattan")
 
-        // At Hoyt-Schermerhorn Sts they're for the A and C: the G toward Church Av is S
+        // At Hoyt-Schermerhorn Sts they're for the A and C: the G toward Church Av is S. Each line
+        // gets its own part of "Manhattan - Church Av" and "Euclid Av & Queens - Court Sq"
         let hoyt = try station("A42")
-        #expect(hoyt.directionLabel(.south, routes: ["G"]) == "Manhattan - Church Av")
-        #expect(hoyt.directionLabel(.north, routes: ["G"]) == "Euclid Av & Queens - Court Sq")
-        #expect(hoyt.directionLabel(.north, routes: ["A"]) == "Manhattan - Church Av")
+        #expect(hoyt.directionLabel(.south, routes: ["G"]) == "Church Av")
+        #expect(hoyt.directionLabel(.north, routes: ["G"]) == "Court Sq")
+        #expect(hoyt.directionLabel(.north, routes: ["A"]) == "Manhattan")
+        #expect(hoyt.directionLabel(.north, routes: ["A", "C", "G"]) == "Manhattan - Church Av")
 
         // Every such line, from the schedule: the M along the Broadway el and the G at Hoyt-Schermerhorn Sts
         let reversed = StationDirectory.platforms.flatMap { platform in
@@ -297,8 +300,39 @@ import Testing
         #expect(g.heading == "Court Sq")
         #expect(g.caption == "G Court Sq")
         #expect(Selection(stationID: "F27", routes: ["F"], direction: .north).heading == "Manhattan")
-        // Names that also say where the line goes stay as the MTA has them
-        #expect(Selection(stationID: "F20", routes: ["G"], direction: .north).heading == "Manhattan - Queens")
+        // A name for several lines keeps only the parts this line goes to
+        #expect(Selection(stationID: "F20", routes: ["G"], direction: .north).heading == "Queens")
+        #expect(Selection(stationID: "F20", routes: ["G"], direction: .south).heading == "Church Av")
+        #expect(Selection(stationID: "F20", routes: ["F"], direction: .north).heading == "Manhattan - Queens")
+        #expect(Selection(stationID: "F20", routes: ["F"], direction: .south).heading == "Church Av - Coney Island")
+        // Together, the F's name covers the G's
+        #expect(Selection(stationID: "F20", routes: ["F", "G"], direction: .north).heading == "Manhattan - Queens")
+        #expect(Selection(stationID: "R36", routes: ["R"], direction: .south).heading == "Bay Ridge")
+        #expect(Selection(stationID: "R36", routes: ["D"], direction: .south).heading == "Coney Island")
+        #expect(Selection(stationID: "A28", routes: ["C"], direction: .north).heading == "Uptown")
+        #expect(Selection(stationID: "A28", routes: ["E"], direction: .north).heading == "Uptown - Queens")
+        // A part joined by "&" stays only if the line goes to all of it
+        #expect(Selection(stationID: "D17", routes: ["B"], direction: .north).heading == "Uptown & The Bronx")
+        #expect(Selection(stationID: "D17", routes: ["F"], direction: .north).heading == "Queens")
+        // Parts that together name one stop stay together
+        #expect(Selection(stationID: "723", routes: ["7"], direction: .south).heading == "34 St - Hudson Yards")
+        #expect(Selection(stationID: "R04", routes: ["N"], direction: .north).heading == "Astoria - Ditmars Blvd")
+        #expect(Selection(stationID: "L08", routes: ["L"], direction: .south).heading == "Canarsie - Rockaway Parkway")
+        // A place inside a stop's name, an area's plural, and another spelling of a stop
+        #expect(Selection(stationID: "423", routes: ["4"], direction: .south).heading == "Utica")
+        #expect(Selection(stationID: "A40", routes: ["A"], direction: .south).heading == "Euclid - Lefferts - Rockaways")
+        #expect(Selection(stationID: "A40", routes: ["C"], direction: .south).heading == "Euclid")
+        #expect(Selection(stationID: "416", routes: ["5"], direction: .north).heading == "Eastchester Dyre Av")
+        #expect(Selection(stationID: "416", routes: ["4"], direction: .north).heading == "Woodlawn")
+        // A borough with any of the line's stops that way, though both its ends are in it
+        #expect(Selection(stationID: "B08", routes: ["M"], direction: .north).heading == "Uptown - Queens")
+        #expect(Selection(stationID: "B08", routes: ["Q"], direction: .north).heading == "Uptown")
+        // Of an "&" part, the places the line goes to, when no other part is wholly its
+        #expect(Selection(stationID: "A42", routes: ["C"], direction: .south).heading == "Euclid Av")
+        // With no part the line's, its end that way
+        #expect(Selection(stationID: "235", routes: ["4"], direction: .south).heading == "Crown Hts")
+        #expect(Selection(stationID: "R30", routes: ["B"], direction: .south).heading == "Brighton Beach")
+        // Names that say where the line goes, without " - ", stay as the MTA has them
         #expect(Selection(stationID: "D26", routes: ["FS"], direction: .north).heading == "Manhattan & Franklin Av")
 
         // Changing to the G there from an F toward Manhattan, it's not your way

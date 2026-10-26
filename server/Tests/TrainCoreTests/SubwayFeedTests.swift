@@ -313,8 +313,11 @@ import Testing
             GTFSFeed.trip("N1", route: "N", stops: [FeedStop("R34N", at: 4), FeedStop("R31N", at: 9), FeedStop("R01N")]),
             GTFSFeed.trip("D1", route: "D", stops: [FeedStop("R34N", at: 5), FeedStop("R31N", at: 10)]),
         ])
-        #expect(try SubwayFeed.stops(after: ["R34N"], on: ["R"], in: feed) == [["R33N", "G08N"]])
-        #expect(try SubwayFeed.stops(after: ["R34N"], on: ["R", "N"], in: feed) == [["R33N", "G08N"], ["R31N", "R01N"]])
+        let stops = { (routes: Set<String>) in
+            try SubwayFeed.timedStops(after: ["R34N"], on: routes, in: feed).map { $0.map(\.id) }
+        }
+        #expect(try stops(["R"]) == [["R33N", "G08N"]])
+        #expect(try stops(["R", "N"]) == [["R33N", "G08N"], ["R31N", "R01N"]])
     }
 
     @Test func linesThatPartGoingTheSameWayEachHaveTheirStopsListed() throws {
@@ -328,8 +331,10 @@ import Testing
         ])
         let nr = Selection(stationID: "R41", routes: ["N", "R"], direction: .south)
         let names = try TrainService.stations(after: nr, in: [feed]).map(\.name)
-        #expect(names == ["8 Av", "Fort Hamilton Pkwy", "New Utrecht Av", "86 St", "Coney Island-Stillwell Av",
-                          "Bay Ridge Av", "77 St", "86 St", "Bay Ridge-95 St"])
+        // In the order the trains get there: the N's 8 Av and the R's Bay Ridge Av are both 2
+        // minutes on, the N's listed first as the longer
+        #expect(names == ["8 Av", "Bay Ridge Av", "Fort Hamilton Pkwy", "77 St", "New Utrecht Av", "86 St",
+                          "Bay Ridge-95 St", "86 St", "Coney Island-Stillwell Av"])
         // One line's are just its own
         let r = Selection(stationID: "R41", routes: ["R"], direction: .south)
         #expect(try TrainService.stations(after: r, in: [feed]).map(\.name) == ["Bay Ridge Av", "77 St", "86 St",
@@ -348,13 +353,37 @@ import Testing
         let feed = GTFSFeed.feed([trip("1A", route: "1", stops: one), trip("2A", route: "2", stops: two)])
         let both = Selection(stationID: "120", routes: ["1", "2"], direction: .south)
         let stations = try TrainService.stations(after: both, in: [feed])
-        // The 1's own stops among the 2's, nearest first, then where they part
-        // after Chambers St, the 1's on to South Ferry and the 2's to Flatbush Av
-        let expected = (one.dropFirst() + two.drop(while: { $0 != "228S" })).compactMap(StationDirectory.station(forStop:))
-        #expect(stations.map(\.id) == expected.map(\.id))
+        // The 1's own stops among the 2's, nearest first, each line's in its order
+        for stops in [one, two] {
+            let own = stops.dropFirst().compactMap(StationDirectory.station(forStop:)).map(\.id)
+            #expect(stations.map(\.id).filter(Set(own).contains) == own)
+        }
         #expect(stations.prefix(5).map(\.name) == ["86 St", "79 St", "72 St", "66 St-Lincoln Center",
                                                    "59 St-Columbus Circle"])
         #expect(stations.count == 39)
+        // Where they part after Chambers St, the express 2 gets to Park Place before the 1 gets
+        // to Franklin St
+        let ids = stations.map(\.id)
+        let parkPlace = try #require(StationDirectory.station(forStop: "228S")).id
+        let franklin = try #require(StationDirectory.station(forStop: "138S")).id
+        #expect(try #require(ids.firstIndex(of: parkPlace)) < #require(ids.firstIndex(of: franklin)))
+    }
+
+    @Test func linesThatPartAndMeetAgainAreListedInTheOrderTheTrainsGetThere() throws {
+        // South from 34 St-Herald Sq the D runs by W 4 St and Grand St, the N by Canal St, and
+        // the Q by Canal St and DeKalb Av, all to Atlantic Av-Barclays Ctr
+        func trip(_ id: String, route: String, stops: [(String, Double)]) -> Protobuf {
+            GTFSFeed.trip(id, route: route, stops: stops.map { FeedStop($0.0, at: $0.1) })
+        }
+        let feed = GTFSFeed.feed([
+            trip("D1", route: "D", stops: [("D17S", 0), ("D20S", 2), ("D21S", 5), ("D22S", 7), ("R31S", 10), ("R36S", 15)]),
+            trip("N1", route: "N", stops: [("R17S", 0), ("R20S", 3), ("Q01S", 6), ("R31S", 10), ("R36S", 15)]),
+            trip("Q1", route: "Q", stops: [("R17S", 0), ("R20S", 3), ("Q01S", 6), ("R30S", 9), ("D24S", 11)]),
+        ])
+        let dnq = Selection(stationID: "D17", routes: ["D", "N", "Q"], direction: .south)
+        let names = try TrainService.stations(after: dnq, in: [feed]).map(\.name)
+        #expect(names == ["W 4 St-Wash Sq", "14 St-Union Sq", "Broadway-Lafayette St", "Canal St", "Grand St",
+                          "DeKalb Av", "Atlantic Av-Barclays Ctr", "36 St"])
     }
 
     @Test func threeLinesThatCrossEachHaveTheirStopsListedInOrder() throws {

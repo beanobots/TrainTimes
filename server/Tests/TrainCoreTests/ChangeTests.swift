@@ -47,7 +47,6 @@ import Testing
         #expect(connections.map(\.first.trip) == ["r1", "r2"])
         #expect(connections.map { $0.next?.trip } == ["d1", "n1"])
         #expect(connections.map(\.waitLabel) == ["1 min", "2 min"])
-        #expect(connections[0].isQuick(within: 2))
         #expect(!connections[0].staysOn)
     }
 
@@ -93,10 +92,9 @@ import Testing
             selection: prospect)
         #expect(connections.first?.next?.trip == "held")
         #expect(connections.first?.walk == 180)
-        // You're three minutes getting to it, so it's no quick change
+        // You're three minutes getting to it
         #expect(connections.first?.wait == 180)
         #expect(connections.first?.waitLabel == "3 min")
-        #expect(connections.first?.isQuick(within: 2) == false)
     }
 
     @Test func whetherYouWalkGoesByThePlatformsTheTwoTrainsUse() {
@@ -253,7 +251,7 @@ import Testing
         let ac = Change(stationID: "A42", routes: ["A", "C"], direction: .north)
         #expect(ac.isAllAcross(from: g))
         #expect(ac.isExpress(for: g))
-        #expect(ac.heading(for: g) == "Manhattan - Church Av")
+        #expect(ac.heading(for: g) == "Manhattan")
         #expect(!Change(stationID: "A42", routes: ["A", "C"], direction: .south).isAllAcross(from: g))
     }
 
@@ -462,7 +460,7 @@ import Testing
         }
         // Without a way of its own, there's none in the file, as before there could be
         let keys = (try JSONSerialization.jsonObject(with: JSONEncoder().encode(atlantic)) as? [String: Any]).map { Set($0.keys) }
-        #expect(keys == ["stationID", "routes", "quickMinutes", "walkMinutes"])
+        #expect(keys == ["stationID", "routes", "quickMinutes", "walkMinutes", "smartTransfer"])
     }
 
     @Test func aConnectionLoadsWithoutATrainToChangeTo() throws {
@@ -486,17 +484,6 @@ import Testing
         #expect(loaded.walk == 0)
         #expect(loaded.next?.trip == "t2")
         #expect(loaded.waitLabel == "4 min")
-    }
-
-    @Test func theTransfersWidgetsLinkKeepsTheWay() throws {
-        let l = Selection(stationID: "L24", routes: ["L"], direction: .north)
-        let jz = Change(stationID: "L22", routes: ["J", "Z"], direction: .south)
-        let url = l.transferURL(changingAt: jz)
-        let opened = try #require(Selection.transfer(from: url))
-        #expect(opened.change.departureStops(for: opened.selection) == ["J27S"])
-        // A link from before there was a way goes your train's
-        let old = try #require(URL(string: "traintimes://transfer?station=R34&lines=R&direction=N&elevators=0&walk=0&change=R31&to=D,N"))
-        #expect(Selection.transfer(from: old)?.change.departureDirection(for: prospect) == .north)
     }
 }
 

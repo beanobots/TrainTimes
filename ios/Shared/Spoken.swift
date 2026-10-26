@@ -3,10 +3,8 @@ import Foundation
 /// What Siri says when asked for the next train.
 enum Spoken {
     /// e.g. "The next R to Manhattan at Prospect Av is in 4 minutes, at 8:12 AM. The one after is at 8:22 AM."
-    /// `trains` are the ones you can still catch, soonest first; any of another
-    /// line running on yours are named by their own: "… is at 8:22 AM, on the N."
-    /// `unreachable` says whether others still to come are left out of them,
-    /// as you can't reach them in time.
+    /// `trains` are catchable ones, soonest first; another line's train is named: "…, on the N."
+    /// `unreachable` means coming trains were left out because you can't reach them in time.
     static func nextTrain(selection: Selection, trains: [Arrival], unreachable: Bool = false, notice: Notice?,
                           now: Date) -> String {
         let lines = Lines.spokenList(selection.routes, joinedBy: "or")
@@ -41,13 +39,12 @@ enum Spoken {
         return sentence
     }
 
-    /// An alert's headline, "R trains are running with delays in both
-    /// directions.", or what's out: "elevator out."
+    /// An alert's headline, or e.g. "elevator out.", ending in punctuation.
     static func headsUp(_ notice: Notice) -> String {
         let text: String
         switch notice.kind {
         case .elevator:
-            // Only its first letter, so line letters and names inside it keep their capitals
+            // Lowercase only the first letter, so line letters and names keep their capitals
             text = notice.label.prefix(1).lowercased() + notice.label.dropFirst()
         case .alert(let kind):
             let headline = notice.text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -66,7 +63,7 @@ enum Spoken {
         return text + "."
     }
 
-    /// "R to Manhattan", or "northbound R" where the MTA gives the direction no name.
+    /// "R to Manhattan", or "northbound R" when the MTA doesn't name the direction.
     static func describe(line: String, heading: String) -> String {
         isNamed(heading) ? "\(line) to \(heading)" : "\(heading.lowercased()) \(line)".trimmingCharacters(in: .whitespaces)
     }
@@ -76,8 +73,7 @@ enum Spoken {
         isNamed(heading) ? "\(line) trains to \(heading)" : "\(heading.lowercased()) \(line) trains".trimmingCharacters(in: .whitespaces)
     }
 
-    /// Whether `heading` is a place, "Manhattan", rather than the
-    /// "Northbound" or "Southbound" given where the MTA names none.
+    /// Whether `heading` is a place ("Manhattan"), not the fallback "Northbound"/"Southbound".
     private static func isNamed(_ heading: String) -> Bool {
         !heading.isEmpty && !Direction.allCases.contains { $0.compassName == heading }
     }

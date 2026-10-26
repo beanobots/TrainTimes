@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   Installed by install.sh as /Library/LaunchDaemons/com.traintimes.server.plist
-  (root:wheel, mode 600). Replace every XXXX, then run install.sh again to
+  (root:admin, mode 640). Replace every XXXX, then run install.sh again to
   start it. cloudflared on this Mac forwards https://<hostname> to
   http://127.0.0.1:8080, so HOST stays 127.0.0.1.
 -->
@@ -49,7 +49,18 @@
         <key>PORT</key>
         <string>8080</string>
         <key>POLL_SECONDS</key>
-        <string>30</string>
+        <string>20</string>
+        <!-- A push when the train comes more than PUSH_EARLIER_SECONDS sooner
+             or PUSH_LATER_SECONDS later, or a following one moves
+             PUSH_FOLLOWING_SECONDS; a low-priority one after REFRESH_SECONDS -->
+        <key>PUSH_EARLIER_SECONDS</key>
+        <string>15</string>
+        <key>PUSH_LATER_SECONDS</key>
+        <string>60</string>
+        <key>PUSH_FOLLOWING_SECONDS</key>
+        <string>60</string>
+        <key>REFRESH_SECONDS</key>
+        <string>300</string>
         <key>PUSH_CONCURRENCY</key>
         <string>100</string>
         <key>MAX_REGISTRATIONS</key>
@@ -65,6 +76,14 @@
         <string>10</string>
         <key>MAX_KEYS_PER_IP_PER_DAY</key>
         <string>10</string>
+        <!-- Google's Routes API key, for GET /routes (directions shared to the
+             app). Leave it out, or empty, to turn that off -->
+        <key>GOOGLE_ROUTES_API_KEY</key>
+        <string></string>
+        <!-- MTA Bus Time's API key, for GET /buses (the next buses for a
+             route's bus rides). Leave it out, or empty, to turn that off -->
+        <key>BUS_TIME_API_KEY</key>
+        <string></string>
         <!-- 1 to log every push, not just each pass's totals -->
         <key>LOG_PUSHES</key>
         <string>0</string>

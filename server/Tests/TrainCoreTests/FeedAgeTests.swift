@@ -45,7 +45,7 @@ import Testing
     }
 
     @Test func eachOfTheLiveTabsFeedsGoesByTheNewest() {
-        // The feeds the Live tab and the push server read together, on a clock 5 minutes fast
+        // The feeds the Nearby tab and the push server read together, on a clock 5 minutes fast
         let fast = time(5)
         let arrivals = TrainService.arrivals(at: stops, in: [nqrw: fresh, bdfm: stale], now: fast)
         #expect(arrivals[nqrw]?.map(\.trip) == ["R1"])

@@ -46,6 +46,20 @@ import Testing
         #expect(DailyLimiter.secondsUntilReset(now: day.addingTimeInterval(-100)) == 86400)
     }
 
+    @Test func takingChecksAndCountsInOneStep() async {
+        let limiter = DailyLimiter(limit: 3)
+        // Asked all at once, only the limit's worth get one
+        let taken = await withTaskGroup(of: Bool.self) { group in
+            for _ in 0..<10 { group.addTask { await limiter.take("ip", now: now) } }
+            return await group.reduce(0) { $0 + ($1 ? 1 : 0) }
+        }
+        #expect(taken == 3)
+        #expect(await !limiter.allows("ip", now: now))
+        #expect(await limiter.take("other", now: now))
+        #expect(await limiter.take("ip", now: now.addingTimeInterval(86400)))
+        #expect(await !DailyLimiter(limit: 0).take("ip", now: now))
+    }
+
     @Test func dailyLimitRefusesNewClientsWhenTrackingTooMany() async {
         let limiter = DailyLimiter(limit: 2, maxTracked: 3)
         for client in ["a", "b", "c"] { await limiter.record(client, now: now) }

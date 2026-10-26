@@ -2,12 +2,7 @@
 """The subway's bullets as the app draws them, for the other tools: read from
 ios/Shared/Lines.swift, so they can't drift from it. A real-time route's bullet
 has a label ("S" for the three shuttles), a color, and black or white text, and
-an express route in the feeds ("6X") has its line's. The app filters stations
-by one bullet per line, and has an icon for each.
-
-    python3 tools/line_styles.py
-
-prints the labels of those bullets, for CI to check the app has their icons.
+an express route in the feeds ("6X") has its line's.
 """
 import os
 import re
@@ -54,12 +49,3 @@ def label(route):
     """What `route`'s bullet says, as the app has it: "6" for the 6 express
     ("6X" in the feeds), "S" for "GS"."""
     return style(_EXPRESS.get(route, route))[0]
-
-
-# The bullets the app filters stations by and has an icon for, in the MTA's
-# order: each label's color, and whether its label is black (on the light colors)
-BULLETS = {style(route)[0]: style(route)[1:] for route in FILTER_ROUTES}
-
-
-if __name__ == "__main__":
-    print(" ".join(BULLETS))

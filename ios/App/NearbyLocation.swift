@@ -2,15 +2,15 @@ import CoreLocation
 import Observation
 import WidgetKit
 
-/// Where you are, for the stations near you: asked for only when you tap to
-/// see them, then found once each time the station list opens (the manager
-/// reports its authorization as `start()` sets it going, which looks you up).
+/// Your location for nearby stations. Permission is asked only on tap; then it's looked up once
+/// each time the station list opens (`start()` sets the delegate, which reports authorization
+/// and triggers a lookup).
 @MainActor
 @Observable
 final class NearbyLocation: NSObject, CLLocationManagerDelegate {
     private(set) var status: CLAuthorizationStatus
     private(set) var location: CLLocation?
-    /// The last try to find you didn't, e.g. indoors or with no location set in the simulator.
+    /// The last lookup failed (e.g. indoors, or no simulator location).
     private(set) var failed = false
     private let manager = CLLocationManager()
 
@@ -20,10 +20,8 @@ final class NearbyLocation: NSObject, CLLocationManagerDelegate {
         manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
     }
 
-    /// Starts listening, which finds you if you've allowed it. Called as its view
-    /// appears rather than in `init`: SwiftUI makes a view's `@State` value again
-    /// each time the view is rebuilt and throws the extra ones away, and those
-    /// mustn't look you up.
+    /// Starts listening (and locating, if allowed). Called on appear, not in `init`: SwiftUI
+    /// recreates and discards `@State` values on rebuilds, and those mustn't look you up.
     func start() {
         guard manager.delegate == nil else { return }
         manager.delegate = self
@@ -31,7 +29,7 @@ final class NearbyLocation: NSObject, CLLocationManagerDelegate {
 
     var isAllowed: Bool { status == .authorizedWhenInUse || status == .authorizedAlways }
 
-    /// Asks the first time; after that, finds you if you've allowed it.
+    /// Asks permission the first time; afterwards locates you if allowed.
     func find() {
         if status == .notDetermined {
             manager.requestWhenInUseAuthorization()
@@ -44,7 +42,7 @@ final class NearbyLocation: NSObject, CLLocationManagerDelegate {
     nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         let status = manager.authorizationStatus
         Task { @MainActor in
-            // The Nearby widget goes by the same permission
+            // The Nearby widget uses the same permission
             if status != self.status {
                 WidgetCenter.shared.reloadTimelines(ofKind: Nearby.widgetKind)
             }
@@ -63,7 +61,7 @@ final class NearbyLocation: NSObject, CLLocationManagerDelegate {
 
     nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
         Task { @MainActor in
-            // Without a fix to fall back on, say so rather than keep looking
+            // Report failure only if there's no earlier fix to fall back on
             if self.location == nil { self.failed = true }
         }
     }

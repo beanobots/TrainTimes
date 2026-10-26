@@ -4,22 +4,20 @@ import Foundation
 struct Outage: Identifiable, Hashable, Sendable {
     let id: String
     let isElevator: Bool
-    /// An elevator someone needs for step-free access.
+    /// Needed for step-free access.
     let isAccessibilityElevator: Bool
-    /// Where it goes, e.g. "Street to Manhattan-bound platform".
+    /// E.g. "Street to Manhattan-bound platform".
     let serving: String
     let reason: String
     let start: Date?
     let estimatedReturn: Date?
     let isPlanned: Bool
-    /// The MTA's advice for getting around it, when it's an elevator.
+    /// The MTA's suggested alternative route, for elevators.
     let alternative: String
-    /// The GTFS stops whose platforms it serves, e.g. ["718", "R09"], Queensboro
-    /// Plaza's 7 and N W; nil where the MTA doesn't say.
+    /// GTFS stops of the platforms it serves, e.g. ["718", "R09"]; nil when the MTA doesn't say.
     var stops: [String]? = nil
 
-    /// Whether it serves one of `platforms`, or might: one whose stops the MTA
-    /// doesn't give could serve any of them.
+    /// Whether it serves, or might serve, one of `platforms`; unknown stops count as any.
     func serves(anyOf platforms: [Platform]) -> Bool {
         guard let stops, !stops.isEmpty else { return true }
         return platforms.contains { stops.contains($0.id) }
@@ -34,8 +32,7 @@ enum EquipmentDirectory {
         let ada: Bool
         let serving: String
         let alternative: String
-        /// The GTFS stops whose platforms it serves, e.g. ["718", "R09"], Queensboro
-        /// Plaza's 7 and N W; nil in a list made before there were these.
+        /// GTFS stops of the platforms it serves, e.g. ["718", "R09"]; nil in older lists.
         var stops: [String]? = nil
     }
 
@@ -49,13 +46,12 @@ enum EquipmentDirectory {
         try JSONDecoder().decode([String: Machine].self, from: Data(contentsOf: url))
     }
 
-    /// Whether a station complex has any elevators or escalators at all.
     static func hasEquipment(atComplex complex: String) -> Bool {
         all.values.contains { $0.complex == complex }
     }
 
-    /// Whether any elevator or escalator serves one of `platforms`, a
-    /// station's, or might, as `Outage.serves(anyOf:)` has it.
+    /// Whether any equipment serves, or might serve, one of a station's `platforms`, as in
+    /// `Outage.serves(anyOf:)`.
     static func hasEquipment(serving platforms: [Platform]) -> Bool {
         guard let complex = platforms.first?.complex else { return false }
         return all.values.contains { machine in
@@ -70,8 +66,7 @@ enum OutagesFeed {
     /// Current and planned elevator and escalator outages (about 40 KB).
     static let url = URL(string: "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fnyct_ene.json")!
 
-    /// The outages at a station complex, current ones first. A row that can't
-    /// be read is left out, rather than failing the rest.
+    /// Outages at a station complex, current first. Unreadable rows are skipped.
     static func outages(atComplex complex: String, in data: Data, equipment: [String: EquipmentDirectory.Machine] = EquipmentDirectory.all) throws -> [Outage] {
         let rows = try JSONDecoder().decode([MaybeRow].self, from: data).compactMap(\.row)
         let outages: [Outage] = rows.compactMap { row in
@@ -104,7 +99,7 @@ enum OutagesFeed {
         let isupcomingoutage: String?
     }
 
-    /// A row, or nil for one that isn't as expected.
+    /// Nil for a malformed row.
     private struct MaybeRow: Decodable {
         let row: Row?
 
@@ -118,13 +113,13 @@ enum OutagesFeed {
         text.prefix(1).uppercased() + text.dropFirst()
     }
 
-    /// The feed's dates look like "10/30/2026 10:00:00 PM", New York time.
+    /// E.g. "10/30/2026 10:00:00 PM", New York time.
     private static func date(_ text: String?) -> Date? {
         guard let text, !text.isEmpty else { return nil }
         return dateFormatter.date(from: text)
     }
 
-    /// One for every row, rather than one each: the widget has little memory to spare.
+    /// Shared across rows to save the widget's limited memory.
     private static let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")

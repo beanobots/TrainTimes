@@ -1,8 +1,7 @@
 import SwiftUI
 
-/// Choosing where a widget's train is left for another, in two steps: the
-/// station, from the stops after yours, then the lines there to change to,
-/// and which way they go, which finishes.
+/// Picks a widget's change in two steps: the station (from stops after yours), then the lines
+/// to change to there and which way they go.
 struct ChangePicker: View {
     let selection: Selection
     @Binding var change: Change?
@@ -16,16 +15,16 @@ struct ChangePicker: View {
             }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button(role: .cancel) { dismiss() }
                 }
             }
             .navigationDestination(for: Station.self) { station in
                 ChangeLinesStep(selection: selection, station: station, change: change) { routes, direction in
-                    // Keeps the quick change and walk already set
+                    // Keep the existing quick-change and walk settings
                     var chosen = change ?? Change(stationID: station.id, routes: routes)
                     chosen.stationID = station.id
                     chosen.routes = routes
-                    // None for your train's way
+                    // nil means your train's way
                     chosen.direction = direction == selection.direction ? nil : direction
                     change = chosen
                     dismiss()
@@ -35,16 +34,14 @@ struct ChangePicker: View {
     }
 }
 
-/// Step 1: the stations after yours on your train's way, each with the lines
-/// you can change to there. They come from trains running now, one of each
-/// of its lines, so they follow any change to a line's route, and where its
-/// lines part, each one's are there.
+/// Step 1: stations after yours, each with the lines you can change to. Built from one running
+/// train per line, so they follow route changes and include each branch where lines split.
 private struct ChangeStationStep: View {
     let selection: Selection
     let chosenID: String?
     let pick: (Station) -> Void
     @State private var stations: [Station]?
-    /// Whether the train has any stops after yours, with a line to change to or not.
+    /// Whether there are any stops after yours, with or without a change.
     @State private var anyStops = false
     @State private var failed = false
 
@@ -94,15 +91,14 @@ private struct ChangeStationStep: View {
         .toolbar {
             ToolbarItem(placement: .principal) { StepTitle(title: "Change at", step: 0, count: 2) }
         }
-        // Only the first time: coming back from the lines, they're still here
+        // Load once; they're kept when coming back from step 2
         .task {
             if stations == nil { await load() }
         }
     }
 
-    /// Whether `across`, the lines across the platform from your train at
-    /// `station`, are an express for it, going the way they'd start out
-    /// chosen: for a line that runs the other way to yours there, the other N or S.
+    /// Whether the cross-platform lines `across` are an express for your train, going their
+    /// suggested way (the other N/S for a line that runs opposite to yours there).
     private func isExpress(_ across: [String], at station: Station) -> Bool {
         var change = Change(stationID: station.id, routes: across)
         change.direction = change.suggestedDirection(for: selection)
@@ -114,7 +110,7 @@ private struct ChangeStationStep: View {
         do {
             let after = try await TrainService.stations(after: selection)
             anyStops = !after.isEmpty
-            // Just the stations with another line to change to
+            // Only stations with a line to change to
             stations = after.filter { station in
                 let lines = Change.lines(at: station, from: selection)
                 return !lines.across.isEmpty || !lines.others.isEmpty
@@ -131,11 +127,10 @@ private struct ChangeStationRow: View {
     let others: [String]
     let isExpress: Bool
     let isSelected: Bool
-    /// The bullets grow with the text beside them, as the train picker's do.
+    /// Scales with the text, like the train picker's bullets.
     @ScaledMetric(relativeTo: .caption) private var bulletSize: CGFloat = 16
 
-    /// The platforms walked to for `others`, here and at the stations joined
-    /// to this one; none for a change only across the platform.
+    /// Platforms for `others` in this station's complex; empty for a cross-platform-only change.
     private var otherPlatforms: [Platform] {
         StationDirectory.stations(inComplexOf: station).flatMap(\.platforms)
             .filter { $0.routes.contains(where: others.contains) }
@@ -148,7 +143,7 @@ private struct ChangeStationRow: View {
                     .fontWeight(isSelected ? .semibold : .regular)
                     .foregroundStyle(Color.primary)
                 if !across.isEmpty {
-                    // Lines across the platform that don't stop at your station are its express
+                    // Cross-platform lines that skip your station are an express
                     lines(across, note: isExpress ? "Express, across the platform" : "Across the platform", prominent: true)
                 }
                 if !others.isEmpty {
@@ -181,14 +176,11 @@ private struct ChangeStationRow: View {
     }
 }
 
-/// Step 2: the change station's lines, platform by platform, with those of
-/// any station joined to it, starting with those across the platform from
-/// your train chosen. Your train's own are there but can't be chosen, nor can
-/// a line that ends its run there going the way chosen, or that would turn a
-/// line chosen the other way. Both ways are offered where the lines chosen
-/// could go either, unless they're all across the platform from your train
-/// and every line here plainly goes your way. A line on another platform
-/// counts the walk to it, set on the widget.
+/// Step 2: the change station's lines by platform (including joined stations), with the
+/// cross-platform lines chosen to start. Can't choose: your own lines, a line ending its run
+/// here going the chosen way, or one that would flip a chosen line's way. Both ways are offered
+/// where the chosen lines could go either, unless all are cross-platform and every line here
+/// plainly goes your way. Lines on another platform add the widget's walk time.
 private struct ChangeLinesStep: View {
     let selection: Selection
     let station: Station
@@ -196,8 +188,7 @@ private struct ChangeLinesStep: View {
     let done: ([String], Direction) -> Void
     /// Every line you can change to here, in order.
     private let lines: [String]
-    /// Whether to offer both ways the lines go whichever are chosen: where
-    /// the lines here go either way and don't all plainly go yours.
+    /// Offer both ways regardless of choice: lines here go either way and don't all plainly go yours.
     private let offersBothWays: Bool
     @State private var chosen: [String]
     @State private var direction: Direction
@@ -216,7 +207,7 @@ private struct ChangeLinesStep: View {
         let direction = starting?.departureDirection(for: selection)
             ?? Change(stationID: station.id, routes: chosen.isEmpty ? lines : chosen).suggestedDirection(for: selection)
         _direction = State(initialValue: direction)
-        // Where every line here plainly goes your way, there's no other to offer
+        // If every line here plainly goes your way, there's no other way to offer
         var every = Change(stationID: station.id, routes: lines)
         let usual = every.suggestedDirection(for: selection)
         every.direction = usual
@@ -227,18 +218,17 @@ private struct ChangeLinesStep: View {
             || lines.contains { !Change.leaves($0, from: station, going: usual, with: lines) })
     }
 
-    /// In the order of the lines.
+    /// `chosen`, in `lines` order.
     private var ordered: [String] { lines.filter(chosen.contains) }
 
-    /// Platforms with a line to change to, here and at the stations joined to this one.
+    /// Platforms in the complex with a line to change to.
     private var platforms: [Platform] {
         StationDirectory.stations(inComplexOf: station).flatMap(\.platforms)
             .filter { platform in platform.routes.contains(where: lines.contains) }
     }
 
-    /// Whether to show which way the lines go: once one is chosen, as that
-    /// sets the way to start with; where `offersBothWays`, or the lines chosen
-    /// leave both ways and aren't all across the platform.
+    /// Show the way picker once a line is chosen (that sets the starting way), if
+    /// `offersBothWays` or the chosen lines leave both ways and aren't all cross-platform.
     private var showsWays: Bool {
         guard !chosen.isEmpty else { return false }
         return offersBothWays
@@ -280,23 +270,20 @@ private struct ChangeLinesStep: View {
         }
     }
 
-    /// The lines on `platform` that go the way chosen together: those chosen
-    /// there, or with none chosen there, all it has to change to.
+    /// The chosen lines on `platform`, or if none, all its lines to change to.
     private func linesTogether(on platform: Platform) -> [String] {
         let chosenHere = chosen.filter(platform.routes.contains)
         return chosenHere.isEmpty ? lines.filter(platform.routes.contains) : chosenHere
     }
 
-    /// Whether your train stops at `platform` too, on the side the lines
-    /// chosen go from, which for a line that runs the other way to yours
-    /// there is under the other N or S.
+    /// Whether your train also stops at `platform`, on the side the chosen lines leave from
+    /// (the other N/S for a line running opposite to yours there).
     private func isAcross(_ platform: Platform) -> Bool {
         Change.isAcross(linesTogether(on: platform), going: direction, at: platform, from: selection)
     }
 
-    /// Whether `route` can be chosen: it goes the way chosen, or with none
-    /// chosen yet, either way, as the first line chosen sets the way. Not
-    /// where choosing it would turn a line chosen the other way (`way(with:)`).
+    /// Whether `route` can be chosen: it goes the chosen way (any way if none chosen yet, since the
+    /// first choice sets it), and wouldn't flip a chosen line's way (`way(with:)`).
     private func canChoose(_ route: String) -> Bool {
         if chosen.isEmpty { return true }
         let routes = chosen.contains(route) ? chosen : chosen + [route]
@@ -311,7 +298,7 @@ private struct ChangeLinesStep: View {
                 direction = way
                 chosen = rest
             } else {
-                // Those that would turn the other way without it are let go
+                // Drop lines that would flip direction without it
                 chosen = keeping(rest, going: direction)
             }
         } else {
@@ -321,19 +308,16 @@ private struct ChangeLinesStep: View {
         }
     }
 
-    /// The way chosen, with `routes` chosen in place of the lines chosen now:
-    /// as it is, or the other where that keeps those still chosen going as
-    /// they do; nil where neither does. A line that runs the other way to the
-    /// rest on its platform goes by the other N or S with them, and by its
-    /// own alone (`Platform.direction(_:of:with:)`), as the G does with the A
-    /// and C at Hoyt-Schermerhorn Sts.
+    /// The way to use if `routes` replaced `chosen`: the current way or its opposite, whichever
+    /// keeps the still-chosen lines going as they do; nil if neither. A line running opposite to
+    /// the rest on its platform uses their N/S with them and its own alone
+    /// (`Platform.direction(_:of:with:)`), e.g. the G with the A/C at Hoyt-Schermerhorn Sts.
     private func way(with routes: [String]) -> Direction? {
         let kept = chosen.filter(routes.contains)
         return [direction, direction.opposite].first { keeping(routes, going: $0) == kept }
     }
 
-    /// Those of the lines chosen now that, with `routes` chosen in their place
-    /// going `way`, are among them and go as they do.
+    /// The `chosen` lines that are in `routes` and keep their departure way if `routes` go `way`.
     private func keeping(_ routes: [String], going way: Direction) -> [String] {
         let current = Change(stationID: station.id, routes: chosen, direction: direction)
         let changed = Change(stationID: station.id, routes: routes, direction: way)
@@ -343,20 +327,18 @@ private struct ChangeLinesStep: View {
         }
     }
 
-    /// The lines chosen that go `way` from here.
     private func chosenLines(going way: Direction) -> [String] {
         chosen.filter { Change.leaves($0, from: station, going: way, with: chosen) }
     }
 
-    /// Where the lines chosen go `way`, or that none of them do.
+    /// Where the chosen lines go `way`, or that none do.
     private func name(of way: Direction) -> String {
         let going = chosenLines(going: way)
         guard !going.isEmpty else { return "No \(Lines.list(chosen, joinedBy: "or")) trains leave this way" }
         return Change(stationID: station.id, routes: going, direction: way).heading(for: selection)
     }
 
-    /// The two ways the lines chosen can go, your train's first. A way none
-    /// of them goes can't be chosen.
+    /// Both ways, your train's first; a way no chosen line goes is disabled.
     private var wayCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("GOING")
@@ -365,7 +347,7 @@ private struct ChangeLinesStep: View {
             ForEach([selection.direction, selection.direction.opposite], id: \.self) { way in
                 Button {
                     direction = way
-                    // Lines that end their run here going this way are let go
+                    // Drop lines that end their run here going this way
                     chosen = chosenLines(going: way)
                 } label: {
                     HStack {
@@ -392,12 +374,12 @@ private struct ChangeLinesStep: View {
 
     private func platformCard(_ platform: Platform) -> some View {
         let routes = platform.routes.filter { lines.contains($0) || selection.routes.contains($0) }
-        // Where the lines to change to go from it, each of their names
+        // Destination names for the lines from this platform
         let heading = Station.directionNames(direction, on: [platform], routes: linesTogether(on: platform))
             .joined(separator: " or ")
         return VStack(alignment: .leading, spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
-                // Another station's platform has its name: "59 St · 4 5 6 platform"
+                // Joined station's platforms show its name: "59 St · 4 5 6 platform"
                 PlatformTitle(routes: routes, station: platform.name == station.name ? nil : platform.name)
                 if isAcross(platform) {
                     Label("Across the platform from your \(Lines.list(selection.routes.filter(platform.routes.contains)))",
@@ -442,5 +424,163 @@ private struct ChangeLinesStep: View {
             }
         }
         .pickerCard()
+    }
+}
+
+/// Picks where you're going. With a change, for the Transfers widget to time each way there: the
+/// stops after the change on each line changed to, and on your own train after the change.
+/// Without one, for Next train to show when you'd get there: the stops ahead on your train.
+struct DestinationPicker: View {
+    let selection: Selection
+    let change: Change?
+    @Binding var destinationID: String?
+    @Environment(\.dismiss) private var dismiss
+    @State private var stations: [(station: Station, routes: [String])]?
+    @State private var failed = false
+    /// Scales with the text, like the change picker's bullets.
+    @ScaledMetric(relativeTo: .caption) private var bulletSize: CGFloat = 16
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Button {
+                        choose(nil)
+                    } label: {
+                        row(name: "None", routes: [], selected: destinationID == nil)
+                    }
+                } footer: {
+                    Text(change == nil ? "Without a destination, the widget shows no arrival time."
+                                       : "Without a destination, the large widget times each line to the change.")
+                }
+                Section {
+                    if let stations {
+                        if stations.isEmpty {
+                            Text("No trains are running to list the stops.").foregroundStyle(.secondary)
+                        }
+                        ForEach(stations, id: \.station.id) { item in
+                            Button {
+                                choose(item.station.id)
+                            } label: {
+                                row(name: item.station.name, routes: item.routes,
+                                    selected: destinationID == item.station.id)
+                            }
+                        }
+                    } else if failed {
+                        Button {
+                            Task { await load() }
+                        } label: {
+                            Label("Couldn't reach the MTA. Try again", systemImage: "arrow.clockwise")
+                        }
+                    } else {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                            Text(change == nil ? "Finding the stops ahead…" : "Finding the stops after the change…")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                } header: {
+                    Text(change == nil ? "Stops ahead" : "Stops after the change")
+                } footer: {
+                    Text(change == nil ? "Stops on your train, with the lines that get there."
+                                       : "Stops on the lines you change to, and on your own train, with the lines that get there.")
+                }
+            }
+            .navigationTitle("Destination")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(role: .cancel) { dismiss() }
+                }
+            }
+            .task {
+                if stations == nil { await load() }
+            }
+        }
+    }
+
+    private func choose(_ id: String?) {
+        destinationID = id
+        dismiss()
+    }
+
+    private func row(name: String, routes: [String], selected: Bool) -> some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(name)
+                    .fontWeight(selected ? .semibold : .regular)
+                    .foregroundStyle(Color.primary)
+                if !routes.isEmpty {
+                    HStack(spacing: 4) {
+                        ForEach(routes, id: \.self) { route in
+                            LineBullet(route: route, size: min(bulletSize, 24))
+                        }
+                    }
+                }
+            }
+            Spacer()
+            if selected {
+                // VoiceOver says it's selected instead
+                Image(systemName: "checkmark")
+                    .foregroundStyle(Color.accentColor)
+                    .accessibilityHidden(true)
+            }
+        }
+        .contentShape(Rectangle())
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    /// Each line changed to from where it's changed to (the station of its complex it stops at),
+    /// then your own train from the change on, merged with the lines reaching each. Without a
+    /// change, just your own train's stops ahead.
+    private func load() async {
+        failed = false
+        guard let change else {
+            do {
+                stations = try await TrainService.stations(after: selection)
+                    .filter { $0.id != selection.stationID }
+                    .map { ($0, selection.routes.filter($0.routes.contains)) }
+            } catch {
+                failed = true
+            }
+            return
+        }
+        let parts = change.smartChanges(for: selection)
+        let changeIDs = Set(parts.compactMap(\.change.station).flatMap(StationDirectory.stations(inComplexOf:)).map(\.id))
+        var trips: [(selection: Selection, routes: [String])] = []
+        for part in parts {
+            guard let station = part.change.station else { continue }
+            for route in part.change.routes {
+                guard let stop = StationDirectory.stations(inComplexOf: station).first(where: { $0.routes.contains(route) }) else {
+                    continue
+                }
+                let way = part.change.departureDirection(of: route, for: selection.only(part.lines))
+                trips.append((Selection(stationID: stop.id, routes: [route], direction: way), [route]))
+            }
+        }
+        do {
+            var found: [(station: Station, routes: [String])] = []
+            let add = { (station: Station, routes: [String]) in
+                guard !changeIDs.contains(station.id), station.id != selection.stationID else { return }
+                if let index = found.firstIndex(where: { $0.station.id == station.id }) {
+                    found[index].routes += routes.filter { !found[index].routes.contains($0) }
+                } else {
+                    found.append((station, routes))
+                }
+            }
+            for trip in trips {
+                for station in try await TrainService.stations(after: trip.selection) {
+                    add(station, trip.routes)
+                }
+            }
+            // Staying on: only stops after the change
+            let own = try await TrainService.stations(after: selection)
+            for station in own.drop(while: { !changeIDs.contains($0.id) }).dropFirst() {
+                add(station, selection.routes.filter(station.routes.contains))
+            }
+            stations = found
+        } catch {
+            failed = true
+        }
     }
 }

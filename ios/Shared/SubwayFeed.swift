@@ -5,42 +5,37 @@ struct Arrival: Codable, Hashable, Sendable {
     /// A real-time route id, with express versions folded in ("6X" is "6").
     let route: String
     let time: Date
-    /// When it's due to leave, where that's later than `time`: it waits at the
-    /// platform. Nil when it leaves as it gets there.
+    /// Departure time if later than `time` (it waits at the platform); else nil.
     var departure: Date? = nil
-    /// Where it stops at the station: its platform's id plus N or S, e.g. "R31N".
+    /// Platform id plus N or S, e.g. "R31N".
     let stop: String
-    /// The last stop of the trip, whose station is where the train ends up.
+    /// The trip's last stop.
     let lastStop: String
-    /// True when a real train is running this trip, so the time is a live
-    /// prediction. False when the MTA hasn't assigned a train to it yet, so
-    /// the time is still the timetable's.
+    /// True if a train is assigned to the trip (live prediction); false if the time is still the
+    /// timetable's.
     let isLive: Bool
-    /// The trip's id in the feed, so a countdown can follow one train as its time changes.
+    /// The feed's trip id, so a countdown can follow one train as its time changes.
     var trip: String = ""
-    /// The stops the trip still lists, up to and including this one: first the
-    /// one it's at or heading for (sometimes the one it just left), or, before
-    /// it sets off, where it starts. A stop listed twice in a row under two
-    /// ids, as an H leaving Broad Channel lists H19S then H04S, is there once,
-    /// as the second.
+    /// Remaining stops up to and including this one, starting at the current or next stop
+    /// (sometimes the one just left), or the origin before it sets off. A stop listed twice in a
+    /// row under two ids (H19S then H04S at Broad Channel) appears once, as the second.
     var approach: [Stop] = []
-    /// Where the feed says the train is; nil when it doesn't say.
+    /// The feed's vehicle position, if any.
     var position: Position? = nil
 
-    /// When it leaves the stop, so until when it can still be caught there.
+    /// When it leaves the stop: the last moment to catch it.
     var leaves: Date { max(departure ?? time, time) }
-    /// Whether its trip ends at this stop, so it doesn't leave from here: there,
-    /// or on a track of its platform the feeds name apart, as the H's do at Broad Channel.
+    /// Whether the trip ends here, including at a separately named track of this platform (the
+    /// H's at Broad Channel).
     var endsHere: Bool { StationDirectory.isSameStop(stop, lastStop) }
 
-    /// Where it ends up: "Forest Hills" for "G08N".
+    /// The terminal's name: "Forest Hills" for "G08N".
     var terminal: String? { StationDirectory.shortName(forStop: lastStop) }
     var lineLabel: String { LineStyle.of(route).label }
 
     struct Stop: Codable, Hashable, Sendable {
-        /// A platform's id plus N or S, e.g. "R34N".
+        /// Platform id plus N or S, e.g. "R34N".
         let id: String
-        /// When the train is due there.
         let time: Date
 
         var name: String { StationDirectory.shortName(forStop: id) ?? id }
@@ -55,11 +50,10 @@ struct Arrival: Codable, Hashable, Sendable {
 
     /// Where the train is along `approach`.
     enum Place: Hashable, Sendable {
-        /// It hasn't set off from the first stop.
+        /// Not yet left the first stop.
         case starting
-        /// Stopped at this stop.
         case at(Int)
-        /// On its way to this stop, from the one before it.
+        /// On its way to this stop from the previous one.
         case approaching(Int)
     }
 
@@ -67,45 +61,39 @@ struct Arrival: Codable, Hashable, Sendable {
     func place(now: Date) -> Place? {
         guard !approach.isEmpty else { return nil }
         if !isLive { return .starting }
-        // Where it is can go by a stop's other id, which `approach` leaves out
+        // The position may use a stop's other id, which `approach` drops
         if let position, let index = approach.firstIndex(where: { StationDirectory.isSameStop($0.id, position.stop) }) {
             return position.isStopped ? .at(index) : .approaching(index)
         }
-        // Without a position, the first stop it isn't due at yet; due at them
-        // all, it's at the last, held there until it leaves
+        // No position: the first stop not yet due; if all are due, held at the last
         if let next = approach.firstIndex(where: { $0.time > now }) { return .approaching(next) }
         return .at(approach.count - 1)
     }
 }
 
 enum SubwayFeed {
-    /// How old a feed can be and still be gone by: the MTA makes each one anew
-    /// about every 30 seconds, and this allows for one that's late. One older
-    /// than this has stopped updating. Its age goes by the newest of the feeds
-    /// fetched with it rather than by this device's clock, which may be fast.
+    /// Max feed age before it's considered stopped. The MTA regenerates feeds about every 30 s;
+    /// this allows for a late one. Age is measured against the newest feed fetched with it, not
+    /// the device clock, which may be fast.
     static let staleAfter: TimeInterval = 3 * 60
-    /// How fast this device's clock can be without every feed going out of
-    /// date. A feed with no newer one to go by, or a set of them that have all
-    /// stopped updating, goes out of date only this much later.
+    /// How fast the device clock may be. A feed with no newer one to compare to (or a batch that
+    /// has all stopped) goes stale only this much later.
     static let clockAllowance: TimeInterval = 7 * 60
 
-    /// Whether a feed made at `made` has stopped updating: it's more than
-    /// `staleAfter` older than `newest`, the newest of the feeds fetched with
-    /// it (or than `now`, where that's earlier), or more than `staleAfter` and
-    /// `clockAllowance` older than `now`.
+    /// Whether a feed made at `made` has stopped updating: over `staleAfter` older than `newest`
+    /// (capped at `now`), or over `staleAfter + clockAllowance` older than `now`.
     static func isStale(made: Date, newest: Date?, now: Date) -> Bool {
         let newest = min(newest ?? now, now)
         return newest.timeIntervalSince(made) > staleAfter
             || now.timeIntervalSince(made) > staleAfter + clockAllowance
     }
 
-    /// When the newest of `feeds` was made, for the others' age to go by; nil
-    /// when none of them says.
+    /// The newest of `feeds`' timestamps, to measure the others' age by; nil if none has one.
     static func newest(_ feeds: [Data]) -> Date? {
         feeds.compactMap { made($0) }.max()
     }
 
-    /// When a feed says it was made; nil when it doesn't say or can't be read.
+    /// The feed's header timestamp; nil if missing or unreadable.
     static func made(_ data: Data) -> Date? {
         let reader = ProtobufReader(data)
         var time: UInt64 = 0
@@ -117,13 +105,9 @@ enum SubwayFeed {
         return time != 0 ? Date(timeIntervalSince1970: TimeInterval(time)) : nil
     }
 
-    /// Decodes just enough of a GTFS-realtime feed (gtfs.org/realtime) to list,
-    /// for every trip that stops at one of `stopIDs`, its route, arrival time
-    /// (and departure time, if later), which of them it stops at, the stops
-    /// before it, its last stop, whether a train is assigned to it and where
-    /// that train is, so the widget needs no protobuf library. A feed that has
-    /// stopped updating (`isStale`, where `newest` is when the newest of the
-    /// feeds fetched with it was made) throws `FeedError.stale`.
+    /// Minimal GTFS-realtime decoder (gtfs.org/realtime), so the widget needs no protobuf library.
+    /// Returns an `Arrival` for each trip stopping at one of `stopIDs`. Throws `FeedError.stale`
+    /// if the feed has stopped updating (`isStale`; `newest` is the batch's newest timestamp).
     static func arrivals(at stopIDs: Set<String>, in data: Data, newest: Date? = nil,
                          now: Date = Date()) throws -> [Arrival] {
         let reader = ProtobufReader(data)
@@ -133,7 +117,7 @@ enum SubwayFeed {
             switch field {
             case 1: // FeedMessage.header
                 let made = try timestamp(reader)
-                // 0 is a feed that doesn't say when it was made
+                // 0 means no timestamp
                 if made != 0, isStale(made: Date(timeIntervalSince1970: TimeInterval(made)), newest: newest, now: now) {
                     throw FeedError.stale
                 }
@@ -154,25 +138,110 @@ enum SubwayFeed {
             }
             return true
         }
-        // A trip's position comes in an entity of its own
+        // Positions come in separate entities
         for index in arrivals.indices {
             arrivals[index].position = positions[arrivals[index].trip]
         }
         return arrivals.sorted { $0.time < $1.time }
     }
 
-    /// For each trip of `routes` that calls at one of `stopIDs`, the stops it
-    /// lists after that one, in order: where its train goes on to.
-    static func stops(after stopIDs: Set<String>, on routes: Set<String>, in data: Data) throws -> [[String]] {
+    /// The feed with only the trips listing one of `stopIDs`, and their vehicle positions, for
+    /// the push server to send a phone just what its board reads (a fraction of the feed, for
+    /// one with little signal). `arrivals(at:)` with any of `stopIDs` finds the same in it as in
+    /// the whole feed. Kept fields are copied byte for byte; the header and any other top-level
+    /// fields are kept as they are.
+    static func trimmed(_ data: Data, toStops stopIDs: Set<String>) throws -> Data {
         let reader = ProtobufReader(data)
-        var lists: [[String]] = []
+        // Each top-level field's bytes; an entity's with its trip, and whether it's a trip
+        // update calling here (kept) or a vehicle (kept if its trip is)
+        var parts: [(bytes: Range<Int>, entity: (trip: String, calls: Bool)?)] = []
+        var kept: Set<String> = []
+        while reader.position < reader.count {
+            let start = reader.position
+            let key = try reader.varint()
+            guard key >> 3 == 2, key & 7 == 2 else { // FeedMessage.entity
+                try reader.skip(wireType: key & 7)
+                parts.append((start..<reader.position, nil))
+                continue
+            }
+            var trip = ""
+            var calls = false
+            try reader.message { field in
+                switch field {
+                case 3: (trip, calls) = try tripCalls(reader, at: stopIDs) // FeedEntity.trip_update
+                case 4: trip = try vehicleTrip(reader) // FeedEntity.vehicle
+                default: return false
+                }
+                return true
+            }
+            if calls { kept.insert(trip) }
+            parts.append((start..<reader.position, (trip, calls)))
+        }
+        var trimmed = Data()
+        for part in parts {
+            if let entity = part.entity, !entity.calls, entity.trip.isEmpty || !kept.contains(entity.trip) { continue }
+            trimmed.append(contentsOf: reader.slice(part.bytes))
+        }
+        return trimmed
+    }
+
+    /// A TripUpdate's trip id, and whether it lists one of `stopIDs`.
+    private static func tripCalls(_ reader: ProtobufReader, at stopIDs: Set<String>) throws -> (trip: String, calls: Bool) {
+        var trip = ""
+        var calls = false
+        try reader.message { field in
+            switch field {
+            case 1: // TripUpdate.trip
+                try reader.message { field in
+                    guard field == 1 else { return false } // TripDescriptor.trip_id
+                    trip = try reader.string()
+                    return true
+                }
+            case 2: // TripUpdate.stop_time_update
+                try reader.message { field in
+                    guard field == 4 else { return false } // stop_id
+                    if stopIDs.contains(try reader.string()) { calls = true }
+                    return true
+                }
+            default:
+                return false
+            }
+            return true
+        }
+        return (trip, calls)
+    }
+
+    /// A VehiclePosition's trip id; empty if it has none.
+    private static func vehicleTrip(_ reader: ProtobufReader) throws -> String {
+        var trip = ""
+        try reader.message { field in
+            guard field == 1 else { return false } // VehiclePosition.trip
+            try reader.message { field in
+                guard field == 1 else { return false } // TripDescriptor.trip_id
+                trip = try reader.string()
+                return true
+            }
+            return true
+        }
+        return trip
+    }
+
+    /// For each trip of `routes` calling at one of `stopIDs`, its stops after that one, in order,
+    /// each with its ride time from the stop in `stopIDs`: nil where either has no time.
+    static func timedStops(after stopIDs: Set<String>, on routes: Set<String>,
+                           in data: Data) throws -> [[(id: String, ride: TimeInterval?)]] {
+        let reader = ProtobufReader(data)
+        var lists: [[(id: String, ride: TimeInterval?)]] = []
         try reader.fields(until: reader.count) { field in
             guard field == 2 else { return false } // FeedMessage.entity
             try reader.message { field in
                 guard field == 3 else { return false } // FeedEntity.trip_update
                 let trip = try tripStops(reader)
-                if routes.contains(Lines.normalized(trip.route)), let at = trip.stops.firstIndex(where: stopIDs.contains) {
-                    lists.append(Array(trip.stops[(at + 1)...]))
+                if routes.contains(Lines.normalized(trip.route)), let at = trip.stops.firstIndex(where: { stopIDs.contains($0.id) }) {
+                    let start = trip.stops[at].time
+                    lists.append(trip.stops[(at + 1)...].map { stop in
+                        (stop.id, start.flatMap { start in stop.time.map { $0.timeIntervalSince(start) } })
+                    })
                 }
                 return true
             }
@@ -181,10 +250,11 @@ enum SubwayFeed {
         return lists
     }
 
-    /// A trip's route and every stop it lists, in order.
-    private static func tripStops(_ reader: ProtobufReader) throws -> (route: String, stops: [String]) {
+    /// A trip's route and every stop it lists, in order, with its time if any (arrival, else
+    /// departure).
+    private static func tripStops(_ reader: ProtobufReader) throws -> (route: String, stops: [(id: String, time: Date?)]) {
         var route = ""
-        var stops: [String] = []
+        var stops: [(id: String, time: Date?)] = []
         try reader.message { field in
             switch field {
             case 1: // TripUpdate.trip
@@ -194,11 +264,20 @@ enum SubwayFeed {
                     return true
                 }
             case 2: // TripUpdate.stop_time_update
+                var stop = ""
+                var arrival: UInt64 = 0
+                var departure: UInt64 = 0
                 try reader.message { field in
-                    guard field == 4 else { return false } // stop_id
-                    stops.append(try reader.string())
+                    switch field {
+                    case 4: stop = try reader.string() // stop_id
+                    case 2: arrival = try eventTime(reader)
+                    case 3: departure = try eventTime(reader)
+                    default: return false
+                    }
                     return true
                 }
+                let due = arrival != 0 ? arrival : departure
+                stops.append((stop, due == 0 ? nil : Date(timeIntervalSince1970: TimeInterval(due))))
             default:
                 return false
             }
@@ -207,18 +286,17 @@ enum SubwayFeed {
         return (route, stops)
     }
 
-    /// The trip's arrival at each of `stopIDs` it stops at: the Live tab asks
-    /// about several stations at once, and one trip can call at more than one.
+    /// The trip's arrival at each of `stopIDs` (the Nearby tab queries several stations, and a trip
+    /// can call at more than one).
     private static func tripUpdate(_ reader: ProtobufReader, at stopIDs: Set<String>) throws -> [Arrival] {
         var route = ""
         var isLive = false
         var trip = ""
-        /// The stops it has a time for
+        /// Stops with a time
         var stops: [Arrival.Stop] = []
-        /// Where it ends, whether or not there's a time for it
+        /// Last stop, with or without a time
         var lastStop: String?
-        /// Where in `stops` the trip calls at one of `stopIDs`, and when it
-        /// leaves there if that's later than it gets there
+        /// Indexes in `stops` matching `stopIDs`, with the departure if later than arrival
         var matches: [(at: Int, departure: UInt64?)] = []
         try reader.message { field in
             switch field {
@@ -264,8 +342,7 @@ enum SubwayFeed {
             return true
         }
         guard let lastStop else { return [] }
-        // Only a trip that lists a stop twice in a row, up to its last match,
-        // has approaches to merge
+        // Only merge if a stop is listed twice in a row before the last match
         let doubled = matches.last.map { last in
             (0..<last.at).contains { StationDirectory.isSameStop(stops[$0].id, stops[$0 + 1].id) }
         } ?? false
@@ -283,8 +360,8 @@ enum SubwayFeed {
         }
     }
 
-    /// `stops`, with a stop listed again next under another id (H19S, then
-    /// H04S) kept only the second time, so the maps show it once.
+    /// `stops` with consecutive duplicates under another id (H19S, H04S) collapsed to the second,
+    /// so maps show it once.
     private static func once(_ stops: ArraySlice<Arrival.Stop>) -> [Arrival.Stop] {
         var kept: [Arrival.Stop] = []
         for stop in stops {
@@ -298,7 +375,7 @@ enum SubwayFeed {
     private static func vehiclePosition(_ reader: ProtobufReader) throws -> (trip: String, position: Arrival.Position)? {
         var trip = ""
         var stop = ""
-        // IN_TRANSIT_TO, which the feed leaves out as protobuf's default
+        // IN_TRANSIT_TO, omitted by the feed as protobuf's default
         var status: UInt64 = 2
         try reader.message { field in
             switch field {
@@ -319,8 +396,7 @@ enum SubwayFeed {
         return (trip, Arrival.Position(stop: stop, isStopped: status == 1))
     }
 
-    /// FeedHeader.timestamp: when the feed was made, in seconds since 1970;
-    /// 0 when it doesn't say, or says a time outside `plausibleTimes`.
+    /// FeedHeader.timestamp in Unix seconds; 0 if missing or outside `plausibleTimes`.
     private static func timestamp(_ reader: ProtobufReader) throws -> UInt64 {
         var time: UInt64 = 0
         try reader.message { field in
@@ -331,7 +407,7 @@ enum SubwayFeed {
         return plausibleTimes.contains(time) ? time : 0
     }
 
-    /// StopTimeEvent.time; 0, as for none, when it's outside `plausibleTimes`.
+    /// StopTimeEvent.time; 0 if missing or outside `plausibleTimes`.
     private static func eventTime(_ reader: ProtobufReader) throws -> UInt64 {
         var time: UInt64 = 0
         try reader.message { field in
@@ -342,26 +418,28 @@ enum SubwayFeed {
         return plausibleTimes.contains(time) ? time : 0
     }
 
-    /// The times a feed can mean, from 2000 to 2100, in seconds since 1970.
-    /// One outside them is taken as none: a negative one, say, which reads as
-    /// one far in the future.
+    /// 2000 to 2100 in Unix seconds. Times outside count as none (e.g. a negative time, which
+    /// reads as far future).
     private static let plausibleTimes: ClosedRange<UInt64> = 946_684_800...4_102_444_800
 }
 
 enum FeedError: Error {
     case malformed
-    /// Made too long ago to go by (`SubwayFeed.isStale`).
+    /// Too old to trust (`SubwayFeed.isStale`).
     case stale
 }
 
 /// Reads protobuf wire format: varints, strings and nested messages.
 private final class ProtobufReader {
     private let bytes: [UInt8]
-    private var position = 0
+    private(set) var position = 0
 
     init(_ data: Data) { bytes = [UInt8](data) }
 
     var count: Int { bytes.count }
+
+    /// The bytes read in `range`, for copying a field as it is.
+    func slice(_ range: Range<Int>) -> ArraySlice<UInt8> { bytes[range] }
 
     func varint() throws -> UInt64 {
         var value: UInt64 = 0
@@ -382,8 +460,8 @@ private final class ProtobufReader {
         return String(decoding: bytes[position..<end], as: UTF8.self)
     }
 
-    /// Reads one nested message, passing each field number to `handle`, which
-    /// reads the field and returns true, or returns false to have it skipped.
+    /// Reads a nested message, passing each field number to `handle`. It reads the field and
+    /// returns true, or returns false to skip it.
     func message(_ handle: (Int) throws -> Bool) throws {
         try fields(until: try lengthDelimitedEnd(), handle)
     }
@@ -396,7 +474,7 @@ private final class ProtobufReader {
         guard position == end else { throw FeedError.malformed }
     }
 
-    private func skip(wireType: UInt64) throws {
+    func skip(wireType: UInt64) throws {
         switch wireType {
         case 0: _ = try varint()
         case 1: position += 8

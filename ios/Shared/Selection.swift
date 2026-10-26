@@ -2,21 +2,19 @@ import Foundation
 
 /// The station, lines and direction the widget shows.
 struct Selection: Codable, Hashable, Sendable {
-    /// A `Station.id`, or in a choice saved before a station's platforms were
-    /// joined up, the id of one of them.
+    /// A `Station.id`; in older saves, possibly the id of one of its platforms.
     var stationID: String
     /// One or more real-time route ids, in the order of `Station.routes`.
     var routes: [String]
-    /// The feeds' N or S for the chosen lines. Where some run the other way to
-    /// the rest on their platform, as the M does to the J at Marcy Av, it's the
-    /// rest's, and theirs is the other (`direction(of:at:)`).
+    /// The feed's N or S for the chosen lines. Where some run opposite to the rest on their
+    /// platform (the M vs the J at Marcy Av), this is the rest's; see `direction(of:at:)`.
     var direction: Direction
     /// Whether the widget mentions an elevator out at the station (the app always lists them).
     var elevatorAlerts: Bool
     /// Whether the widget mentions the MTA's service alerts (the app always lists them).
     var serviceAlerts: Bool
-    /// Minutes to walk to the station. Trains you can't reach in time are left out,
-    /// and the widget counts down to when to leave.
+    /// Minutes to walk to the station. Unreachable trains are hidden; the widget counts down to
+    /// when to leave.
     var walkMinutes: Int
 
     init(stationID: String, routes: [String], direction: Direction, elevatorAlerts: Bool = false, serviceAlerts: Bool = true, walkMinutes: Int = 0) {
@@ -30,11 +28,11 @@ struct Selection: Codable, Hashable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case stationID, routes, direction, elevatorAlerts, serviceAlerts, walkMinutes
-        /// The one line chosen before more than one could be
+        /// Legacy single-line key, from before multiple lines
         case route
     }
 
-    /// Choices saved before `routes`, `elevatorAlerts`, `serviceAlerts` and `walkMinutes` existed still load.
+    /// Older saves missing `routes`, `elevatorAlerts`, `serviceAlerts` or `walkMinutes` still load.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         stationID = try container.decode(String.self, forKey: .stationID)
@@ -43,7 +41,17 @@ struct Selection: Codable, Hashable, Sendable {
         direction = try container.decode(Direction.self, forKey: .direction)
         elevatorAlerts = try container.decodeIfPresent(Bool.self, forKey: .elevatorAlerts) ?? false
         serviceAlerts = try container.decodeIfPresent(Bool.self, forKey: .serviceAlerts) ?? true
+        // Kept here, as the server reads it from registrations; the app drops a saved one
+        // (`droppingSavedWalk`)
         walkMinutes = try container.decodeIfPresent(Int.self, forKey: .walkMinutes) ?? 0
+    }
+
+    /// The app's saved choices without their walking time to the station, which can no longer
+    /// be set, so a saved one can't hide trains with no way to change it.
+    var droppingSavedWalk: Selection {
+        var selection = self
+        selection.walkMinutes = 0
+        return selection
     }
 
     func encode(to encoder: Encoder) throws {
@@ -56,24 +64,20 @@ struct Selection: Codable, Hashable, Sendable {
         try container.encode(walkMinutes, forKey: .walkMinutes)
     }
 
-    /// The walking times the app lets you set, and a link can give.
-    static let walkRange = 0...60
-
-    /// The first chosen line, whose color stands for the choice.
+    /// The first chosen line; its color represents the selection.
     var firstRoute: String { routes.first ?? "" }
 
     /// "R", or "N/R" with more than one line chosen.
     var linesLabel: String { routes.map { LineStyle.of($0).label }.joined(separator: "/") }
 
-    /// Its lines and where they go, as the app lists a train: "R Manhattan",
-    /// "N and R Manhattan".
+    /// Lines and heading, as the app lists a train: "N and R Manhattan".
     var caption: String { "\(Lines.list(routes)) \(heading)" }
 
-    /// Its station, direction and lines: which train this is, whatever the
-    /// walking time. Also its `StopEntity` id.
+    /// Identifies the train by station, direction and lines (ignoring walk time). Also its
+    /// `StopEntity` id.
     var trainID: String { Self.trainID(stationID: stationID, direction: direction, routes: routes) }
 
-    /// "R34:N:R": station, direction, line; "R31:N:N,R" for more than one line.
+    /// "R34:N:R" (station:direction:lines), or "R31:N:N,R" for several lines.
     static func trainID(stationID: String, direction: Direction, routes: [String]) -> String {
         "\(stationID):\(direction.rawValue):\(routes.joined(separator: ","))"
     }
@@ -83,20 +87,17 @@ struct Selection: Codable, Hashable, Sendable {
         train.time.addingTimeInterval(-TimeInterval(walkMinutes) * 60)
     }
 
-    /// The last moment to set off and still catch `train`: `leaveTime(for:)`,
-    /// or later for a train held at the platform, which leaves after it arrives.
+    /// The latest you can set off and still catch `train`; later than `leaveTime(for:)` for a
+    /// train held at the platform.
     func lastLeaveTime(for train: Arrival) -> Date {
         train.leaves.addingTimeInterval(-TimeInterval(walkMinutes) * 60)
     }
 
-    /// Trains of the chosen lines, and of any line that doesn't usually stop at
-    /// their platform, which must be running on one of them: an N running local
-    /// on the R. Lines that do usually stop there are left out unless chosen.
-    /// Each goes its own way (`direction(of:at:)`): toward Manhattan from Marcy
-    /// Av, a J at "M16S" or an M at "M16N", not the other way round. Where a
-    /// line runs the other way to the rest, another line's train on a track
-    /// none of the chosen lines is on is left out (`Platform.carries(_:with:)`):
-    /// with the G alone at Hoyt-Schermerhorn Sts, an E on the A and C's.
+    /// Whether to show `train`: chosen lines, plus lines that don't usually stop at the platform
+    /// (so must be rerouted onto a chosen one, e.g. an N running local on the R). Unchosen lines
+    /// that usually stop there are hidden. Each line uses its own N/S (`direction(of:at:)`).
+    /// Where a line runs opposite to the rest, trains on a track no chosen line uses are hidden
+    /// (`Platform.carries(_:with:)`), e.g. an E with the G alone at Hoyt-Schermerhorn Sts.
     func shows(_ train: Arrival) -> Bool {
         shows(train, at: station)
     }
@@ -104,8 +105,7 @@ struct Selection: Codable, Hashable, Sendable {
     /// `shows(_:)`, with `station` looked up once for many trains.
     func shows(_ train: Arrival, at station: Station?) -> Bool {
         let platform = station?.platforms.first { $0.id == train.stop.dropLast() }
-        // Only where a line runs the other way do the chosen lines' trains stop
-        // at both letters, and can another line's be on a track none of them is on
+        // Only reversed platforms have chosen lines at both N and S, or tracks none of them use
         if let platform, platform.reversed != nil,
            !train.stop.hasSuffix(direction(of: train.route, at: platform).rawValue)
                || !platform.carries(train.route, with: routes) { return false }
@@ -114,8 +114,7 @@ struct Selection: Codable, Hashable, Sendable {
         return !(usual?.contains(train.route) ?? true)
     }
 
-    /// Whether a train needs its bullet beside it: always, unless just one line
-    /// is chosen and the train is on it.
+    /// Whether to show the train's bullet: unless it's the only chosen line.
     func marksLine(of train: Arrival) -> Bool {
         routes != [train.route]
     }
@@ -125,58 +124,46 @@ struct Selection: Codable, Hashable, Sendable {
         trains.filter { lastLeaveTime(for: $0) > now }
     }
 
-    /// With a change, the connections whose train at your station you can
-    /// still reach in time if you leave at or after `now`.
+    /// Connections whose first train you can still reach if you leave at or after `now`.
     func catchable(_ connections: [Connection], now: Date) -> [Connection] {
         connections.filter { lastLeaveTime(for: $0.first) > now }
     }
 
-    /// The first of `trains` you reach as it gets to the platform if you leave
-    /// at or after `now`, not one you'd catch only while it's held there: the
-    /// one the countdown starts on, as it counts down to arrivals.
+    /// The first train you can reach by its arrival (not just while held there) if you leave at
+    /// or after `now`. The countdown starts on it, since it counts down to arrivals.
     func firstReachable(_ trains: [Arrival], now: Date) -> Arrival? {
         trains.first { leaveTime(for: $0) > now }
     }
 
-    /// With a change, the first connection whose train at your station you
-    /// reach as it gets in: the one the Transfers widget's walk button starts
-    /// its countdown on, which needn't be the first the widget shows.
+    /// The first connection whose first train you reach by its arrival. The Transfers widget's
+    /// walk button counts down to it; it may not be the first one shown.
     func firstReachable(_ connections: [Connection], now: Date) -> Connection? {
         connections.first { leaveTime(for: $0.first) > now }
     }
 
-    /// Prospect Av, R, toward Manhattan: what the widget shows until you choose.
+    /// Default until you choose: Prospect Av, R, toward Manhattan.
     static let fallback = Selection(stationID: "R34", routes: ["R"], direction: .north)
 
     var station: Station? { StationDirectory.station(id: stationID) }
 
-    /// The platforms of the chosen lines: one, unless they stop on different
-    /// ones, like the N and the 2 at Atlantic Av-Barclays Ctr.
+    /// The chosen lines' platforms; more than one if they differ (N and 2 at Atlantic Av).
     var platforms: [Platform] { station?.platforms(serving: routes) ?? [] }
 
-    /// The feeds' N or S for trains of `route` at `platform`, one of the chosen
-    /// lines' platforms: `direction`, but the other where the line runs the
-    /// other way to another chosen there (`Platform.direction(_:of:with:)`),
-    /// so they all go the way `heading` names. Toward Manhattan from Marcy Av,
-    /// the J and Z are S and the M N; the M alone goes by its own, N, as an F
-    /// running on it does. At Flushing Av, a Z running local goes by the J's, S.
+    /// The feed's N or S for `route` at `platform`: `direction`, flipped where the line runs
+    /// opposite to another chosen line there (`Platform.direction(_:of:with:)`), so all go the way
+    /// `heading` names. Toward Manhattan from Marcy Av, the J and Z are S and the M is N.
     func direction(of route: String, at platform: Platform) -> Direction {
         platform.direction(direction, of: route, with: routes)
     }
 
-    /// The feeds' N or S for trains of `route`, one of the chosen lines, as
-    /// `direction(of:at:)` has it at its platform: the same all along its line.
+    /// `direction(of:at:)` at the route's platform; constant along its line.
     func direction(of route: String) -> Direction {
         station?.direction(direction, of: route, with: routes) ?? direction
     }
 
-    /// Where the chosen lines' trains stop, as the feeds name it: "R31N", or
-    /// where they run opposite ways on a platform, both of its: toward
-    /// Manhattan from Marcy Av, the J's "M16S" and the M's "M16N". And both
-    /// where a line runs the other way on another's track, so other lines'
-    /// trains on it go by either (`Platform.sharesTrack`): with the M alone,
-    /// an F by the M's and a Z running local by the J's; with the G alone at
-    /// Hoyt-Schermerhorn Sts, on a track of its own, just the G's.
+    /// Feed stop ids for the chosen lines, e.g. "R31N". Includes both N and S where lines run
+    /// opposite ways on a platform (Marcy Av: J "M16S", M "M16N"), or where a line runs opposite
+    /// on another's track, since other trains there may use either (`Platform.sharesTrack`).
     var stopIDs: [String] {
         platforms.flatMap { platform -> [String] in
             let stops = platform.stops(of: routes, going: direction)
@@ -186,21 +173,25 @@ struct Selection: Codable, Hashable, Sendable {
         }
     }
 
+    /// The same station and lines going the other way, for Next train showing both directions.
+    var otherWay: Selection {
+        var selection = self
+        selection.direction = direction.opposite
+        return selection
+    }
+
     /// Where the chosen lines go: "Manhattan".
     var heading: String { station?.directionLabel(direction, routes: routes) ?? "" }
 
-    /// Where `train` goes from its platform, by its own line's way: just one of
-    /// `heading`'s names where the chosen lines' platforms name the direction
-    /// differently. A train of a line that doesn't stop at its platform,
-    /// chosen or not, is named for the side the chosen lines there stop on:
-    /// toward Church Av on the G's own track at Hoyt-Schermerhorn Sts, an F is
-    /// S, as the G is, on the side named "Manhattan - Church Av"; an F chosen
-    /// with the M at Delancey St-Essex St, going N at the J's platform, is on
-    /// the M's side, "Broad St (JZ) - Uptown (M)".
+    /// Where `train` goes from its platform, by its own line's way; can be just one of `heading`'s
+    /// names when platforms name it differently. A line that doesn't usually stop at the platform
+    /// is labeled as the chosen lines going their way there (e.g. an F on the G's track at
+    /// Hoyt-Schermerhorn Sts gets the G's "Church Av").
     func heading(of train: Arrival) -> String {
         guard let platform = platform(of: train), let way = Direction(ofStop: train.stop) else { return heading }
-        if !platform.routes.contains(train.route), let line = routes.first(where: platform.routes.contains) {
-            return Station.directionLabel(platform.side(of: line, going: direction(of: line, at: platform)), on: [platform])
+        let chosen = routes.filter(platform.routes.contains)
+        if !platform.routes.contains(train.route), !chosen.isEmpty {
+            return Station.directionLabel(direction, on: [platform], routes: chosen)
         }
         return Station.directionLabel(way, on: [platform], routes: [train.route])
     }
@@ -209,9 +200,8 @@ struct Selection: Codable, Hashable, Sendable {
         station?.platforms.first { $0.id == train.stop.dropLast() }
     }
 
-    /// A saved choice that no longer matches the station list falls back to the
-    /// default; a line the station has lost is just dropped. One saved when its
-    /// platform was a station of its own moves to the station it's part of.
+    /// Falls back to `fallback` if the station or all its lines are gone; drops lost lines; moves
+    /// a saved platform id to its parent station.
     func validated() -> Selection {
         guard let station else { return .fallback }
         var selection = self
@@ -220,125 +210,15 @@ struct Selection: Codable, Hashable, Sendable {
         return selection.routes.isEmpty ? .fallback : selection
     }
 
-    /// As `validated()`, but nil rather than the default where the station is
-    /// gone or has lost every line chosen: for a train that isn't the app's
-    /// own choice, such as a link's, a favorite's or a shortcut's.
+    /// `validated()`, but nil instead of the fallback. For trains not chosen in the app, such as
+    /// from shortcuts.
     func validatedIfKnown() -> Selection? {
         guard let station, station.routes.contains(where: routes.contains) else { return nil }
         return validated()
     }
 }
 
-extension Selection {
-    /// Opens the app at this train's alerts, from a widget showing one:
-    /// "traintimes://alerts?station=R34&lines=R&direction=N&elevators=0". A
-    /// widget's train can be other than the app's, so it goes along.
-    var alertsURL: URL { link(to: "alerts") }
-
-    /// Opens the app at this train's times, from a row of the Nearby widget:
-    /// "traintimes://train?station=R33&lines=R&direction=N&elevators=0".
-    var trainURL: URL { link(to: "train") }
-
-    /// Opens the app at the times of this train and of the lines it changes to,
-    /// from the Transfers widget: "traintimes://transfer?station=R33&lines=R&
-    /// direction=N&elevators=0&walk=4&change=R31&to=D,N&going=N". The walking
-    /// time goes along so the page leaves out the trains the widget does.
-    func transferURL(changingAt change: Change) -> URL {
-        link(to: "transfer", adding: [
-            URLQueryItem(name: "walk", value: String(walkMinutes)),
-            URLQueryItem(name: "change", value: change.stationID),
-            URLQueryItem(name: "to", value: AppLink.list(change.routes)),
-            URLQueryItem(name: "going", value: change.departureDirection(for: self).rawValue),
-        ])
-    }
-
-    /// The train and change a `transferURL` is for, or nil for any other link
-    /// or a change that's no longer on the train's way.
-    static func transfer(from url: URL) -> (selection: Selection, change: Change)? {
-        guard var selection = Selection(link: url, to: "transfer"),
-              let query = AppLink.query(of: url, to: "transfer"),
-              let stationID = query["change"], let routes = query.list("to"),
-              let change = Change(stationID: stationID, routes: routes,
-                                  direction: query["going"].flatMap(Direction.init(rawValue:)))
-                  .validated(for: selection) else { return nil }
-        // As the app could set it, so a link made up with a huge one can't overflow
-        let walk = query["walk"].flatMap(Int.init) ?? 0
-        selection.walkMinutes = min(max(walk, walkRange.lowerBound), walkRange.upperBound)
-        return (selection, change)
-    }
-
-    /// A link to the app's `host` page for this train, with `extra` after its own query.
-    private func link(to host: String, adding extra: [URLQueryItem] = []) -> URL {
-        AppLink.url(to: host, query: [
-            URLQueryItem(name: "station", value: stationID),
-            URLQueryItem(name: "lines", value: AppLink.list(routes)),
-            URLQueryItem(name: "direction", value: direction.rawValue),
-            URLQueryItem(name: "elevators", value: elevatorAlerts ? "1" : "0"),
-        ] + extra) ?? URL(string: "\(AppLink.scheme)://\(host)")!
-    }
-
-    /// The train an `alertsURL` is for, or nil for any other link.
-    init?(alertsURL url: URL) {
-        self.init(link: url, to: "alerts")
-    }
-
-    /// The train a `trainURL` is for, or nil for any other link.
-    init?(trainURL url: URL) {
-        self.init(link: url, to: "train")
-    }
-
-    private init?(link url: URL, to host: String) {
-        guard let query = AppLink.query(of: url, to: host),
-              let station = query["station"], let lines = query.list("lines"),
-              let direction = query["direction"].flatMap(Direction.init(rawValue:)) else { return nil }
-        // Not the fallback train, as validated() would give for a station
-        // that's gone or lines it doesn't have: that's not the widget's train
-        guard let known = Selection(stationID: station, routes: lines, direction: direction,
-                                    elevatorAlerts: query["elevators"] == "1")
-            .validatedIfKnown() else { return nil }
-        self = known
-    }
-}
-
-/// The app's own links, which the widgets open it with:
-/// "traintimes://train?station=R33&lines=R&direction=N&elevators=0".
+/// The app's URL scheme, for the Nearby widget's "allow location" link.
 enum AppLink {
     static let scheme = "traintimes"
-
-    /// A link to the app's `host` page with `query`; nil should they not make one.
-    static func url(to host: String, query: [URLQueryItem]) -> URL? {
-        var components = URLComponents()
-        components.scheme = scheme
-        components.host = host
-        components.queryItems = query
-        return components.url
-    }
-
-    /// The query of `url`, where it's a link to the app's `host` page; nil
-    /// for any other link.
-    static func query(of url: URL, to host: String) -> Query? {
-        guard url.scheme == scheme, url.host == host,
-              let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems else { return nil }
-        return Query(items: items)
-    }
-
-    /// A list as a link gives it, in one value: "N,R".
-    static func list(_ values: [String]) -> String {
-        values.joined(separator: ",")
-    }
-
-    /// A link's values, by name.
-    struct Query {
-        let items: [URLQueryItem]
-
-        /// The value named `name`; the first, should there be more.
-        subscript(_ name: String) -> String? {
-            items.first { $0.name == name }?.value
-        }
-
-        /// The list named `name`, written as `AppLink.list` writes it.
-        func list(_ name: String) -> [String]? {
-            self[name].map { $0.split(separator: ",").map(String.init) }
-        }
-    }
 }

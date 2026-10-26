@@ -1,79 +1,65 @@
 import SwiftUI
 import UIKit
 
-/// The app's three tabs, in a Liquid Glass tab bar on iOS 26: Live, for your
-/// favorites' trains and those near you; Widgets, to set widgets up; and Settings.
+/// The app's tabs (Liquid Glass bar on iOS 26): New Trip (A to B, for Transit Directions), Nearby
+/// (trains at nearby stations), Widgets (setup), and Settings.
 struct AppTabs: View {
-    private enum AppTab: Hashable { case live, widgets, settings }
+    private enum AppTab: Hashable { case newTrip, live, widgets, settings }
 
-    @Environment(\.scenePhase) private var scenePhase
     @State private var store = WidgetStore()
-    @State private var favorites = FavoritesStore()
     @State private var settings = SettingsStore()
     @State private var tab = AppTab.live
-    /// A train whose alerts show in full, after "More ›" on a widget.
-    @State private var alertsTrain: AlertsSheet.Train?
-    /// What a tap on the Nearby widget opens in the Live tab.
-    @State private var liveOpening: LiveOpening?
+    /// Set by the Nearby widget's "allow location" link, for the Nearby tab to act on.
+    @State private var allowingLocation = false
+    /// New Trip's picked trip, for its Show on Widget.
+    @State private var tripShowing = TripShowing()
+    /// A station tapped in Spotlight, set by `OpenStationIntent`.
+    @State private var opening = StationOpening.shared
+    /// That station, as its picker shows it.
+    @State private var openStation: Station?
 
     var body: some View {
         TabView(selection: $tab) {
-            LiveView(opening: $liveOpening)
-                .tabItem { Label("Live", systemImage: "bolt.fill") }
-                .tag(AppTab.live)
-            WidgetsView()
-                .tabItem { Label("Widgets", systemImage: "app") }
-                .tag(AppTab.widgets)
-            SettingsView()
-                .tabItem { Label("Settings", systemImage: "gearshape") }
-                .tag(AppTab.settings)
+            Tab("New Trip", systemImage: "point.topleft.down.to.point.bottomright.curvepath.fill", value: AppTab.newTrip) {
+                NewTripView(showing: tripShowing)
+            }
+            Tab("Nearby", systemImage: "location.fill", value: AppTab.live) {
+                LiveView(allowingLocation: $allowingLocation)
+            }
+            Tab("Widgets", systemImage: "app", value: AppTab.widgets) {
+                WidgetsView()
+            }
+            Tab("Settings", systemImage: "gearshape", value: AppTab.settings) {
+                SettingsView()
+            }
+        }
+        // Shrinks out of the way while scrolling down Nearby's stations
+        .tabBarMinimizeBehavior(.onScrollDown)
+        .sheet(item: $openStation) { station in
+            StationWidgetPicker(station: station)
+        }
+        // Also when the tap launched the app, so it was set before this appeared
+        .onChange(of: opening.station, initial: true) { _, station in
+            guard let station else { return }
+            opening.station = nil
+            afterSheets { openStation = station }
         }
         .environment(store)
-        .environment(favorites)
         .environment(settings)
-        // The store kept, not one made with a view thrown away
+        // Start the kept store, not one from a discarded view instance
         .onAppear { store.start() }
-        .sheet(item: $alertsTrain) { train in
-            AlertsSheet(selection: train.selection)
-        }
-        // The icon is the default widget's line: when that changes, and each
-        // time the app opens, in case it couldn't change before
-        .onChange(of: store.defaultWidget.selection.firstRoute) { _, route in
-            AppIcon.show(route)
-        }
-        .onChange(of: scenePhase, initial: true) { _, phase in
-            if phase == .active { AppIcon.show(store.defaultWidget.selection.firstRoute) }
-        }
-        // A widget's "More ›": the alerts of its train, which can be other than
-        // the default's. Here so it opens whichever tab is showing. And the
-        // Nearby widget: one of its trains, a station, or the stations near you.
-        // And the Transfers widget: its train and the one it changes to.
+        // The Nearby widget's "allow location" link, handled here so it works from any tab
         .onOpenURL { url in
-            if let selection = Selection(alertsURL: url) {
-                let train = AlertsSheet.Train(selection: selection)
-                afterSheets { alertsTrain = train }
-            } else if let selection = Selection(trainURL: url) {
-                afterSheets { showInLive(.train(selection)) }
-            } else if let transfer = Selection.transfer(from: url) {
-                let page = TransferPage(selection: transfer.selection, change: transfer.change)
-                afterSheets { showInLive(.transfer(page)) }
-            } else if let opened = Nearby.station(from: url) {
-                afterSheets { showInLive(.station(StationPage(station: opened.station, first: opened.first))) }
-            } else if url == Nearby.allowURL {
-                afterSheets { showInLive(.allowLocation) }
-            } else if url == Nearby.url {
-                afterSheets { showInLive(.nearby) }
+            guard url == Nearby.allowURL else { return }
+            afterSheets {
+                tab = .live
+                allowingLocation = true
             }
         }
     }
 
-    private func showInLive(_ opening: LiveOpening) {
-        tab = .live
-        liveOpening = opening
-    }
-
-    /// Runs `show` once any sheet that's up, such as the train picker or a
-    /// train's alerts, has gone, as it would keep what's next from showing.
+    /// Runs `show` after dismissing any presented sheet (e.g. the train picker), which would
+    /// otherwise block it.
     private func afterSheets(_ show: @escaping () -> Void) {
         let root = UIApplication.shared.connectedScenes
             .compactMap { ($0 as? UIWindowScene)?.keyWindow?.rootViewController }

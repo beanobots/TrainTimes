@@ -1,74 +1,72 @@
 import Foundation
 
-/// What the Lock Screen countdown shows: `TrainActivityAttributes.ContentState`,
-/// which the app posts with ActivityKit and the push server (server/, which
-/// links this file) sends through APNs. ActivityKit keeps it encoded, and
-/// decodes it with a plain `JSONDecoder`: the keys are the property names, and
-/// dates are seconds since 2001-01-01, as a number.
+/// The Lock Screen countdown's `TrainActivityAttributes.ContentState`, posted by the app via
+/// ActivityKit and by the push server (server/, which links this file) via APNs. ActivityKit
+/// decodes it with a plain `JSONDecoder`: keys are property names, dates are seconds since
+/// 2001-01-01.
 ///
-/// What older versions of the app posted, and what a server deployed before or
-/// after the app sends, must keep decoding: a property added here has to be
-/// optional, and none can be renamed or change its type.
+/// Must decode what older apps and older or newer servers send: new properties must be optional,
+/// and none may be renamed or change type.
 struct CountdownState: Codable, Hashable, Sendable {
     /// When the train reaches the platform.
     var train: Date
-    /// Its trip in the feed, so a refresh follows the same train.
+    /// Feed trip id, so a refresh follows the same train.
     var trip: String
     var isLive: Bool
     var terminal: String?
     /// The next couple of trains after it.
     var following: [Date]
-    /// "Delays", "Elevator out", when there's something to know.
+    /// E.g. "Delays", "Elevator out".
     var notice: String?
-    /// When its times were fetched.
+    /// When the times were fetched.
     var updated: Date
-    /// Its line, which can be another one running on yours; nil from countdowns
-    /// started before trains of other lines were shown.
+    /// May be another line running on yours; nil from countdowns started before other lines'
+    /// trains were shown.
     var route: String? = nil
     /// The lines of `following`.
     var followingRoutes: [String]? = nil
-    /// Settings › Mark live times and Mark scheduled times as they were when the
-    /// app posted it. The countdown reads Settings as it's drawn; these are
-    /// here so that changing them posts a state that isn't the same, which iOS
-    /// redraws. Nil from the push server, which doesn't know them, and from
-    /// older versions of the app.
+    /// Settings › Mark live/scheduled times when posted. The countdown reads Settings when drawn;
+    /// these only make a settings change post a different state, so iOS redraws. Nil from the
+    /// push server and older apps.
     var marksLiveTimes: Bool? = nil
     var marksScheduledTimes: Bool? = nil
 }
 
 extension CountdownState {
-    /// iOS ends a Live Activity after 8 hours.
-    static let lifetime: TimeInterval = 8 * 60 * 60
+    /// How long a countdown runs from when it starts, moving on to the next train each time one
+    /// is due; then the app, or the push server, ends it. (iOS's own limit is 8 hours.)
+    static let lifetime: TimeInterval = 30 * 60
 
-    /// How much sooner than the train it last counted down to another one can
-    /// be and still be taken for it: the same train under a new trip id, or one
-    /// without an id, whose time has moved up a little.
+    /// How much earlier than the last target a train can be and still count as it: the same
+    /// train under a new trip id, or one without an id whose time moved up a little.
     static let leeway: TimeInterval = 60
 
-    /// Out of date as the train is due: iOS redraws the countdown then, and it
-    /// moves on to the next train it has (`movedOn(at:)`).
+    /// Stale when the train is due, so iOS redraws and it moves on (`movedOn(at:)`).
     var staleDate: Date { train }
 
-    /// The countdown for `selection` from `trains`, mentioning `notice`, the
-    /// label of an alert. When starting (`trip` nil), it's to the first train
-    /// you can reach as it gets to the platform. After that it's to the train
-    /// with `trip` while that's still coming, and once it has gone, to the
-    /// first train due at or after `last`, the one it counted down to, as it
-    /// moves on by itself. You set off when it started, so the walk isn't
-    /// taken off again. Before anything is known of that train, it's the
-    /// first you can reach as it gets there.
+    /// Whether widgets for its train show the same as with `other`: they take its trains'
+    /// times, lines and liveness (`CountdownSync`), however little they move, but not its notice.
+    func hasSameTrains(as other: CountdownState) -> Bool {
+        train == other.train && trip == other.trip && route == other.route && isLive == other.isLive
+            && following == other.following && followingRoutes == other.followingRoutes
+    }
+
+    /// The countdown for `selection` from `trains`; `notice` is an alert label. On start (`trip`
+    /// nil), targets the first train you can reach as it arrives. After that, the train with
+    /// `trip` while it's coming, then the first due at or after `last` (the previous target), as
+    /// the countdown moves on by itself. The walk isn't subtracted again since you've set off.
+    /// With nothing known of that train, the first reachable one.
     ///
-    /// Trains go by when they reach the platform, which is what it counts down
-    /// to and moves on at, not when one held there leaves. So it doesn't start
-    /// on one you'd reach only while it's held there: it would move on from
-    /// that train as it got in, with you still on your way.
+    /// Times are platform arrivals, not departures of held trains. So it never starts on a train
+    /// you'd only catch while it's held: it would move on as that train arrived, with you still
+    /// walking.
     init?(for selection: Selection, trains: [Arrival], notice: String?, now: Date,
           following trip: String?, after last: Date?) {
         let upcoming = trains.filter { $0.time > now }
         let reachable = selection.firstReachable(upcoming, now: now)
         let target: Arrival?
         if let trip {
-            // A trip without an id can't be told from another one, so that goes by its time
+            // A trip without an id can only be matched by time
             let same = trip.isEmpty ? nil : upcoming.first { $0.trip == trip }
             let next = last.flatMap { last in upcoming.first { $0.time >= last.addingTimeInterval(-Self.leeway) } }
             target = same ?? next ?? reachable
@@ -90,18 +88,16 @@ extension CountdownState {
         )
     }
 
-    /// The same from `board`, mentioning what it has that `selection` and
-    /// `settings` ask for.
+    /// As above, from `board`, with the notice `selection` and `settings` ask for.
     init?(for selection: Selection, board: Board, settings: AppSettings, now: Date,
           following trip: String?, after last: Date?) {
         self.init(for: selection, trains: board.trains, notice: board.notice(for: selection, settings: settings)?.label,
                   now: now, following: trip, after: last)
     }
 
-    /// New times for the running countdown from `board`: the same train while
-    /// it's still coming, the next one once it has gone. With no train at all,
-    /// it stays on its last one and says so, or names the service alert that's
-    /// why: not an elevator out, which the notice would otherwise put first.
+    /// Updates the running countdown from `board`: the same train while it's coming, then the
+    /// next. With no trains, keeps the last one and says so, or names the service alert (not an
+    /// elevator outage, which would otherwise take priority).
     func refreshed(for selection: Selection, board: Board, settings: AppSettings, now: Date) -> CountdownState {
         if let state = CountdownState(for: selection, board: board, settings: settings, now: now,
                                       following: trip, after: train) {
@@ -117,12 +113,10 @@ extension CountdownState {
         return state
     }
 
-    /// Once the train has gone, the first of the following trains still to
-    /// come, as though it were the one counted down to; or, with none, as it
-    /// is. The countdown is out of date as its train is due, and iOS redraws
-    /// it then, so it moves on without the app. Only once, though: nothing
-    /// redraws it again until the app updates it. A following train's trip
-    /// and where it ends aren't known; it's taken to be live if this one was.
+    /// Once the train has gone, retargets to the first following train still to come (or returns
+    /// self if none). iOS redraws at `staleDate`, so this moves on without the app, but only once
+    /// until the app updates it. A following train's trip and terminal are unknown; it's live if
+    /// this one was.
     func movedOn(at now: Date) -> CountdownState {
         guard train <= now, let index = following.firstIndex(where: { $0 > now }) else { return self }
         var state = self

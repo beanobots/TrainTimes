@@ -32,16 +32,19 @@ extension HTTPField.Name {
     static let cfConnectingIP = Self("CF-Connecting-IP")!
 }
 
-/// The per-client token bucket, on every request.
+/// The per-client token bucket, on every request: `GET /feeds`'s own, every other route's
+/// shared.
 struct RateLimit: RouterMiddleware {
     typealias Context = AppContext
     let limiter: RateLimiter
+    let feedLimiter: RateLimiter
 
     func handle(_ request: Request, context: AppContext,
                 next: (Request, AppContext) async throws -> Response) async throws -> Response {
         var context = context
         context.clientIP = ClientIP.resolve(peer: context.remoteAddress, connectingIP: request.headers[.cfConnectingIP])
-        guard await limiter.allow(context.clientIP) else {
+        let bucket = request.uri.path == "/feeds" ? feedLimiter : limiter
+        guard await bucket.allow(context.clientIP) else {
             return Response(status: .tooManyRequests, headers: [.retryAfter: "60"])
         }
         return try await next(request, context)
@@ -85,18 +88,32 @@ struct HTTPServices: Sendable {
     var store: Store
     var challenges: ChallengeStore
     var limiter: RateLimiter
+    var feedLimiter: RateLimiter
     var keyCreation: DailyLimiter
     var refusals: RefusalLog
     var auth: AuthMode
     var attest: AppAttest
     var limits: Limits
+    var feeds: FeedRelay
+    var timetable: TimetableCopy
+    /// Nil without a Google key: `GET /routes` isn't offered.
+    var routes: TransitRoutes?
+    /// Nil without a Bus Time key: `GET /buses` isn't offered.
+    var buses: BusTime?
 
-    init(store: Store, auth: AuthMode, appID: String, limits: Limits, roots: [Certificate]? = nil) {
+    init(store: Store, auth: AuthMode, appID: String, limits: Limits, roots: [Certificate]? = nil,
+         feeds: FeedRelay = FeedRelay(interval: 20), timetable: TimetableCopy = TimetableCopy(),
+         routes: TransitRoutes? = nil, buses: BusTime? = nil) {
         self.store = store
+        self.routes = routes
+        self.buses = buses
         self.auth = auth
         self.limits = limits
+        self.feeds = feeds
+        self.timetable = timetable
         challenges = ChallengeStore(limit: limits.maxChallenges, perClient: limits.challengesPerIP)
         limiter = RateLimiter(perMinute: limits.requestsPerMinute, burst: limits.requestBurst)
+        feedLimiter = RateLimiter(perMinute: limits.feedRequestsPerMinute, burst: limits.feedRequestBurst)
         keyCreation = DailyLimiter(limit: limits.keysPerIPPerDay)
         refusals = RefusalLog()
         let environments: Set<AttestEnvironment>
@@ -116,10 +133,131 @@ enum HTTPRoutes {
     static func router(_ services: HTTPServices) -> Router<AppContext> {
         let router = Router(context: AppContext.self)
         // First, so it covers every route, and requests for none
-        router.add(middleware: RateLimit(limiter: services.limiter))
+        router.add(middleware: RateLimit(limiter: services.limiter, feedLimiter: services.feedLimiter))
 
         // Says only that it's up
         router.get("/health") { _, _ in "ok" }
+
+        // An MTA feed as the poller last read it (`FeedRelay`), for the app and widgets to read
+        // here before the MTA; never read for a request. Public data, so no authentication:
+        // widgets can't sign requests.
+        // With `stops` (a train feed's) or `routes` (the alerts'), comma-separated, only what
+        // those need (`FeedRelay.served`); gzipped for a client that takes it. Both save phones
+        // with little signal below ground most of the download.
+        router.get("/feeds") { request, _ -> Response in
+            let query = request.uri.queryParameters
+            guard let name = query.get("name") else { throw HTTPError(.badRequest) }
+            guard FeedRelay.feeds[name] != nil else { throw HTTPError(.notFound) }
+            var ask = FeedRelay.Ask(name: name, gzip: Gzip.isAccepted(by: request.headers[.acceptEncoding]))
+            if let stops = query.get("stops") {
+                guard let ids = FeedRelay.ids(in: stops) else { throw HTTPError(.badRequest) }
+                ask.stops = ids
+            }
+            if let routes = query.get("routes") {
+                guard let ids = FeedRelay.ids(in: routes) else { throw HTTPError(.badRequest) }
+                ask.routes = ids
+            }
+            guard let served = await services.feeds.served(ask) else { throw HTTPError(.badGateway) }
+            var headers: HTTPFields = [.contentType: "application/octet-stream", .cacheControl: "no-store",
+                                       .vary: "Accept-Encoding"]
+            if served.gzipped { headers[.contentEncoding] = "gzip" }
+            return Response(status: .ok, headers: headers, body: .init(byteBuffer: ByteBuffer(bytes: served.data)))
+        }
+
+        // The timetable the app falls back on when the MTA can't be reached (`TimetableMaker`).
+        // Public, like the feeds; with If-None-Match, 304 if the phone has the current one.
+        router.get("/timetable") { request, _ -> Response in
+            guard let data = await services.timetable.data, let etag = await services.timetable.etag else {
+                throw HTTPError(.serviceUnavailable)
+            }
+            let headers: HTTPFields = [.contentType: "application/octet-stream", .eTag: etag,
+                                       .cacheControl: "no-cache"]
+            if request.headers[.ifNoneMatch] == etag {
+                return Response(status: .notModified, headers: headers)
+            }
+            return Response(status: .ok, headers: headers, body: .init(byteBuffer: ByteBuffer(bytes: data)))
+        }
+
+        // Google's subway routes between two places in the city (`TransitRoutes`), for directions
+        // shared to the app's Share extension, which can't sign requests: from=lat,lon&to=lat,lon,
+        // optionally at=<seconds since 1970> to leave then, and bus=1 for bus rides too. Daily
+        // limits keep it in Google's free allowance; where trips are isn't logged.
+        if let routes = services.routes {
+            router.get("/routes") { request, context -> Response in
+                let query = request.uri.queryParameters
+                guard let from = TransitRoutes.point(query.get("from")),
+                      let to = TransitRoutes.point(query.get("to")),
+                      TransitRoutes.isInCity(from), TransitRoutes.isInCity(to) else {
+                    throw HTTPError(.badRequest)
+                }
+                // Not in the past, which Google refuses, nor over a week on
+                let now = Date.now
+                let asked = query.get("at").flatMap { Double($0) }.map { Date(timeIntervalSince1970: $0) } ?? now
+                let departure = min(max(asked, now), now.addingTimeInterval(7 * 86400))
+                let bus = query.get("bus") == "1"
+                switch await routes.routes(from: from, to: to, departure: departure, client: context.clientIP, bus: bus) {
+                case .routes(let found):
+                    let json = try JSONEncoder().encode(["routes": found])
+                    return Response(status: .ok, headers: [.contentType: "application/json", .cacheControl: "no-store"],
+                                    body: .init(byteBuffer: ByteBuffer(bytes: json)))
+                case .limited(let retryAfter):
+                    await log("routes: over a daily limit", context, services)
+                    return Response(status: .tooManyRequests, headers: [.retryAfter: String(retryAfter)])
+                case .unavailable:
+                    throw HTTPError(.badGateway)
+                }
+            }
+        }
+
+        // Bus Time's next buses for a bus ride from `GET /routes?bus=1` (`BusTime`):
+        // line=<Google's name for it>&stop=lat,lon, where the ride boards. Public, like the
+        // routes, and to daily limits like them; where riders wait isn't logged.
+        if let buses = services.buses {
+            router.get("/buses") { request, context -> Response in
+                let query = request.uri.queryParameters
+                guard let line = query.get("line").flatMap(BusTime.validLine),
+                      let stop = TransitRoutes.point(query.get("stop")), TransitRoutes.isInCity(stop) else {
+                    throw HTTPError(.badRequest)
+                }
+                switch await buses.arrivals(line: line, near: stop, client: context.clientIP) {
+                case .arrivals(let found):
+                    // Dates as the app's JSONDecoder reads them by default
+                    let json = try JSONEncoder().encode(found)
+                    return Response(status: .ok, headers: [.contentType: "application/json", .cacheControl: "no-store"],
+                                    body: .init(byteBuffer: ByteBuffer(bytes: json)))
+                case .noStop:
+                    throw HTTPError(.notFound)
+                case .limited(let retryAfter):
+                    await log("buses: over a daily limit", context, services)
+                    return Response(status: .tooManyRequests, headers: [.retryAfter: String(retryAfter)])
+                case .unavailable:
+                    throw HTTPError(.badGateway)
+                }
+            }
+
+            // For the app's Nearby with buses: the closest stop each way within a quarter mile of
+            // at=lat,lon, with their next buses (`BusTime.nearbyPlaces`); none with no stop that close.
+            router.get("/buses/nearby") { request, context -> Response in
+                guard let point = TransitRoutes.point(request.uri.queryParameters.get("at")),
+                      TransitRoutes.isInCity(point) else {
+                    throw HTTPError(.badRequest)
+                }
+                // `ways`, the nearest place's, for apps that predate `places`
+                let places: [[BusTime.Way]]
+                do {
+                    places = try await buses.nearbyPlaces(point, client: context.clientIP)
+                } catch BusTime.Failure.limited(let retryAfter) {
+                    await log("buses: over a daily limit", context, services)
+                    return Response(status: .tooManyRequests, headers: [.retryAfter: String(retryAfter)])
+                } catch {
+                    throw HTTPError(.badGateway)
+                }
+                struct Nearby: Encodable { var ways: [BusTime.Way]; var places: [[BusTime.Way]] }
+                let json = try JSONEncoder().encode(Nearby(ways: places.first ?? [], places: places))
+                return Response(status: .ok, headers: [.contentType: "application/json", .cacheControl: "no-store"],
+                                body: .init(byteBuffer: ByteBuffer(bytes: json)))
+            }
+        }
 
         if case .attest = services.auth {
             router.get("/attest/challenge") { _, context -> Response in
@@ -195,6 +333,8 @@ enum HTTPRoutes {
                   registration.stateFits else {
                 throw HTTPError(.badRequest)
             }
+            let widgetToken = registration.widgetToken.map(Registration.normalizedToken)
+            if case .some(nil) = widgetToken { throw HTTPError(.badRequest) }
             let now = Date.now
             let entry = Registration(
                 token: token,
@@ -206,7 +346,10 @@ enum HTTPRoutes {
                 started: min(max(registration.started ?? now, now - ActivityState.lifetime), now),
                 alertKinds: registration.alertKinds?.kinds,
                 revision: UUID(),
-                lastState: registration.state
+                lastState: registration.state,
+                // Dropped if it's no longer a change for this train, as a saved widget's is
+                change: registration.change?.validated(for: registration.selection),
+                widgetToken: widgetToken ?? nil
             )
             switch try await services.store.upsert(entry, maxTotal: services.limits.maxRegistrations,
                                                    maxPerOwner: services.limits.maxRegistrationsPerKey) {
@@ -222,6 +365,21 @@ enum HTTPRoutes {
             }
             Log.info("register \(entry.tokenPrefix) \(entry.environment.rawValue) \(entry.selection.trainID) key \(Redact.id(owner))")
             return Response(status: .noContent)
+        }
+
+        // The state last pushed to a countdown, for the phone's widgets to show the same times
+        // (they can't sign requests, but have its push token, which only APNs and the phone
+        // know). Times are all it has: nothing about whose it is.
+        router.get("/activities/:token/state") { _, context -> Response in
+            guard let token = context.parameters.get("token").flatMap(Registration.normalizedToken) else {
+                throw HTTPError(.badRequest)
+            }
+            guard let state = await services.store.registration(for: token)?.lastState else {
+                throw HTTPError(.notFound)
+            }
+            let json = try ContentState.encoder().encode(state)
+            return Response(status: .ok, headers: [.contentType: "application/json", .cacheControl: "no-store"],
+                            body: .init(byteBuffer: ByteBuffer(bytes: json)))
         }
 
         router.delete("/activities/:token") { request, context -> Response in

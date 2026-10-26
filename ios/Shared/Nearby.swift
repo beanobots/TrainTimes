@@ -4,13 +4,12 @@ import CoreLocation
 enum Nearby {
     struct Result: Identifiable {
         let station: Station
-        /// From you to the middle of its platforms.
+        /// To the middle of its platforms.
         let meters: Double
 
         var id: String { station.id }
 
-        /// "0.3 mi", or "0.5 km" where the phone uses kilometres; never less
-        /// than 0.1, and never in feet.
+        /// "0.3 mi" or "0.5 km" per locale; at least 0.1, never in feet.
         var distance: String {
             let unit: UnitLength = Locale.current.measurementSystem == .metric ? .kilometers : .miles
             let value = max(Measurement(value: meters, unit: UnitLength.meters).converted(to: unit).value, 0.1)
@@ -18,24 +17,23 @@ enum Nearby {
                 .formatted(.measurement(width: .abbreviated, usage: .asProvided, numberFormatStyle: .number.precision(.fractionLength(1))))
         }
 
-        /// About how long it takes to walk there: 3 mph, and a fifth more for
-        /// streets that don't go straight there. Never less than a minute.
+        /// As `TripPlanner.walkSeconds(_:)` times it; at least 1.
         var walkMinutes: Int {
-            max(1, Int((meters * 1.2 / 80).rounded()))
+            max(1, Int((TripPlanner.walkSeconds(meters) / 60).rounded()))
         }
     }
 
-    /// No further than this, so there's no list far from the subway.
+    /// Meters; beyond this, no stations are listed.
     private static let range: Double = 5_000
 
-    /// How far `range` is, in the phone's units: "3 miles" or "5 kilometers".
+    /// `range` in the phone's units: "3 miles" or "5 kilometers".
     static var rangeDescription: String {
         let unit: UnitLength = Locale.current.measurementSystem == .metric ? .kilometers : .miles
         return Measurement(value: range, unit: UnitLength.meters).converted(to: unit)
             .formatted(.measurement(width: .wide, usage: .asProvided, numberFormatStyle: .number.precision(.fractionLength(0))))
     }
 
-    /// The closest few of `stations` to `location`, nearest first.
+    /// Up to `limit` stations within `range`, nearest first.
     static func stations(near location: CLLocation, among stations: [Station] = StationDirectory.all, limit: Int = 5) -> [Result] {
         results(near: location, among: stations)
             .filter { $0.meters <= range }
@@ -44,7 +42,7 @@ enum Nearby {
             .map { $0 }
     }
 
-    /// The closest station of all, however far: for saying how far the subway is.
+    /// The closest station at any distance, to say how far the subway is.
     static func nearest(to location: CLLocation) -> Result? {
         results(near: location, among: StationDirectory.all).min { $0.meters < $1.meters }
     }
@@ -53,33 +51,10 @@ enum Nearby {
         stations.map { Result(station: $0, meters: location.distance(from: CLLocation(latitude: $0.lat, longitude: $0.lon))) }
     }
 
-    /// The Nearby widget's kind, for the app to reload it when location is turned on.
+    /// So the app can reload it when location is turned on.
     static let widgetKind = "NearbyWidget"
 
-    /// Opens the app at the Live tab, which finds you again: a tap on the Nearby widget.
-    static let url = URL(string: "\(AppLink.scheme)://nearby")!
-
-    /// Opens the app to let it have your location: it asks the first time,
-    /// and once location's been turned off, opens Settings.
+    /// Opens the app to grant location: it asks the first time, or opens Settings if it was
+    /// turned off.
     static let allowURL = URL(string: "\(AppLink.scheme)://nearby/allow")!
-
-    /// Opens the app at a station's every line both ways, from a station's
-    /// name on the Nearby widget: "traintimes://station?id=R33". With `first`,
-    /// those lines are at the top, as for "4 more lines":
-    /// "traintimes://station?id=R33&first=N,Q".
-    static func stationURL(_ station: Station, first: [String] = []) -> URL {
-        var query = [URLQueryItem(name: "id", value: station.id)]
-        if !first.isEmpty {
-            query.append(URLQueryItem(name: "first", value: AppLink.list(first)))
-        }
-        return AppLink.url(to: "station", query: query) ?? url
-    }
-
-    /// The station a `stationURL` is for, and the lines to put first, or nil
-    /// for any other link.
-    static func station(from url: URL) -> (station: Station, first: [String])? {
-        guard let query = AppLink.query(of: url, to: "station"),
-              let id = query["id"], let station = StationDirectory.station(id: id) else { return nil }
-        return (station, query.list("first") ?? [])
-    }
 }

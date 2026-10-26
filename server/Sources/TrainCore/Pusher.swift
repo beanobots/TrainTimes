@@ -28,6 +28,9 @@ enum PushResult: Sendable, Equatable {
 
 protocol Pusher: Sendable {
     func send(_ push: Push) async -> PushResult
+    /// Tells the phone with widget push token `token` to reload its widgets, so those for a
+    /// countdown's train redraw with the times just pushed to it.
+    func sendWidgetReload(token: String, environment: PushEnvironment) async -> PushResult
     func shutdown() async
 }
 
@@ -38,6 +41,7 @@ final class APNSPusher: Pusher {
     private let sandbox: Client
     private let production: Client
     private let topic: String
+    private let widgetTopic: String
 
     init(config: APNSConfig) throws {
         let pem: String
@@ -67,6 +71,7 @@ final class APNSPusher: Pusher {
         sandbox = client(.development)
         production = client(.production)
         topic = config.topic
+        widgetTopic = config.widgetTopic
     }
 
     /// The payload's `aps` has `timestamp`, `event`, `content-state` and
@@ -110,15 +115,27 @@ final class APNSPusher: Pusher {
         let notification = Self.notification(for: push, topic: topic)
         let client = push.environment == .production ? production : sandbox
         let token = push.token
+        return await Self.sending {
+            try await client.sendLiveActivityNotification(notification, deviceToken: token)
+        }
+    }
+
+    func sendWidgetReload(token: String, environment: PushEnvironment) async -> PushResult {
+        let notification = APNSWidgetsNotification(topic: widgetTopic)
+        let client = environment == .production ? production : sandbox
+        return await Self.sending {
+            try await client.sendWidgetsNotification(notification, deviceToken: token)
+        }
+    }
+
+    /// `request`'s result. APNSwift waits on a request with no deadline; one that hangs mustn't
+    /// hold up the pass. Both clients are HTTP/2, so concurrent pushes share their connections.
+    private static func sending(_ request: @escaping @Sendable () async throws -> APNSResponse) async -> PushResult {
         do {
-            // APNSwift waits on a request with no deadline; one that hangs mustn't hold up the pass.
-            // Both clients are HTTP/2, so concurrent pushes share their connections.
-            _ = try await Concurrency.withTimeout(30) {
-                try await client.sendLiveActivityNotification(notification, deviceToken: token)
-            }
+            _ = try await Concurrency.withTimeout(30) { try await request() }
             return .sent
         } catch let error as APNSError {
-            return Self.result(status: error.responseStatus, reason: error.reason)
+            return result(status: error.responseStatus, reason: error.reason)
         } catch {
             return .failed(String(describing: error))
         }

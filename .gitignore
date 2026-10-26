@@ -2,9 +2,14 @@
 *.xcodeproj
 ios/App/Info.plist
 ios/Widget/Info.plist
+ios/Share/Info.plist
 ios/build/
 ios/Payload/
 *.ipa
 ios/Config/
 # Python caches, from the tools importing line_styles.py
 __pycache__/
+# Built by xcodebuild -derivedDataPath build
+mac/build/
+# Finder
+.DS_Store

@@ -35,6 +35,25 @@ import Testing
     @Test func noLinesNoBrief() {
         #expect(AlertBrief(header: "Trains are delayed systemwide.") == nil)
     }
+
+    @Test func theLineToTakeInstead() throws {
+        let c = try #require(AlertBrief(header: "[C] service ends early - take the [A] instead"))
+        #expect(c.routes == ["C"])
+        #expect(c.alternatives == ["A"])
+        // No "trains" to stop at: the line taken instead isn't the alert's
+        let w = try #require(AlertBrief(header: "No [W] between 57 St-7 Av, Manhattan and Astoria-Ditmars Blvd, Queens - take the [N] instead"))
+        #expect(w.routes == ["W"])
+        #expect(w.alternatives == ["N"])
+        let two = try #require(AlertBrief(header: "In Manhattan, uptown [2] local skips 79 St and 86 St - Take the [1] instead"))
+        #expect(two.alternatives == ["1"])
+        #expect(two.direction == "Uptown")
+        #expect(try #require(AlertBrief(header: "[F] trains are delayed. Take the [M] instead.")).alternatives == ["M"])
+        // Kept for a widget on the C; not one of its own lines, for a widget on both
+        #expect(c.only(["C"]).alternatives == ["A"])
+        #expect(c.only(["A", "C"]).alternatives == [])
+        #expect(AlertBrief(header: "[R] trains are delayed")?.alternatives == nil)
+        #expect(AlertBrief.alternatives(in: "No service between X and Y - take the [N]") == ["N"])
+    }
 }
 
 /// `AlertsFeed.readable(_:)` writing the MTA's "[R]" lines as words.

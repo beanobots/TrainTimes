@@ -4,519 +4,312 @@ import Observation
 import SwiftUI
 import UIKit
 
-/// What a tap on the Nearby or Transfers widget opens in the Live tab.
-enum LiveOpening: Equatable {
-    /// One of its trains.
-    case train(Selection)
-    /// A station's every line, both ways.
-    case station(StationPage)
-    /// A Transfers widget's train, and the lines it changes to.
-    case transfer(TransferPage)
-    /// The stations near you, found again.
-    case nearby
-    /// Location for the app: asked for the first time, and once it's been
-    /// turned off, in Settings.
-    case allowLocation
-}
-
-/// A station's every line both ways, with `first` at the top: the lines a
-/// tap on "4 more lines" on the Nearby widget was for.
-struct StationPage: Hashable {
-    let station: Station
-    var first: [String] = []
-
-    /// The station's lines, `first` first, the rest in the station's order.
-    var routes: [String] {
-        station.routes.filter(first.contains) + station.routes.filter { !first.contains($0) }
-    }
-}
-
-/// A Transfers widget's two stations: its train at yours, and the lines it
-/// changes to at the change, going their way.
-struct TransferPage: Hashable {
-    let selection: Selection
-    let change: Change
-
-    /// The lines changed to, as trains of their own at the change: one for
-    /// each station of it they stop at, as 59 St's 4 5 6 for a change at
-    /// Lexington Av/59 St.
-    var changeTrains: [Selection] {
-        guard let station = change.station else { return [] }
-        let direction = change.departureDirection(for: selection)
-        return StationDirectory.stations(inComplexOf: station).compactMap { joined in
-            let routes = joined.routes.filter(change.routes.contains)
-            guard !routes.isEmpty else { return nil }
-            return Selection(stationID: joined.id, routes: routes, direction: direction,
-                             elevatorAlerts: selection.elevatorAlerts, serviceAlerts: selection.serviceAlerts)
-        }
-    }
-}
-
-/// The Live tab: the next trains of your favorites, and of every line at the
-/// stations near you. Tapping one opens its times, countdown, alerts and map.
+/// The Nearby tab: next trains for every line at nearby stations.
 struct LiveView: View {
-    /// What a tap on the Nearby widget opens; cleared once it's open.
-    @Binding var opening: LiveOpening?
-    @Environment(FavoritesStore.self) private var favorites
-    @Environment(WidgetStore.self) private var widgets
+    /// Set when the Nearby widget's "allow location" link opens the app.
+    @Binding var allowingLocation: Bool
     @Environment(SettingsStore.self) private var settings
     @Environment(\.accessibilityDifferentiateWithoutColor) private var withoutColor
     @State private var location = NearbyLocation()
     @State private var path = NavigationPath()
-    /// How many trains the widgets have opened, so each gets a page of its own.
-    @State private var openings = 0
-    /// The next trains of every train in both lists.
     @State private var live = LiveTrains()
-    /// Adding a favorite starts by choosing its train.
-    @State private var choosingTrain = false
-    @State private var chosenTrain: Selection?
-    /// A place picked on the map, which Nearby goes by instead of where you are until Find Location.
+    /// A map-picked place Nearby uses instead of your location, until Near Me is tapped.
     @State private var pin: CLLocation?
     @State private var droppingPin = false
-    /// The closest few stations to the pin, or to you, nearest first. Found
-    /// again only when either moves, not each time the list redraws.
+    /// Closest stations to `here`, nearest first. Recomputed only when `here` changes,
+    /// not on every redraw.
     @State private var nearby: [Nearby.Result] = []
-    /// Shared with the Edit button; while editing, favorites leave out their times.
-    @State private var editMode = EditMode.inactive
 
-    /// Where Nearby goes by: the pin, or else you.
+    /// The pin, or else your location.
     private var here: CLLocation? { pin ?? location.location }
 
-    /// New times for what's shown, keeping the pin or where you were found.
-    private func refresh() {
-        Task { await load() }
-    }
-
-    /// Back to where you are, found again even if you haven't moved. New
-    /// times follow once the stations near you change.
+    /// Clears the pin and re-locates, even if you haven't moved. Times reload once
+    /// the nearby stations change.
     private func findLocation() {
         pin = nil
         location.find()
         Task { await load() }
     }
 
-    /// Every train in both lists, for fetching them together.
+    /// Every nearby station's trains, fetched together.
     private var everyTrain: [Selection] {
-        favorites.favorites + nearby.flatMap(\.station.lineSelections)
+        nearby.flatMap(\.station.lineSelections)
     }
 
     private var marks: TimeMarks { settings.timeMarks(withoutColor: withoutColor) }
 
-    /// Starts out at the last favorite's station, with the walking time and alerts at their defaults.
-    private var newTrain: Binding<Selection> {
-        Binding {
-            chosenTrain ?? favorites.favorites.last.map {
-                Selection(stationID: $0.stationID, routes: $0.routes, direction: $0.direction)
-            } ?? .fallback
-        } set: {
-            chosenTrain = $0
-        }
-    }
-
-    private func add() {
-        chosenTrain = nil
-        choosingTrain = true
-    }
-
     var body: some View {
         NavigationStack(path: $path) {
             List {
-                favoritesSection
-                nearbySection
+                nearbySections
                 if !SharedStore.isAvailable {
                     Section {
                         Label("The widget can't see your choice on this install, so it keeps showing Prospect Av (R) toward Manhattan.", systemImage: "exclamationmark.triangle")
                             .foregroundStyle(.orange)
                     } footer: {
-                        Text("The shared storage the app and widget use wasn't set up when this was installed. Reinstalling with AltStore should fix it.")
+                        Text("The shared storage the app and widget use wasn't set up when this was installed. Make sure the app and widget both have the App Group in Xcode, then reinstall.")
                     }
                 }
             }
-            .environment(\.editMode, $editMode)
+            // Lets the station name rows sit shorter than the standard 44pt row
+            .environment(\.defaultMinListRowHeight, 0)
             .navigationDestination(for: Selection.self) { selection in
-                // A nearby train that's a favorite too opens with its walking time
-                TrainDetail(selection: favorites.favorite(matching: selection) ?? selection)
-                    // Its own page for each train, and each time a widget opens
-                    // one: opened in place of another, or of itself switched to
-                    // another train, it would otherwise keep that one's state
-                    .id("\(selection.trainID) \(openings)")
+                TrainDetail(selection: selection)
+                    // Fresh identity per train; otherwise a page replaced in place would keep
+                    // the previous train's state
+                    .id(selection.trainID)
             }
-            .navigationDestination(for: StationPage.self) { page in
-                StationLive(station: page.station, routes: page.routes, marks: marks) { path.append($0) }
+            // The same gap between station cards as between the Widgets tab's cards
+            .listSectionSpacing(16)
+            // No header above the first card, so start it just under the toolbar
+            .contentMargins(.top, 8, for: .scrollContent)
+            // Inline, level with the location buttons, so the first card stays near the top;
+            // when times last loaded beneath it
+            .navigationTitle("Nearby")
+            .navigationBarTitleDisplayMode(.inline)
+            .navigationSubtitle(live.updated.map { "Updated \($0.formatted(date: .omitted, time: .shortened))" } ?? "")
+            // Location prompts and messages, centred where the station cards would be
+            .overlay {
+                if !showsStations || nearby.isEmpty {
+                    emptyState
+                }
             }
-            .navigationDestination(for: TransferPage.self) { page in
-                TransferLive(page: page, marks: marks)
+            // While pinned, says so above the tab bar, with a way back to your location
+            .safeAreaBar(edge: .bottom) {
+                if pin != nil {
+                    pinnedBar
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
             }
+            .animation(.snappy, value: pin != nil)
             .toolbar {
-                if !favorites.favorites.isEmpty {
-                    // Not EditButton: that edits the navigation stack's own edit mode, not this one
-                    ToolbarItem(placement: .topBarLeading) {
-                        Button(editMode.isEditing ? "Done" : "Edit") {
-                            withAnimation { editMode = editMode.isEditing ? .inactive : .active }
-                        }
-                        .fontWeight(editMode.isEditing ? .semibold : .regular)
-                    }
+                // The filled icon is the place the list is for; tapping the arrow clears a pin
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button("Near Me", systemImage: pin == nil && location.isAllowed ? "location.fill" : "location",
+                           action: findLocation)
+                        .accessibilityHint("Finds stations near where you are now")
+                    Button("Drop Pin", systemImage: pin == nil ? "mappin" : "mappin.circle.fill") { droppingPin = true }
+                        .accessibilityHint("Drops a pin on the map to find stations near it")
                 }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Menu("Add a Favorite", systemImage: "plus") {
-                        Button("Create New", systemImage: "plus.circle", action: add)
-                        Menu("Add from Widget", systemImage: "app") {
-                            // Each saved widget's train, with its walking time; one already here is greyed out
-                            ForEach(widgets.saved.widgets) { widget in
-                                Button {
-                                    favorites.add(widget.selection)
-                                } label: {
-                                    Text(widget.title)
-                                    Text(widget.selection.caption)
-                                }
-                                .disabled(favorites.contains(widget.selection))
-                            }
-                        }
-                    }
-                }
-            }
-            // Once the train's chosen, it's a favorite; cancelled, nothing
-            .sheet(isPresented: $choosingTrain, onDismiss: {
-                if let chosenTrain { favorites.add(chosenTrain) }
-            }) {
-                TrainPicker(selection: newTrain)
             }
             .sheet(isPresented: $droppingPin) {
                 DropPinSheet(start: (pin ?? location.location)?.coordinate) { pin = $0 }
+                    // A floating glass sheet at half height, Nearby still showing above it
             }
             .onAppear { location.start() }
-            .onChange(of: opening, initial: true) { _, opening in
-                guard let opening else { return }
-                self.opening = nil
-                switch opening {
-                case .train(let selection):
-                    openings += 1
-                    path = NavigationPath([selection])
-                case .station(let page):
-                    path = NavigationPath([page])
-                case .transfer(let page):
-                    path = NavigationPath([page])
-                case .nearby:
-                    path = NavigationPath()
+            .onChange(of: allowingLocation, initial: true) { _, allowing in
+                guard allowing else { return }
+                allowingLocation = false
+                path = NavigationPath()
+                if location.status == .denied || location.status == .restricted,
+                   let url = URL(string: UIApplication.openSettingsURLString) {
+                    UIApplication.shared.open(url)
+                } else {
                     findLocation()
-                case .allowLocation:
-                    path = NavigationPath()
-                    if location.status == .denied || location.status == .restricted,
-                       let url = URL(string: UIApplication.openSettingsURLString) {
-                        UIApplication.shared.open(url)
-                    } else {
-                        findLocation()
-                    }
                 }
             }
             .onChange(of: here, initial: true) { _, here in
                 nearby = here.map { Nearby.stations(near: $0, limit: 3) } ?? []
             }
-            // New times every minute, and straight away for a new train or
-            // station; pulled down or back in the app, it finds you again too
+            // Reload every minute and when the train list changes; pull-to-refresh and
+            // returning to the app also re-locate (unless pinned)
             .updatingTrains(live, id: everyTrain.map(\.trainID), refreshing: {
                 if location.isAllowed && pin == nil { location.find() }
             }, load: load)
-            // With the last favorite gone the Edit button goes too, so editing ends with it
-            .onChange(of: favorites.favorites.isEmpty) { _, isEmpty in
-                if isEmpty { editMode = .inactive }
-            }
         }
     }
 
-    private var favoritesSection: some View {
-        Section {
-            if live.anyFailed(everyTrain) {
-                UnreachableNote()
+    /// Any failure note, then a card per station near the pin or you.
+    @ViewBuilder private var nearbySections: some View {
+        if live.anyFailed(everyTrain) {
+            Section {
+                UnreachableNote(timetable: live.anyFromTimetable(everyTrain))
             }
-            if favorites.favorites.isEmpty {
-                Text("Tap ☆ on any train, or +, to keep it here.")
-                    .foregroundStyle(.secondary)
-            }
-            ForEach(favorites.favorites, id: \.trainID) { selection in
-                NavigationLink(value: selection) {
-                    FavoriteRow(
-                        selection: selection,
-                        trains: live.trains[selection.trainID].map { selection.catchable($0, now: live.now) },
-                        failed: live.failed.contains(selection.trainID),
-                        now: live.now,
-                        marks: marks,
-                        showsTimes: !editMode.isEditing
-                    )
-                }
-                .contextMenu {
-                    Button("Remove from Favorites", systemImage: "star.slash", role: .destructive) {
-                        favorites.remove(selection)
+        }
+        if showsStations {
+            ForEach(nearby) { result in
+                Section {
+                    NearbyStationRow(result: result)
+                    ForEach(result.station.routes, id: \.self) { route in
+                        NearbyLineRow(station: result.station, route: route, live: live, marks: marks) { path.append($0) }
                     }
                 }
             }
-            .onDelete { favorites.delete(atOffsets: $0) }
-            .onMove { favorites.move(fromOffsets: $0, toOffset: $1) }
-        } header: {
-            Text("Favorites")
         }
     }
 
-    /// The stations near a dropped pin; otherwise a button to allow location
-    /// until it's allowed, then the closest stations' lines, or why there are none.
-    private var nearbySection: some View {
-        Section {
-            if pin != nil {
-                HStack {
-                    Label("Near your dropped pin", systemImage: "mappin.and.ellipse")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Clear Pin", systemImage: "xmark.circle.fill", action: findLocation)
-                        .labelStyle(.iconOnly)
-                        .foregroundStyle(.secondary)
-                        .buttonStyle(.borderless)
-                }
-                if nearby.isEmpty {
-                    Text("No stations within \(Nearby.rangeDescription) of the pin").foregroundStyle(.secondary)
-                } else {
-                    nearbyRows
-                }
-            } else if location.status == .notDetermined {
-                Button {
-                    location.find()
-                } label: {
-                    Label("Show trains near you", systemImage: "location")
-                }
-            } else if !location.isAllowed {
-                Text("Location is off for Train Times.").foregroundStyle(.secondary)
+    /// Whether there's a place to list stations near: the pin, or your location once found.
+    private var showsStations: Bool {
+        pin != nil || (location.isAllowed && !location.failed && location.location != nil)
+    }
+
+    /// Why there are no station cards, with what to do about it.
+    @ViewBuilder private var emptyState: some View {
+        if pin != nil {
+            ContentUnavailableView {
+                Label("No Stations Nearby", systemImage: "mappin.slash")
+            } description: {
+                Text("No stations within \(Nearby.rangeDescription) of the pin.")
+            } actions: {
+                Button("Move the Pin") { droppingPin = true }
+                    .buttonStyle(.glassProminent)
+            }
+        } else if location.status == .notDetermined {
+            ContentUnavailableView {
+                Label("Trains Near You", systemImage: "location.fill")
+            } description: {
+                Text("See the next trains at the stations closest to you, or drop a pin anywhere.")
+            } actions: {
+                Button("Allow Location") { location.find() }
+                    .buttonStyle(.glassProminent)
+                Button("Drop a Pin") { droppingPin = true }
+            }
+        } else if !location.isAllowed {
+            ContentUnavailableView {
+                Label("Location Is Off", systemImage: "location.slash")
+            } description: {
+                Text("Turn on Location for Leeway in Settings, or drop a pin to see trains near somewhere else.")
+            } actions: {
                 if let url = URL(string: UIApplication.openSettingsURLString) {
-                    Link(destination: url) {
-                        Label("Turn It On in Settings", systemImage: "location")
-                    }
+                    Link("Turn On in Settings", destination: url)
+                        .buttonStyle(.glassProminent)
                 }
-            } else if location.failed {
-                Button {
-                    location.find()
-                } label: {
-                    Label("Couldn't find you. Try again", systemImage: "location.slash")
-                }
-            } else if location.location == nil {
-                HStack(spacing: 8) {
-                    ProgressView()
-                    Text("Finding stations near you…").foregroundStyle(.secondary)
-                }
-            } else if nearby.isEmpty {
-                Text("No stations within \(Nearby.rangeDescription) of you").foregroundStyle(.secondary)
-            } else {
-                nearbyRows
+                Button("Drop a Pin") { droppingPin = true }
             }
-        } header: {
-            HStack(spacing: 8) {
-                Text("Nearby")
-                Button("Refresh", systemImage: "arrow.clockwise", action: refresh)
-                Button("Find Location", systemImage: "location", action: findLocation)
-                Button("Drop Pin", systemImage: "mappin") { droppingPin = true }
+        } else if location.failed {
+            ContentUnavailableView {
+                Label("Couldn't Find You", systemImage: "location.slash")
+            } description: {
+                Text("Your location isn't available right now.")
+            } actions: {
+                Button("Try Again") { location.find() }
+                    .buttonStyle(.glassProminent)
             }
-            // Symbols only; the titles stay for VoiceOver
-            .labelStyle(.iconOnly)
-            .buttonStyle(.bordered)
-            .buttonBorderShape(.capsule)
-            .controlSize(.mini)
-            .textCase(nil)
-        }
-    }
-
-    /// Each nearby station, then its lines and their next trains each way.
-    private var nearbyRows: some View {
-        ForEach(nearby) { result in
-            NearbyStationRow(result: result)
-            ForEach(result.station.routes, id: \.self) { route in
-                NearbyLineRow(station: result.station, route: route, live: live, marks: marks) { path.append($0) }
+        } else if location.location == nil {
+            ProgressView("Finding stations near you…")
+        } else {
+            ContentUnavailableView {
+                Label("No Stations Nearby", systemImage: "tram")
+            } description: {
+                Text("No stations within \(Nearby.rangeDescription) of you.")
+            } actions: {
+                Button("Drop a Pin") { droppingPin = true }
             }
         }
     }
 
-    /// New times for every train in both lists. Until a train's first come,
-    /// its row shows a dash.
+    /// "Near the dropped pin" in a glass capsule: tap to move the pin, or ✕ to go back to
+    /// your location.
+    private var pinnedBar: some View {
+        HStack(spacing: 4) {
+            Button {
+                droppingPin = true
+            } label: {
+                Label("Near the dropped pin", systemImage: "mappin.circle.fill")
+                    .font(.subheadline.weight(.semibold))
+                    .padding(.leading, 16)
+                    .padding(.vertical, 12)
+                    .contentShape(Rectangle())
+            }
+            .accessibilityHint("Moves the pin")
+            Button("Near Me", systemImage: "xmark", action: findLocation)
+                .labelStyle(.iconOnly)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+                .contentShape(Rectangle())
+                .accessibilityHint("Shows stations near where you are now")
+        }
+        .buttonStyle(.plain)
+        .glassEffect(.regular.interactive(), in: Capsule())
+        .padding(.bottom, 8)
+    }
+
+    /// Rows show a dash until their first load.
     private func load() async {
-        let selections = everyTrain
-        // Nearby rows show only each line's own trains, which are all in its
-        // own feeds; a favorite shows those of other lines running on it too
-        let nearbyOnly = Set(selections.map(\.trainID)).subtracting(favorites.favorites.map(\.trainID))
-        await live.load(selections, ownLinesOnly: nearbyOnly)
+        // Nearby rows show only the line's own trains, which are all in its own feeds
+        await live.load(everyTrain, includingOtherLines: false)
     }
 }
 
-/// A favorite: its lines, station and direction, and when its next trains come.
-private struct FavoriteRow: View {
-    let selection: Selection
-    /// The trains you can still catch; nil until they're fetched.
-    let trains: [Arrival]?
-    /// Whether they couldn't be fetched the last time.
-    let failed: Bool
-    let now: Date
-    let marks: TimeMarks
-    /// Left out while editing, for the delete and move controls.
-    let showsTimes: Bool
-
-    var body: some View {
-        HStack(spacing: 12) {
-            LineBullets(routes: selection.routes, size: 30)
-                .frame(width: 40)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(selection.station?.name ?? "Train").font(.headline)
-                Text(selection.caption)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            Spacer(minLength: 8)
-            if showsTimes {
-                Minutes(trains: trains, failed: failed, now: now, marks: marks)
-            }
-        }
-        .padding(.vertical, 2)
-    }
-}
-
-/// A station near you, over its lines: its name and how far it is.
+/// Header row for a nearby station: name and distance, tight above its lines with no separator.
 private struct NearbyStationRow: View {
     let result: Nearby.Result
 
     var body: some View {
         HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(result.station.name).font(.headline)
-                Text(result.station.borough).font(.caption).foregroundStyle(.secondary)
-            }
+            Text(result.station.name).font(.headline)
             Spacer()
             Text(result.distance).font(.subheadline).foregroundStyle(.secondary)
         }
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isHeader)
+        // The same space above the name as above a widget's title on the Widgets tab
+        .listRowInsets(.top, 16)
+        .listRowInsets(.bottom, 0)
+        .listRowSeparator(.hidden, edges: .bottom)
     }
 }
 
-/// A station's every line and its next trains each way, from a tap on its
-/// name on the Nearby widget. Each direction opens on its own.
-private struct StationLive: View {
-    let station: Station
-    /// Its lines, in the order they're shown.
-    let routes: [String]
-    let marks: TimeMarks
-    let open: (Selection) -> Void
-    @State private var live = LiveTrains()
-
-    var body: some View {
-        List {
-            if live.anyFailed(station.lineSelections) {
-                UnreachableNote()
-            }
-            Section {
-                ForEach(routes, id: \.self) { route in
-                    NearbyLineRow(station: station, route: route, live: live, marks: marks, open: open)
-                }
-            } header: {
-                Text(station.borough)
-            }
-        }
-        .navigationTitle(station.name)
-        .updatingTrains(live, id: station.id) {
-            // Each line's own trains are all in its own feeds
-            await live.load(station.lineSelections, includingOtherLines: false)
-        }
-    }
-}
-
-/// The two stations of a Transfers widget, from a tap on it: its train at
-/// yours, then the lines it changes to at the change. Each opens on its own.
-private struct TransferLive: View {
-    let page: TransferPage
-    let marks: TimeMarks
-    @State private var live = LiveTrains()
-
-    private var selections: [Selection] { [page.selection] + page.changeTrains }
-
-    var body: some View {
-        List {
-            if live.anyFailed(selections) {
-                UnreachableNote()
-            }
-            Section("Your train") {
-                row(page.selection)
-            }
-            Section("Then change") {
-                ForEach(page.changeTrains, id: \.trainID) { train in
-                    row(train)
-                }
-            }
-        }
-        .navigationTitle("Transfer")
-        .updatingTrains(live, id: selections.map(\.trainID)) {
-            await live.load(selections)
-        }
-    }
-
-    /// With your walking time, your train's left out until you can catch it.
-    private func row(_ selection: Selection) -> some View {
-        NavigationLink(value: selection) {
-            FavoriteRow(
-                selection: selection,
-                trains: live.trains[selection.trainID].map { selection.catchable($0, now: live.now) },
-                failed: live.failed.contains(selection.trainID),
-                now: live.now,
-                marks: marks,
-                showsTimes: true
-            )
-        }
-    }
-}
-
-/// The next trains of what a page of the Live tab lists, fetched together:
-/// your favorites and the stations near you, a station's every line, or a
-/// transfer's trains.
+/// Next trains for everything a Nearby tab page lists, fetched together.
 @MainActor @Observable
 final class LiveTrains {
-    /// Each train's next arrivals, by `Selection.trainID`, as last fetched.
+    /// Next arrivals by `Selection.trainID`, as last fetched.
     private(set) var trains: [String: [Arrival]] = [:]
-    /// The `Selection.trainID`s whose trains couldn't be fetched the last time
-    /// they were asked for. It can hold trains of an older list, so a page
-    /// goes by its own; see `anyFailed(_:)`.
+    /// `Selection.trainID`s whose last fetch failed. May include trains from an older
+    /// list, so pages should check via `anyFailed(_:)`.
     private(set) var failed: Set<String> = []
-    /// Moves along every few seconds so the minutes count down.
+    /// Those of `failed` showing the timetable's times instead (`TimetableStore`).
+    private(set) var fromTimetable: Set<String> = []
+    /// When the last load finished; nil before the first.
+    private(set) var updated: Date?
+    /// Ticks every few seconds so the minutes count down.
     var now = Date.now
 
-    /// New times for `selections`, as `TrainService.trains(for:)` fetches
-    /// them. One left out couldn't be fetched: its old times go, rather than
-    /// count down as if they were new. Other trains keep theirs, and whether
-    /// theirs failed, so a load of an older list that ends after the newer
-    /// one's doesn't clear its rows or what failed of them.
-    func load(_ selections: [Selection], includingOtherLines: Bool = true, ownLinesOnly: Set<String> = []) async {
+    /// Fetches via `TrainService.trains(for:)`. Trains missing from the result lose their
+    /// old times rather than count down stale ones. Trains not in `selections` keep their
+    /// times and failure state, so an older load finishing late can't clear a newer one's rows.
+    func load(_ selections: [Selection], includingOtherLines: Bool = true) async {
         // With nothing to fetch, nothing failed
         guard !selections.isEmpty else {
             failed = []
             return
         }
-        let fetched = await TrainService.trains(for: selections, includingOtherLines: includingOtherLines,
-                                                ownLinesOnly: ownLinesOnly)
-        // A newer list cancels this load; that isn't a failure
+        let fetched = await TrainService.trains(for: selections, includingOtherLines: includingOtherLines)
+        // Cancelled by a newer list; not a failure
         guard !Task.isCancelled else { return }
         let asked = Set(selections.map(\.trainID))
         let missing = asked.subtracting(fetched.keys)
         trains.merge(fetched) { $1 }
-        for trainID in missing { trains[trainID] = nil }
+        // Those the MTA couldn't give, from the timetable if there is one
+        let timetable = missing.isEmpty ? nil : TimetableStore.load()
+        let timed = timetable.map {
+            TrainService.trains(for: selections.filter { missing.contains($0.trainID) }, from: $0)
+        } ?? [:]
+        for trainID in missing { trains[trainID] = timed[trainID] }
         failed.subtract(asked)
         failed.formUnion(missing)
+        fromTimetable.subtract(asked)
+        fromTimetable.formUnion(timed.keys)
         now = .now
+        updated = now
     }
 
-    /// Whether the trains of any of `selections`, those a page lists,
-    /// couldn't be fetched the last time.
+    /// Whether any of a page's `selections` failed their last fetch.
     func anyFailed(_ selections: [Selection]) -> Bool {
         !failed.isDisjoint(with: selections.map(\.trainID))
+    }
+
+    /// Whether any of them show the timetable's times, as their last fetch failed.
+    func anyFromTimetable(_ selections: [Selection]) -> Bool {
+        !fromTimetable.isDisjoint(with: selections.map(\.trainID))
     }
 }
 
 extension View {
-    /// Sets `now` to the time every 10 seconds while the view is up, so
-    /// between loads the minutes count down and trains you can no longer
-    /// catch drop off.
+    /// Updates `now` every 10 seconds so, between loads, minutes count down and
+    /// uncatchable trains drop off.
     func ticking(_ now: Binding<Date>) -> some View {
         task {
             while !Task.isCancelled {
@@ -526,9 +319,8 @@ extension View {
         }
     }
 
-    /// Keeps `live` up to date with `load`: straight away and every minute,
-    /// starting over whenever `id` changes, and after `refreshing` when the
-    /// list is pulled down or the app comes back. In between, its `now` ticks.
+    /// Runs `load` now and every minute (restarting when `id` changes), and after
+    /// `refreshing` on pull-to-refresh or app foregrounding. Ticks `live.now` in between.
     fileprivate func updatingTrains<ID: Equatable>(_ live: LiveTrains, id: ID, refreshing: @escaping () -> Void = {},
                                                    load: @escaping () async -> Void) -> some View {
         modifier(UpdatingTrains(live: live, id: id, refreshing: refreshing, load: load))
@@ -551,7 +343,9 @@ private struct UpdatingTrains<ID: Equatable>: ViewModifier {
             .task(id: id) {
                 while !Task.isCancelled {
                     await load()
-                    try? await Task.sleep(for: .seconds(60))
+                    // After a failure, sooner; and as soon as the network's back (a station
+                    // after a tunnel)
+                    await Connectivity.shared.pause(for: .seconds(live.failed.isEmpty ? 60 : 15))
                 }
             }
             .ticking(Binding { live.now } set: { live.now = $0 })
@@ -563,25 +357,25 @@ private struct UpdatingTrains<ID: Equatable>: ViewModifier {
     }
 }
 
-/// Over a page's trains when some of them couldn't be fetched.
+/// Shown above a page's trains when some failed to load; `timetable` if some of them show the
+/// timetable's times instead.
 private struct UnreachableNote: View {
+    var timetable = false
+
     var body: some View {
-        Label("Couldn't reach the MTA. Pull down to try again.", systemImage: "wifi.exclamationmark")
+        Label(timetable ? "Couldn't reach the MTA, so some times are the timetable's. Pull down to try again."
+                  : "Couldn't reach the MTA. Pull down to try again.", systemImage: "wifi.exclamationmark")
             .foregroundStyle(.secondary)
     }
 }
 
-/// One line at a station near you, and its next trains each way, as the
-/// Trains near you widget has them (`Station.ways(of:trains:now:)`): toward
-/// Manhattan first, and named as there. Each direction opens on its own. A
-/// direction with no name, at the end of the line, has no trains to show and
-/// is left out; so is the way a line ends at a platform others go on from,
-/// unless some of its trains go on too.
+/// One line at a station with its next trains each way, matching the Nearby widget
+/// (`Station.ways(of:trains:now:)`): toward Manhattan first. Directions with no name (end of
+/// the line) are omitted, as is a direction where the line terminates at a shared platform,
+/// unless some of its trains continue.
 private struct NearbyLineRow: View {
     let station: Station
     let route: String
-    /// The page's trains: each way's, nil until they're fetched, and whether
-    /// they couldn't be the last time.
     let live: LiveTrains
     let marks: TimeMarks
     let open: (Selection) -> Void
@@ -591,20 +385,33 @@ private struct NearbyLineRow: View {
     }
 
     var body: some View {
-        HStack(spacing: 12) {
-            LineBullet(route: route, size: 30)
-                .frame(width: 40)
-            VStack(spacing: 10) {
-                ForEach(ways, id: \.direction) { way in
+        // The bullet is centred between the directions
+        HStack(spacing: 22) {
+            LineBullet(route: route, size: 40)
+                .frame(width: 44)
+            VStack(spacing: 0) {
+                ForEach(Array(ways.enumerated()), id: \.element.direction) { index, way in
                     let failed = live.failed.contains(way.selection.trainID)
+                    if index > 0 {
+                        Divider().padding(.vertical, 8)
+                    }
                     Button {
                         open(way.selection)
                     } label: {
-                        HStack(spacing: 8) {
-                            Text(way.label)
-                                .font(.subheadline)
-                                .lineLimit(1)
-                            Spacer(minLength: 8)
+                        // The direction sits on the next train's baseline
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(way.label)
+                                    .lineLimit(1)
+                                // The next train's destination
+                                if let terminal = way.trains?.first?.terminal {
+                                    Text(terminal)
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
+                            }
+                            Spacer(minLength: 12)
                             Minutes(trains: way.trains, failed: failed, now: live.now, marks: marks)
                             Image(systemName: "chevron.right")
                                 .font(.footnote.weight(.semibold))
@@ -613,23 +420,26 @@ private struct NearbyLineRow: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("\(Lines.name(of: route)) \(way.label)")
-                    // The label stands for the whole row, so the times come as its value
+                    .accessibilityLabel("\(Lines.name(of: route)) \(way.label)"
+                                        + (way.trains?.first?.terminal.map { ", to \($0)" } ?? ""))
+                    // The label covers the whole row, so times go in the value
                     .accessibilityValue(Minutes.spoken(way.trains, failed: failed, now: live.now))
                 }
             }
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 6)
     }
 }
 
-/// A map to tap a place on, for Nearby to list the stations around it.
+/// A map to tap a place for Nearby to search around.
 private struct DropPinSheet: View {
-    /// Where the map opens: the last pin or where you are, or else Prospect Av.
+    /// The last pin or your location; nil falls back to Prospect Av.
     let start: CLLocationCoordinate2D?
     let drop: (CLLocation) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var coordinate: CLLocationCoordinate2D?
+    /// The middle of the map as last moved, for VoiceOver's Drop Pin Here; nil before it's moved.
+    @State private var cameraCenter: CLLocationCoordinate2D?
 
     private var center: CLLocationCoordinate2D {
         start ?? Selection.fallback.station.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
@@ -649,23 +459,31 @@ private struct DropPinSheet: View {
                 .onTapGesture { point in
                     coordinate = proxy.convert(point, from: .local)
                 }
+                .onMapCameraChange(frequency: .onEnd) { context in
+                    cameraCenter = context.region.center
+                }
+                // Without tapping a point: the pin goes in the middle of the map
+                .accessibilityAction(named: "Drop Pin Here") {
+                    coordinate = cameraCenter ?? center
+                }
             }
+            // A glass capsule floating over the map
             .safeAreaInset(edge: .bottom) {
                 Text(coordinate == nil ? "Tap the map to drop a pin." : "Tap elsewhere to move it.")
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 16)
                     .padding(.vertical, 10)
-                    .background(.bar)
+                    .glassEffect()
+                    .padding(.bottom, 8)
             }
             .navigationTitle("Drop Pin")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel", role: .cancel) { dismiss() }
+                    Button(role: .cancel) { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") {
+                    Button(role: .confirm) {
                         if let coordinate {
                             drop(CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude))
                         }
@@ -678,11 +496,12 @@ private struct DropPinSheet: View {
     }
 }
 
-/// The next few trains, in minutes: "Now 6 12 min", live predictions in green.
+/// The next train large ("3 min"), the two after it small beneath ("then 9, 15 min"),
+/// live predictions in green.
 private struct Minutes: View {
-    /// Nil until they're fetched.
+    /// Nil until fetched.
     let trains: [Arrival]?
-    /// Whether they couldn't be fetched the last time, which it then says instead.
+    /// Shows "Couldn't load" instead.
     let failed: Bool
     let now: Date
     let marks: TimeMarks
@@ -694,13 +513,14 @@ private struct Minutes: View {
             if trains.isEmpty {
                 Text("No trains").font(.subheadline).foregroundStyle(.secondary)
             } else {
-                // Always on one line: as many of the next three as fit, down to one
-                ViewThatFits(in: .horizontal) {
-                    row(trains.prefix(3))
-                    row(trains.prefix(2))
-                    row(trains.prefix(1))
+                VStack(alignment: .trailing, spacing: 1) {
+                    next(trains[0])
+                    if trains.count > 1 {
+                        later(trains.dropFirst().prefix(2))
+                    }
                 }
-                .font(.subheadline.weight(.semibold))
+                .lineLimit(1)
+                .fixedSize()
                 .monospacedDigit()
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(Self.spoken(trains, now: now))
@@ -710,8 +530,8 @@ private struct Minutes: View {
         }
     }
 
-    /// As VoiceOver reads them: "Now, 1 minute, 7 minutes by the timetable".
-    /// A timetable time says so, as its colour does on screen.
+    /// VoiceOver text, e.g. "Now, 1 minute, 7 minutes by the timetable". Scheduled
+    /// times say so, as their colour does on screen.
     static func spoken(_ trains: [Arrival]?, failed: Bool = false, now: Date) -> String {
         guard !failed else { return "Couldn't load" }
         guard let trains else { return "Loading" }
@@ -723,26 +543,46 @@ private struct Minutes: View {
         .joined(separator: ", ")
     }
 
-    /// The trains' minutes, each after its mark, then "min"; never wrapped.
-    private func row(_ trains: ArraySlice<Arrival>) -> some View {
-        HStack(spacing: 6) {
-            ForEach(trains, id: \.self) { train in
-                HStack(spacing: 2) {
-                    StatusMark(isLive: train.isLive, marks: marks, size: 9)
-                    Text(MinutesToGo(until: train.time, from: now).number)
-                }
-                .foregroundStyle(train.statusColor(scheduled: .primary))
+    /// The next train, large: "3 min" or "Now".
+    private func next(_ train: Arrival) -> some View {
+        let minutes = MinutesToGo(until: train.time, from: now)
+        return HStack(alignment: .firstTextBaseline, spacing: 3) {
+            time(train, markSize: 11)
+                .font(.title3.weight(.bold))
+            if !minutes.isNow {
+                Text("min").font(.footnote.weight(.semibold))
+                    .foregroundStyle(train.statusColor(scheduled: .primary))
             }
-            Text("min").foregroundStyle(.secondary)
         }
-        .lineLimit(1)
-        .fixedSize()
+    }
+
+    /// The two after it, small: "then 6, 12 min".
+    private func later(_ trains: ArraySlice<Arrival>) -> some View {
+        HStack(spacing: 0) {
+            Text("then ").foregroundStyle(.secondary)
+            ForEach(Array(trains.enumerated()), id: \.element) { index, train in
+                if index > 0 {
+                    Text(", ").foregroundStyle(.secondary)
+                }
+                time(train, markSize: 8)
+            }
+            Text(" min").foregroundStyle(.secondary)
+        }
+        .font(.footnote.weight(.medium))
+    }
+
+    /// One train's mark and minutes, in its status colour.
+    private func time(_ train: Arrival, markSize: CGFloat) -> some View {
+        HStack(spacing: 2) {
+            StatusMark(isLive: train.isLive, marks: marks, size: markSize)
+            Text(MinutesToGo(until: train.time, from: now).number)
+        }
+        .foregroundStyle(train.statusColor(scheduled: .primary))
     }
 }
 
 #Preview {
-    LiveView(opening: .constant(nil))
-        .environment(FavoritesStore())
+    LiveView(allowingLocation: .constant(false))
         .environment(WidgetStore())
         .environment(SettingsStore())
 }

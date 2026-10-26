@@ -5,29 +5,32 @@ import WidgetKit
 
 /// A countdown to one train on the Lock Screen and in the Dynamic Island.
 ///
-/// iOS keeps these encoded while the countdown runs, across updates of the
-/// app, so like `ContentState` they must keep decoding what older versions
-/// wrote: a property added here has to be optional.
+/// iOS keeps these encoded across app updates, so like `ContentState` they must decode what
+/// older versions wrote: new properties must be optional.
 struct TrainActivityAttributes: ActivityAttributes {
-    /// Shared with the push server, which sends it too.
+    /// Shared with the push server, which also sends it.
     typealias ContentState = CountdownState
 
     var selection: Selection
     var stationName: String
     var heading: String
+    /// When its `CountdownState.lifetime` is up; nil from countdowns started before they had one.
+    var ends: Date? = nil
+    /// From a Transfers widget, its change, whose lines' alerts it mentions too; nil otherwise.
+    var change: Change? = nil
 }
 
-// Starting and updating Live Activities is only allowed in the app itself, so
-// iOS runs these in the app; in the widget they're only there for the buttons.
+// Only the app may start and update Live Activities, so iOS runs these in the app; the widget
+// includes them only for its buttons.
 
-/// The ↻ on the widgets and the countdown: new times for both. iOS reloads
-/// a widget tapped, after this, and no other; the countdown's redraws the
-/// Next train and Transfers widgets, which it doesn't belong to.
+/// The ↻ on widgets and the countdown: refreshes both. iOS reloads only the tapped widget, so
+/// a widget's ↻ reloads those with its setup, and the countdown's all Next train and Transfers
+/// widgets.
 struct RefreshIntent: LiveActivityIntent {
     static let title: LocalizedStringResource = "Refresh train times"
     static let isDiscoverable = false
 
-    /// The `TrainEntry.widgetID` of the widget tapped; nil on the countdown.
+    /// The tapped widget's `TrainEntry.widgetID`; nil on the countdown.
     @Parameter(title: "Widget")
     var widgetID: String?
 
@@ -41,15 +44,18 @@ struct RefreshIntent: LiveActivityIntent {
         #if APP
         if let widgetID { SharedStore.recordTap(\.refreshed, for: widgetID) }
         await TrainActivityController.refresh()
-        if widgetID == nil { WidgetCenter.shared.reloadTrainWidgets() }
+        if let widgetID {
+            await WidgetCenter.shared.reloadWidgets(sharingSetupWith: widgetID)
+        } else {
+            WidgetCenter.shared.reloadTrainWidgets()
+        }
         #endif
         return .result()
     }
 }
 
-/// A widget's ↻ while no countdown is running: new times for that widget
-/// alone, which iOS reloads after this. It runs in the widget, which answers
-/// sooner than the app, which iOS would first have to start.
+/// A widget's ↻ when no countdown is running; iOS then reloads that widget, and this the others
+/// with its setup. Runs in the widget, which responds faster than launching the app.
 struct RefreshWidgetsIntent: AppIntent {
     static let title: LocalizedStringResource = "Refresh the widgets"
     static let isDiscoverable = false
@@ -65,85 +71,16 @@ struct RefreshWidgetsIntent: AppIntent {
     }
 
     func perform() async throws -> some IntentResult {
-        if !widgetID.isEmpty { SharedStore.recordTap(\.refreshed, for: widgetID) }
+        if !widgetID.isEmpty {
+            SharedStore.recordTap(\.refreshed, for: widgetID)
+            await WidgetCenter.shared.reloadWidgets(sharingSetupWith: widgetID)
+        }
         return .result()
     }
 }
 
-// iOS reloads only the widget tapped, and the map and the alert are kept by
-// widget, so these leave the others as they are. Each stores the state its
-// toggle is tapped to, which iOS gives it as `value`, rather than flip what's
-// stored: widgets alike in kind, size and Edit menu share it, and one still
-// showing the other state would flip it back. Nor is it the other way from
-// what the widget showed when it was drawn: a second tap before the widget
-// reloads would ask for that again, rather than undo the first.
-
-/// The medium and large widgets' map button: shows where the next train is,
-/// or the later trains again.
-struct ToggleMapIntent: SetValueIntent {
-    static let title: LocalizedStringResource = "Show where the train is"
-    static let isDiscoverable = false
-
-    /// A `TrainEntry.widgetID`.
-    @Parameter(title: "Widget", default: "")
-    var widgetID: String
-
-    /// A `Selection.trainID`.
-    @Parameter(title: "Train")
-    var trainID: String
-
-    /// Whether it's to show the stops: the toggle's new state.
-    @Parameter(title: "Shows the stops", default: false)
-    var value: Bool
-
-    init() {}
-
-    init(selection: Selection, widgetID: String) {
-        self.widgetID = widgetID
-        trainID = selection.trainID
-    }
-
-    func perform() async throws -> some IntentResult {
-        SharedStore.setMap(value, for: trainID, in: widgetID)
-        SharedStore.recordTap(\.toggled, for: widgetID)
-        return .result()
-    }
-}
-
-/// A home screen widget's alert banner: shows the alert in full, or the times
-/// again.
-struct ToggleAlertIntent: SetValueIntent {
-    static let title: LocalizedStringResource = "Show the alert"
-    static let isDiscoverable = false
-
-    /// A `TrainEntry.widgetID`.
-    @Parameter(title: "Widget", default: "")
-    var widgetID: String
-
-    /// A `Selection.alertID`.
-    @Parameter(title: "Train")
-    var trainID: String
-
-    /// Whether it's to show the alert in full: the toggle's new state.
-    @Parameter(title: "Shows the alert", default: false)
-    var value: Bool
-
-    init() {}
-
-    init(selection: Selection, widgetID: String) {
-        self.widgetID = widgetID
-        trainID = selection.alertID
-    }
-
-    func perform() async throws -> some IntentResult {
-        SharedStore.setAlert(value, for: trainID, in: widgetID)
-        SharedStore.recordTap(\.toggled, for: widgetID)
-        return .result()
-    }
-}
-
-/// A widget's walk button: starts the countdown to that widget's train, or
-/// stops it if it's that widget's.
+/// A widget's walk button: starts a countdown to its train, or stops it if it's already this
+/// widget's.
 struct ToggleCountdownIntent: LiveActivityIntent {
     static let title: LocalizedStringResource = "I'm on my way"
     static let isDiscoverable = false
@@ -159,7 +96,7 @@ struct ToggleCountdownIntent: LiveActivityIntent {
     @Parameter(title: "Walking time (minutes)")
     var walkMinutes: Int
 
-    // The widget's own choice of what the countdown mentions, not the default widget's
+    // This widget's alert settings, not the default train's
 
     @Parameter(title: "Elevator outages", default: false)
     var elevatorAlerts: Bool
@@ -167,31 +104,39 @@ struct ToggleCountdownIntent: LiveActivityIntent {
     @Parameter(title: "Service alerts", default: true)
     var serviceAlerts: Bool
 
-    /// The trip to count down to: on the Transfers widget, the first train
-    /// that gets to the change that you reach as it gets in, which needn't be
-    /// the next at your station. Nil for the first you reach as it gets in.
+    /// On the Transfers widget, the trip that makes the connection, which may not be the next at
+    /// your station. Nil for the first train you can catch.
     @Parameter(title: "Trip")
     var trip: String?
 
+    /// On the Transfers widget, its `Change` as JSON, whose lines' alerts the countdown mentions
+    /// too. Nil elsewhere.
+    @Parameter(title: "Change")
+    var change: String?
+
     init() {}
 
-    init(selection: Selection, widgetID: String, trip: String? = nil) {
+    init(selection: Selection, widgetID: String, trip: String? = nil, change: Change? = nil) {
         self.widgetID = widgetID
         trainID = selection.trainID
         walkMinutes = selection.walkMinutes
         elevatorAlerts = selection.elevatorAlerts
         serviceAlerts = selection.serviceAlerts
         self.trip = trip
+        self.change = change.flatMap { try? JSONEncoder().encode($0) }.flatMap { String(data: $0, encoding: .utf8) }
     }
 
     func perform() async throws -> some IntentResult {
         #if APP
         SharedStore.recordTap(\.toggled, for: widgetID)
-        if var selection = StopEntity(id: trainID)?.selection(basedOn: SharedStore.load()) {
+        if var selection = StopEntity(id: trainID)?.selection(basedOn: SharedStore.defaultTrain) {
             selection.walkMinutes = walkMinutes
             selection.elevatorAlerts = elevatorAlerts
             selection.serviceAlerts = serviceAlerts
-            try await TrainActivityController.toggle(for: selection, widgetID: widgetID, trip: trip)
+            // Only if still a change for this train
+            let change = change.flatMap { try? JSONDecoder().decode(Change.self, from: Data($0.utf8)) }?
+                .validated(for: selection)
+            try await TrainActivityController.toggle(for: selection, change: change, widgetID: widgetID, trip: trip)
         }
         #endif
         return .result()

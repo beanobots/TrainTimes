@@ -36,6 +36,8 @@ The fixes are on branch `claude/codebase-review-jsby0y`. Each group of fixes was
 - Each build gets its own release, `v1.0.N`. The `latest` release takes its files, but its tag isn't moved.
 - The server builds and tests on macOS in `build-server.yml`, for pull requests and pushes to `main`. It hasn't run as itself yet: GitHub runs a workflow only once it's on `main`, or for a pull request. Its steps were run, with the same results, from a temporary job in the iOS workflow.
 
+> **Update, 25 October 2026.** The AltStore publishing and the alternate app icons have since been removed, along with `build-ios.yml`, which did both. The app is installed from Xcode only. `build-ios-check.yml` replaces its build check: for every pull request, and for pushes to `main` that change `ios/`, it builds the app, widget and Share extension for the simulator, unsigned, and checks `stations.json` and `equipment.json` are in the app and the widget, and `shapes.json` in the app. It publishes nothing.
+
 ## How it was done
 
 - **Finding.** Sixteen reviewers each took one slice of the code or one cross-cutting lens: duplication within the app, duplication across app, server and tools, concurrency and time, and performance and robustness. A completeness critic then sent five more reviewers after areas nobody had covered.
@@ -1809,6 +1811,8 @@ Also reported as: AF6 (No tests for the hand-written protobuf decoder, feed sele
 
 **Medium** · Tools, Scriptable and CI · BF51, CF48
 
+> **Update, 25 October 2026.** The publishing this was about has since been removed; see the update under [CI and release](#status-after-fixing-20-october-2026).
+
 **Where:** `.github/workflows/build-ios.yml:3-6`, `.github/workflows/build-ios.yml:13-14`, `.github/workflows/build-ios.yml:91-100`
 
 .github/workflows/build-ios.yml has no concurrency group, and its publish step (lines 96-100) does not check that $GITHUB_SHA is still the head of main. When two runs overlap, the one that finishes last becomes `latest` even if it built the older commit. A manual re-run of an old run (run_number is kept on re-runs, lines 13-14) also republishes old code as latest. AltStore treats any version that differs from the installed one as an update, so users already on the newer build are prompted to 'update' back to the older build, and new installs get the older code. If two publish steps overlap, one fails with 'release already exists'. The claim that a run_number reset would stop AltStore offering builds is wrong, because AltStore compares with != and not <.
@@ -1820,6 +1824,8 @@ Also reported as: CF48 (CI has no concurrency group: an older run can replace th
 ### 141. CI never builds or tests the server, which compiles shared app files in Swift 6 mode, and nothing runs before merge
 
 **Medium** · Tools, Scriptable and CI · BF54, CF25
+
+> **Update, 25 October 2026.** `build-ios.yml` has since been removed. `build-ios-check.yml` now builds the app for pull requests and pushes to `main`, and `build-server.yml` still builds and tests the server.
 
 **Where:** `.github/workflows/build-ios.yml:3-6`, `.github/workflows/build-ios.yml:20-44`, `server/Sources/TrainCore/Shared`, `server/Tests/TrainCoreTests`, `tools/make_lines.py:25-45`, `.github/workflows/build-ios.yml:17-100`, `server/Sources/TrainCore/Shims.swift`, `.github/workflows/build-ios.yml:17-36` (+4 more)
 
@@ -1993,6 +1999,8 @@ No test checks a registration DELETE against the database. The purge test (serve
 
 **Low** · Tools, Scriptable and CI · BF53
 
+> **Update, 25 October 2026.** AltStore publishing has since been removed, so this no longer applies.
+
 **Where:** `.github/workflows/build-ios.yml:15`, `.github/workflows/build-ios.yml:78`, `tools/make_altstore_source.py:65-72`, `tools/make_altstore_source.py:98-99`
 
 source.json's downloadURL (build-ios.yml:15,78; tools/make_altstore_source.py:70,98) always points at releases/download/latest/TrainTimes.ipa, which every push replaces, while version/buildVersion describe one build. AltStore checks the downloaded .ipa's version and build against the cached source entry (VerifyAppOperation.verifyDownloadedVersion). An install or update started from a source fetched before a push therefore fails with a version-mismatch error until the user refreshes sources.
@@ -2002,6 +2010,8 @@ source.json's downloadURL (build-ios.yml:15,78; tools/make_altstore_source.py:70
 ### 158. CI checks only one alternate app icon, and icon-change failures are silent
 
 **Low** · Tools, Scriptable and CI · BF49
+
+> **Update, 25 October 2026.** The alternate app icons and their CI check have since been removed, so this no longer applies.
 
 **Where:** `.github/workflows/build-ios.yml:68-69`, `ios/App/AppIcon.swift:15`, `ios/App/AppIcon.swift:25`, `tools/make_app_icons.py:30-43`
 
@@ -2013,6 +2023,8 @@ The CI icon check (.github/workflows/build-ios.yml:68-69) promises "every line's
 
 **Low** · Tools, Scriptable and CI · BF62
 
+> **Update, 25 October 2026.** Publishing has since been removed; `build-ios-check.yml` only builds, and a push to `main` starts it only when it changes `ios/`.
+
 **Where:** `.github/workflows/build-ios.yml:3-6`, `.github/workflows/build-ios.yml:13-14`
 
 In .github/workflows/build-ios.yml:3-6 the `on: push: branches: [main]` trigger has no `paths` filter, and lines 13-14 number each run 1.0.<run_number>. A commit that touches only README.md, server/** (not the symlinked shared files) or tools/make_lines.py still rebuilds the app and republishes the `latest` release and source.json under a new version. AltStore then offers users an update that has no app changes. The original's claim that this uses up the weekly App ID signings is wrong, because an update reuses the existing App IDs. The cost is an unneeded update and reinstall for users, plus CI time.
@@ -2022,6 +2034,8 @@ In .github/workflows/build-ios.yml:3-6 the `on: push: branches: [main]` trigger 
 ### 160. Release publishing deletes then recreates 'latest', so a failed create leaves no release and errors are hidden
 
 **Low** · Tools, Scriptable and CI · BF52
+
+> **Update, 25 October 2026.** Publishing has since been removed, so this no longer applies.
 
 **Where:** `.github/workflows/build-ios.yml:96-100`, `README.md:140-145`
 
@@ -2054,6 +2068,8 @@ Commit e4007e6 removed the only AppShortcutsProvider (TrainShortcuts) from ios/A
 ### 163. The server README describes push registration the app doesn't do, and the server's fixed identity can't serve AltStore installs
 
 **Medium** · Push server · BF41, CF13, AF38
+
+> **Update, 25 October 2026.** The app now does register its countdowns, with App Attest (`ios/App/ActivityPush.swift`, `PushServer.swift`, `AppAttest.swift`), and AltStore installs are gone; both READMEs say so.
 
 **Where:** `ios/App/TrainActivityController.swift:97`, `ios/project.yml:43-47`, `ios/project.yml:35-36`, `server/README.md:3-6`, `server/README.md:147-170`, `README.md:93-97`, server/Sources/TrainCore/Config.swift:10,55, `server/deploy/com.traintimes.server.plist` (+18 more)
 

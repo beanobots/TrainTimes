@@ -42,6 +42,19 @@ import Testing
         #expect(board.notice(includingElevators: false, kinds: [.notice]) == nil)
     }
 
+    @Test func nextTrainDoesntMentionALineChangedTo() {
+        // Changing from the R to the D at Atlantic Av, while there's no D there
+        let noD = ServiceAlert(id: "2", kind: .suspended, type: "Planned - Part Suspended",
+                               header: "No D between 59 St-Columbus Circle and Atlantic Av-Barclays Ctr", details: "",
+                               period: nil, brief: nil, markedHeader: "No [D] between 59 St-Columbus Circle and Atlantic Av-Barclays Ctr")
+        let board = Board(trains: [], alerts: [noD], outages: [], ownAlerts: [])
+        #expect(board.notice(includingElevators: false)?.label == "Suspended")
+        #expect(board.withoutChange.notice(includingElevators: false) == nil)
+        // The R's own still are
+        let both = Board(trains: [], alerts: [noD, delays], outages: [], ownAlerts: [delays])
+        #expect(both.withoutChange.notice(includingElevators: false) == Notice(delays))
+    }
+
     @Test func aNoticesKindByItsLabel() {
         for kind in ServiceAlert.Kind.allCases {
             #expect(Notice.Kind(label: kind.label) == .alert(kind))

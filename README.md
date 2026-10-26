@@ -1,4 +1,4 @@
-# Train Times: a next-train widget for the NYC subway
+# Leeway: a next-train widget for the NYC subway
 
 An iPhone widget with a live countdown to the next train and the times of the
 trains after it. You choose the station, lines and direction in the app. Live
@@ -14,27 +14,26 @@ after it with their minutes to go, as many as fit. On an iPhone 12 or later,
 apart from the minis, or with Larger widget text on, the medium widget's text is
 larger, and fewer of those trains fit.
 
-**Where the train is.** The medium widget's map button swaps that list for the
-stops between the next train and your station: the one it's at or heading for,
-the next, how many more, and yours. It starts from the MTA's live train position
-at the widget's last refresh, then moves the train along by when it's due at each
-stop. Tap the button again for the times.
+**Tap for the times.** On the Home Screen, a Next train or Transfers widget
+shows a card for your stop until you tap it: the station and way, then its lines
+(and for a change, → the lines it changes to). Pick its look, **Bullet row** or
+**Station sign**, with **Stop card** in the app's Settings. A tap opens the
+times. They close by themselves once the train they showed has left, or after 5
+minutes, whichever is sooner; tap ✕ to close them at once.
 
 **Changing trains.** A widget can also change trains on the way, say from the R
 at Prospect Av to the D or N express at Atlantic Av-Barclays Ctr. The
-**Transfers** widget shows it, beside the Next train widget. The medium one has
-your next two changes, each with the countdown to leaving, when your R leaves
-Prospect Av and gets to Atlantic, the wait there, and the express it meets. The
-large one shows the next change big: the countdown, then your R leaving, the
-ride to Atlantic, the wait and the express. Under it are three more. Where times
-past 10:00 leave too little room, as on smaller phones, when your R gets to
-Atlantic is left out. Waits short enough for a quick change (2 minutes or less,
-unless you choose otherwise) are highlighted. The large one's map button keeps
-the next change at the top and swaps the three below it for the tracks to
-Atlantic: your R on the local track and the express below it on its own, each
-where it would be by how long it has to go to Atlantic, so a quick change shows
-as the two side by side. The medium
-one's shows where your R is. To set one up, edit a widget in the app's Widgets tab and tap **Add
+**Transfers** widget shows it, beside the Next train widget. It counts down to
+your next R, with when it leaves and the minutes to the two after. The medium one
+adds just the fastest way on from it; the large one lays out every way on. Give the change a
+**Destination**, say 34 St-Herald Sq, and each way is timed to it: the fastest in
+a box of its own (the D at Atlantic, a 1 min wait across the platform, at 34 St
+at 10:06), then the others, soonest there first, as many as fit, each with where
+it changes and its wait, including staying on the R. Without a destination each
+line is timed to when its train leaves the change. A clock marks a timetable
+time. Its only button is walk (top right on large, beside the countdown on
+medium); tap anywhere else to refresh. To set
+one up, edit a widget in the app's Widgets tab and tap **Add
 a Change**: pick the station from the stops after yours, then the lines there
 (those across the platform are chosen to start with). A line on another
 platform, like the 2 or 3 at Atlantic Av, counts the walk to it in the wait; set
@@ -42,7 +41,7 @@ how long that walk is on the widget. A Transfers widget shows the widget picked
 in its Edit menu, or with none picked the first one that changes trains.
 
 **Choosing a train.** In the app's **Widgets** tab, tap a widget and then its
-train (or, in the Live tab, the train at the top of a train's page), and choose
+train (or, in the Nearby tab, the train at the top of a train's page), and choose
 in three steps, each leading to the next: the station (search, or show only one
 line's), its lines, and the direction. The lines are laid out platform by platform: tap
 as many as you like, say the N and the R at Atlantic Av, from one platform or
@@ -99,7 +98,7 @@ the others, and a suspended line shows its alert instead of times. A station
 with more lines than fit shows its first four and "4 more lines ›". Tap a way
 (its name or its next train) to open that train in the app, a station's name or
 its row of other lines for all of that station's lines, a suspended line's alert
-for its details, or anywhere else for the Live tab's Nearby list. The widget
+for its details, or anywhere else for the Nearby tab. The widget
 uses the app's location permission: choose **While Using the App or Widgets**
 when the app asks.
 
@@ -108,24 +107,34 @@ Trains you can't reach in time are left out, the widgets count down to when to
 leave, and the app shows a leave time for each train.
 
 **On your way.** Tap a widget's walk button, or **I'm on my way** in the app (or
-say "Start my train countdown in Train Times"), to count down to your train on the
+say "Start my train countdown in Leeway"), to count down to your train on the
 Lock Screen and in the Dynamic Island. It stays up until you tap the walk button
-again, on the widget or the countdown, or for 8 hours, when iOS ends it. It can
-only get new times while the app runs, which needs no push server: tap ↻ on the
-countdown or on the widget you started it from (any widget showing that train,
-if you started it in the app), or open the app; another widget's ↻ refreshes
-just that widget. In between it keeps ticking, and once your train has gone a
-refresh moves it to the next one. The push server in `server/` is for updating
-it with the app closed, but the app doesn't use it yet, and installs from
-AltStore can't (see [its README](server/README.md)).
+again, on the widget or the countdown, or for 30 minutes, moving on to the next
+train each time one is due; then the push server ends it, or else the app the
+next time it runs.
 
-**Siri and Shortcuts.** Say "When's my next train in Train Times?" Siri answers
+When the countdown starts, the app registers it with the push server in
+`server/` by its push token, signing the request with the app's App Attest key.
+The server then sends it new times through APNs while the app is closed, and
+reloads the Next train and Transfers widgets showing that train so they show
+the same times. When the countdown ends, the app tells the server to stop (see
+[its README](server/README.md)). Without the server (it can't be reached, the
+simulator, which has no App Attest, or a build signed without push
+notifications), the countdown gets new times only while the app runs: tap ↻ on
+the countdown or on the widget you started it from (any widget showing that
+train, if you started it in the app), or open the app; another widget's ↻
+refreshes just that widget. The app also asks iOS for a background refresh
+about every 15 minutes, and tries the server again each time it opens. In
+between it keeps ticking, and once your train has gone a refresh moves it to
+the next one.
+
+**Siri and Shortcuts.** Say "When's my next train in Leeway?" Siri answers
 with the next train you can catch (and when to leave, and any delays) and shows
 the next few. iOS needs the app's name in the phrase. Both actions are in the
 Shortcuts app too, where you can pick a different train.
 
 To ask without the app's name, make your own shortcut: in the Shortcuts app, tap
-**+**, add Train Times' **When's my next train?** action, and name the shortcut
+**+**, add Leeway's **When's my next train?** action, and name the shortcut
 "When's the next train". Siri runs a shortcut when you say its name.
 
 The app and the widgets follow your phone's light or dark setting: the widgets'
@@ -135,75 +144,56 @@ readable. Where a widget is drawn in one colour (tinted and clear Home Screens,
 StandBy at night), live times keep their mark, as their green doesn't show. The
 Lock Screen countdown is always dark.
 
-**The app's icon** is the bullet of your default widget's line (the first one,
-if it has more than one). Make another widget the default in the Widgets tab, or
-change the default's line, and the icon follows; iOS says so with an alert.
-
 There are two versions:
 
 - `ios/`: a native app and widget. You pick any station and line in the app, and
   the widget moves on to the next train by itself and has refresh and walk
-  buttons (and, on the medium widget, the map button). Each flashes in the
-  line's colour when you tap it. It's built
-  on GitHub's Mac servers, so you don't need a Mac.
+  buttons, and a stop card that shows the times when you tap it. Each button
+  flashes in the line's colour when you tap it. You build and install it from Xcode on a Mac.
 - `scriptable/`: a script for the free Scriptable app, set up for the R train at
   Prospect Av. For another stop or line, change the settings at the top: the
   stop, the lines, the station and direction names, and the line's feed, colour
   and terminals. No computer needed.
 
-## Install the native version (Windows/Mac computer, free Apple ID)
+## Install the native version (Mac with Xcode)
 
-Every push to `main` that changes the app (anything in `ios/`) or how it's
-built builds it on a GitHub Mac (see the Actions tab; about two minutes) and
-publishes it as the [latest release](../../releases/tag/latest):
-`TrainTimes.ipa`, plus `source.json`, an AltStore source that describes it.
-Each build gets its own version number (1.0.N, where N is the build number), so
-AltStore can tell when there's a new one, and its own release, `v1.0.N`, which
-the source downloads it from, so a source AltStore read before the next build
-still gets the build it describes. A build that finishes after `main` has
-changed the app again, or after a newer build, isn't published. To publish
-without changing the app, run the workflow on `main` from the Actions tab
-(**Run workflow**). Pull requests are built too, but not published. The push
-server in `server/` has its own workflow, which builds and tests it for every
-pull request and every push to `main` that changes it or the app's shared code.
+The push server in `server/` has its own workflow, which builds and tests it for
+every pull request and every push to `main` that changes it or the app's shared
+code. Another, `build-ios-check.yml`, builds the app, its widget and its Share
+extension for the simulator, unsigned, for every pull request and every push to
+`main` that changes `ios/`, and checks the station, elevator and line-shape
+lists are bundled. Nothing is published: the app is built and installed from
+Xcode.
 
-1. **Install AltStore** on your iPhone by following the official guide at
-   [altstore.io](https://altstore.io). It needs AltServer running on your
-   computer, and your iPhone on the same Wi-Fi. Turn on **Developer Mode** on the
-   iPhone if it asks (Settings → Privacy & Security).
-2. **Add the Train Times source.** In AltStore, open **Sources**, tap **+**, and
-   paste:
-
-   ```
-   https://github.com/beanobots/TrainTimes/releases/download/latest/source.json
-   ```
-
-3. **Install it.** Open the source, tap **Train Times**, and tap **Free** (or
-   **Get**). Sign in with your Apple ID when it asks. The app and widget use two
-   of the ten App IDs a free account gets. New builds then show up as updates in
-   AltStore.
-
-   Or, without the source: download `TrainTimes.ipa` from the
-   [latest release](../../releases/tag/latest), put it on the iPhone (AirDrop,
-   iCloud Drive or Files), and in AltStore go to **My Apps**, tap **+**, and pick
-   it. You won't get update notices this way.
-4. **Choose your train.** Open **Train Times**, go to the **Widgets** tab, tap
+1. **Make the Xcode project.** Install [XcodeGen](https://github.com/yonaskolb/XcodeGen),
+   then run `xcodegen generate` in `ios/`. Run it again after a pull that adds or
+   removes files, as `NextRTrain.xcodeproj` isn't stored in git.
+2. **Set your team.** `DEVELOPMENT_TEAM` in `ios/project.yml` is the team builds
+   are signed with; change it to yours and generate again. The app and widget
+   share the App Group `group.com.rtrainwidget.app` (`ios/Config/*.entitlements`).
+3. **Run it on your iPhone.** Open `ios/NextRTrain.xcodeproj`, pick your iPhone as
+   the destination and run the **NextRTrain** scheme. Turn on **Developer Mode**
+   on the iPhone if it asks (Settings → Privacy & Security).
+4. **Choose your train.** Open **Leeway**, go to the **Widgets** tab, tap
    your widget, then tap its train. Search for your station (or show only one
    line's), tap one or more of its lines, then the direction. The widget
    updates right away.
 5. **Add the widget.** Touch and hold the Home Screen, tap **Edit → Add Widget**,
-   and choose **Train Times**: Next train, Transfers for a widget that
+   and choose **Leeway**: Next train, Transfers for a widget that
    changes trains, or Trains near you for the stations closest to you. Until
    you choose, Next train shows the R at Prospect Av, toward Manhattan.
 
 If the app shows an orange warning that the widget can't see your choice, the
-shared storage the app and widget use wasn't set up when it was installed (it's an
-App Group that AltStore creates while signing). Reinstalling with AltStore
-should fix it.
+App Group the app and widget share wasn't in the build's signature. Check that
+both targets have it in Xcode's Signing & Capabilities, then run again.
 
-A free Apple ID signs apps for 7 days. AltStore renews the signature on its own
-when AltServer is running on your computer and your iPhone is on the same Wi-Fi.
-If it lapses, the app stops opening until you refresh it in AltStore.
+The app needs a paid Apple Developer Program team. Its entitlements
+(`ios/project.yml`) include push notifications (`aps-environment`, in the app and
+the widget) and App Attest, which a free Apple ID's Personal Team can't sign.
+To build with a free Apple ID anyway, take those two out of `ios/project.yml` and
+generate again: the countdown then gets new times only while the app runs, and
+Xcode signs the app for 7 days, after which it stops opening until you run it
+from Xcode again.
 
 ## Where the data comes from
 

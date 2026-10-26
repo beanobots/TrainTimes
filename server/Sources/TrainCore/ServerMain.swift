@@ -43,10 +43,24 @@ public enum ServerMain {
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: config.dataDirectory.path)
         let store = try Store(directory: config.dataDirectory)
         let pusher = try APNSPusher(config: config.apns)
-        let poller = Poller(store: store, pusher: pusher, interval: config.pollInterval,
+        // Read once each tick, for the countdowns and for the app and widgets
+        let feeds = FeedRelay(interval: config.pollInterval)
+        let poller = Poller(store: store, pusher: pusher, interval: config.pollInterval, timing: config.pushTiming,
                             concurrency: config.pushConcurrency, keyRetention: config.limits.keyRetention,
-                            logPushes: config.logPushes)
-        let services = HTTPServices(store: store, auth: config.auth, appID: config.appID, limits: config.limits)
+                            logPushes: config.logPushes, feeds: feeds, boards: Poller.liveBoards(from: feeds))
+        // Built each day, for the app to fall back on when the MTA can't be reached
+        let timetable = TimetableCopy()
+        let maker = TimetableMaker(copy: timetable, directory: config.dataDirectory)
+        // Google's subway routes, for directions shared to the app, with a key
+        let routes = config.googleRoutesKey.map { key in
+            TransitRoutes(key: key, perClientPerDay: config.limits.routesPerIPPerDay, perDay: config.limits.routesPerDay)
+        }
+        // Bus Time's next buses, for the bus rides in those routes, with a key
+        let buses = config.busTimeKey.map { key in
+            BusTime(key: key, perClientPerDay: config.limits.busTimePerIPPerDay, perDay: config.limits.busTimePerDay)
+        }
+        let services = HTTPServices(store: store, auth: config.auth, appID: config.appID, limits: config.limits,
+                                    feeds: feeds, timetable: timetable, routes: routes, buses: buses)
 
         let authDescription: String
         switch config.auth {
@@ -58,7 +72,7 @@ public enum ServerMain {
 
         var logger = Logger(label: "TrainTimesServer")
         logger.logLevel = .warning
-        var background: [any Service] = [poller]
+        var background: [any Service] = [poller, maker]
         if let logFile = config.logFile { background.append(LogReopener(path: logFile)) }
         let app = Application(
             router: HTTPRoutes.router(services),
@@ -70,7 +84,14 @@ public enum ServerMain {
             logger: logger
         )
         Log.info("start: \(await store.count) registrations, \(try await store.keyCount()) attest keys, "
-            + "polling every \(Int(config.pollInterval)) s, \(config.pushConcurrency) pushes at a time, auth \(authDescription)")
+            + "polling every \(Int(config.pollInterval)) s, \(config.pushConcurrency) pushes at a time, "
+            + "pushing when a train is over \(Int(config.pushTiming.earlier)) s earlier or \(Int(config.pushTiming.later)) s later, "
+            + "a following one \(Int(config.pushTiming.following)) s, refreshing after \(Int(config.pushTiming.refresh)) s, "
+            + "auth \(authDescription), "
+            + (routes == nil ? "no Google routes (no GOOGLE_ROUTES_API_KEY)"
+                : "Google routes up to \(config.limits.routesPerIPPerDay) a client and \(config.limits.routesPerDay) a day")
+            + (buses == nil ? ", no Bus Time (no BUS_TIME_API_KEY)"
+                : ", Bus Time up to \(config.limits.busTimePerIPPerDay) a client and \(config.limits.busTimePerDay) a day"))
         do {
             try await app.runService()
         } catch {

@@ -24,8 +24,13 @@ import Testing
         #expect(config.dataDirectory.path == "/data")
         #expect(config.host == "127.0.0.1")
         #expect(config.port == 8080)
-        #expect(config.pollInterval == 30)
+        #expect(config.pollInterval == 20)
         #expect(config.pushConcurrency == 100)
+        #expect(config.pushTiming == PushTiming())
+        #expect(config.pushTiming.earlier == 15)
+        #expect(config.pushTiming.later == 60)
+        #expect(config.pushTiming.following == 60)
+        #expect(config.pushTiming.refresh == 300)
         #expect(!config.logPushes)
         #expect(config.logFile == nil)
         let defaults = Limits()
@@ -72,7 +77,9 @@ import Testing
         let config = try parse([
             "HOST": "0.0.0.0", "PORT": "9000", "POLL_SECONDS": "15", "PUSH_CONCURRENCY": "8", "APP_ID": "T.app",
             "APNS_TOPIC": "t", "MAX_KEYS_PER_IP_PER_DAY": "3", "LOG_PUSHES": "1", "LOG_FILE": "/logs/server.log",
+            "PUSH_EARLIER_SECONDS": "20", "PUSH_LATER_SECONDS": "90", "PUSH_FOLLOWING_SECONDS": "120", "REFRESH_SECONDS": "600",
         ])
+        #expect(config.pushTiming == PushTiming(earlier: 20, later: 90, following: 120, refresh: 600))
         #expect(config.host == "0.0.0.0")
         #expect(config.port == 9000)
         #expect(config.pollInterval == 15)
@@ -94,7 +101,9 @@ import Testing
             #expect(throws: Config.Problem.self) { try Config(environment: settings) }
         }
         let bad = [("PORT", "0"), ("PORT", "65536"), ("POLL_SECONDS", "4"), ("PUSH_CONCURRENCY", "many"),
-                   ("RATE_LIMIT_BURST", "-1"), ("MAX_REGISTRATIONS", "0"), ("MAX_KEYS_PER_IP_PER_DAY", "1.5")]
+                   ("RATE_LIMIT_BURST", "-1"), ("MAX_REGISTRATIONS", "0"), ("MAX_KEYS_PER_IP_PER_DAY", "1.5"),
+                   ("PUSH_EARLIER_SECONDS", "0"), ("PUSH_LATER_SECONDS", "3601"), ("PUSH_FOLLOWING_SECONDS", "soon"),
+                   ("REFRESH_SECONDS", "59")]
         for (name, value) in bad {
             #expect(throws: Config.Problem.self) { try parse([name: value]) }
         }

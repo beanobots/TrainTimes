@@ -17,7 +17,7 @@ struct Registration: Sendable, Equatable {
     var selection: Selection
     /// The trip the app started counting down to; the last state's trip once there is one.
     var trip: String
-    /// When the countdown started, for ending it once iOS would.
+    /// When the countdown started, for ending it once its `ActivityState.lifetime` is up.
     var started: Date
     /// The app's Settings choice of alerts to mention.
     var alertKinds: Set<ServiceAlert.Kind>?
@@ -29,6 +29,18 @@ struct Registration: Sendable, Equatable {
     var lastState: ContentState? = nil
     /// Nil before the first push.
     var lastPush: Date? = nil
+    /// The trains after `lastState`'s following ones, as the last pass read them, so a push as
+    /// its train is due can move up a train and still show as many after it
+    /// (`Poller.movedOn(_:at:)`). Only in memory: after a restart, the first pass reads them again.
+    var later: [Arrival] = []
+    /// From a Transfers widget, its change, whose lines' alerts the countdown mentions too.
+    var change: Change? = nil
+    /// The phone's widget push token, in lowercase hex: its widgets reload as the countdown's
+    /// times change, to show the same. Nil from older apps, or once APNs no longer knows it.
+    var widgetToken: String? = nil
+
+    /// The changed-to trains whose alerts it mentions along with its own (`Change.alertSelections`).
+    var changeSelections: [Selection] { change?.alertSelections(for: selection) ?? [] }
 
     var settings: AppSettings {
         var settings = AppSettings()
@@ -77,6 +89,10 @@ struct RegistrationRequest: Decodable, Sendable {
     /// from `trip`, which may have gone, taking off the walk again: a
     /// countdown is registered again with each new push token, as it runs.
     var state: ContentState?
+    /// From a Transfers widget, its change; nil from older apps and other countdowns.
+    var change: Change?
+    /// The phone's widget push token (`WidgetPushInfo.token`), in hex; nil from older apps.
+    var widgetToken: String?
 
     /// Whether `state` is no bigger than one the app posts. Parts of it are
     /// pushed back, as it was sent, and APNs refuses a payload over 4 KB.
@@ -94,6 +110,8 @@ struct RegistrationRequest: Decodable, Sendable {
 enum PushOutcome: Sendable, Equatable {
     case pushed(token: String, revision: UUID, state: ContentState, at: Date)
     case drop(token: String, revision: UUID)
+    /// APNs no longer knows its widget push token; the countdown's pushes go on.
+    case dropWidgetToken(token: String, revision: UUID)
 }
 
 /// Registrations and attest keys, in SQLite (WAL) in the data directory. The
@@ -127,7 +145,22 @@ actor Store {
 
     private static func migrateSchema(_ db: SQLite) throws {
         let version = try db.query("PRAGMA user_version").first?.first?.integer ?? 0
-        guard version < 1 else { return }
+        if version < 1 { try createSchema(db) }
+        if version < 2 {
+            // A Transfers widget's countdown's change
+            try db.transaction {
+                try db.execute("ALTER TABLE registrations ADD COLUMN change BLOB; PRAGMA user_version = 2;")
+            }
+        }
+        if version < 3 {
+            // The phone's widget push token
+            try db.transaction {
+                try db.execute("ALTER TABLE registrations ADD COLUMN widget_token TEXT; PRAGMA user_version = 3;")
+            }
+        }
+    }
+
+    private static func createSchema(_ db: SQLite) throws {
         try db.transaction {
             try db.execute("""
                 CREATE TABLE IF NOT EXISTS registrations (
@@ -213,6 +246,7 @@ actor Store {
     func apply(_ outcomes: [PushOutcome]) throws {
         guard !outcomes.isEmpty else { return }
         var changed: [Registration] = []
+        var widgetTokensGone: [Registration] = []
         var dropped: [String] = []
         for outcome in outcomes {
             switch outcome {
@@ -222,6 +256,10 @@ actor Store {
                 registration.lastPush = date
                 registration.trip = state.trip
                 changed.append(registration)
+            case .dropWidgetToken(let token, let revision):
+                guard var registration = registrations[token], registration.revision == revision else { continue }
+                registration.widgetToken = nil
+                widgetTokensGone.append(registration)
             case .drop(let token, let revision):
                 guard registrations[token]?.revision == revision else { continue }
                 dropped.append(token)
@@ -236,10 +274,22 @@ actor Store {
                     .text(registration.trip), .text(registration.token),
                 ])
             }
+            for registration in widgetTokensGone {
+                try db.query("UPDATE registrations SET widget_token = NULL WHERE token = ?", [.text(registration.token)])
+            }
             try Self.delete(dropped, from: db)
         }
         for registration in changed { registrations[registration.token] = registration }
+        for registration in widgetTokensGone { registrations[registration.token]?.widgetToken = nil }
         for token in dropped { unindex(token) }
+    }
+
+    /// A pass's `Registration.later` for each token it read, in memory only. Each applies only
+    /// if the token hasn't been registered again since.
+    func keepLater(_ later: [(token: String, revision: UUID, trains: [Arrival])]) {
+        for (token, revision, trains) in later where registrations[token]?.revision == revision {
+            registrations[token]?.later = trains
+        }
     }
 
     /// Deletes the tokens' rows, and only those: the caller unindexes them
@@ -258,8 +308,9 @@ actor Store {
         let encoder = JSONEncoder()
         try db.query("""
             INSERT OR REPLACE INTO registrations
-                (token, owner, environment, selection, trip, started, alert_kinds, revision, last_state, last_push)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (token, owner, environment, selection, trip, started, alert_kinds, revision, last_state, last_push, change,
+                 widget_token)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, [
             .text(registration.token), .text(registration.owner), .text(registration.environment.rawValue),
             .blob(try encoder.encode(registration.selection)), .text(registration.trip),
@@ -268,19 +319,22 @@ actor Store {
             .text(registration.revision.uuidString),
             try registration.lastState.map { .blob(try encoder.encode($0)) } ?? .null,
             registration.lastPush.map { .real($0.timeIntervalSinceReferenceDate) } ?? .null,
+            try registration.change.map { .blob(try encoder.encode($0)) } ?? .null,
+            registration.widgetToken.map { .text($0) } ?? .null,
         ])
     }
 
     /// Each row on its own, so one this build can't read doesn't stop the
     /// server starting: a row it can't read (a selection that doesn't decode,
-    /// say) is deleted, and alert kinds or a last state it can't read are left
-    /// out (the next pass then pushes afresh).
+    /// say) is deleted, and alert kinds, a last state or a change it can't
+    /// read are left out (the next pass then pushes afresh).
     private static func loadRegistrations(_ db: SQLite) throws -> [Registration] {
         let decoder = JSONDecoder()
         var loaded: [Registration] = []
         var unreadable: [String] = []
         for row in try db.query("""
-            SELECT token, owner, environment, selection, trip, started, alert_kinds, revision, last_state, last_push
+            SELECT token, owner, environment, selection, trip, started, alert_kinds, revision, last_state, last_push, change,
+                widget_token
             FROM registrations
             """) {
             guard let token = row[0].text else { continue }
@@ -294,16 +348,19 @@ actor Store {
             }
             let alertKinds = row[6].blob.flatMap { try? decoder.decode(ServiceAlert.KnownKinds.self, from: $0).kinds }
             let lastState = row[8].blob.flatMap { try? decoder.decode(ContentState.self, from: $0) }
+            let change = row[10].blob.flatMap { try? decoder.decode(Change.self, from: $0) }
             var lost: [String] = []
             if alertKinds == nil, row[6].blob != nil { lost.append("alert kinds") }
             if lastState == nil, row[8].blob != nil { lost.append("last state") }
+            if change == nil, row[10].blob != nil { lost.append("change") }
             if !lost.isEmpty {
                 Log.error("load \(Registration.prefix(of: token)): left out its \(lost.joined(separator: " and ")), which couldn't be read")
             }
             loaded.append(Registration(
                 token: token, owner: owner, environment: environment, selection: selection, trip: trip,
                 started: Date(timeIntervalSinceReferenceDate: started), alertKinds: alertKinds, revision: revision,
-                lastState: lastState, lastPush: row[9].real.map(Date.init(timeIntervalSinceReferenceDate:))
+                lastState: lastState, lastPush: row[9].real.map(Date.init(timeIntervalSinceReferenceDate:)),
+                change: change, widgetToken: row[11].text
             ))
         }
         if !unreadable.isEmpty {

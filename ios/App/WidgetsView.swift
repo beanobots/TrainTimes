@@ -1,27 +1,29 @@
 import SwiftUI
 
-/// The Widgets tab: every widget set up in the app. A widget on the Home
-/// Screen or Lock Screen picks one of these in its Edit menu.
+/// The Widgets tab: saved widget configurations, which Home and Lock Screen widgets pick
+/// from in Edit Widget.
 struct WidgetsView: View {
     @Environment(WidgetStore.self) private var store
-    @Environment(FavoritesStore.self) private var favorites
+    @Environment(SettingsStore.self) private var settings
     @Environment(\.scenePhase) private var scenePhase
-    /// Adding a widget starts by choosing its train.
     @State private var choosingTrain = false
-    /// The train chosen for a new widget, which then gets its name.
+    /// The train picked for a new widget, before it's named.
     @State private var chosenTrain: Selection?
+    /// Whether Both was picked as its direction.
+    @State private var chosenBoth = false
     @State private var newWidget: NewWidget?
 
     private struct NewWidget: Identifiable {
         let id = UUID()
         let selection: Selection
+        let bothWays: Bool
     }
 
-    /// Starts out as the default widget's train, with its walking time and
-    /// alerts; the picker sets the station, lines and direction together.
+    /// Defaults to Settings' default train (with its alerts); the picker sets station, lines and
+    /// direction together.
     private var newTrain: Binding<Selection> {
         Binding {
-            chosenTrain ?? store.defaultWidget.selection
+            chosenTrain ?? settings.defaultTrain
         } set: {
             chosenTrain = $0
         }
@@ -29,14 +31,14 @@ struct WidgetsView: View {
 
     private func add() {
         chosenTrain = nil
+        chosenBoth = false
         choosingTrain = true
     }
 
-    /// What decides which saved widget a widget out there shows, when it
-    /// hasn't picked one or the one picked is gone: which is the default, and
-    /// which widgets, in order, change trains.
+    /// The inputs that decide what an unconfigured (or orphaned) placed Transfers widget shows:
+    /// which widgets, in order, have a change.
     private var placement: [String] {
-        [store.saved.defaultID.uuidString] + store.saved.widgets.map { "\($0.id) \($0.change != nil)" }
+        store.saved.widgets.map { "\($0.id) \($0.change != nil)" }
     }
 
     var body: some View {
@@ -44,65 +46,53 @@ struct WidgetsView: View {
             List {
                 Section {
                     ForEach(store.saved.widgets) { widget in
-                        NavigationLink(value: widget.id) {
-                            WidgetRow(widget: widget, isDefault: widget.id == store.saved.defaultID, placed: store.placed[widget.id] ?? 0)
-                        }
-                        .contextMenu {
-                            if widget.id != store.saved.defaultID {
-                                Button("Make Default", systemImage: "star") { store.makeDefault(widget.id) }
+                        WidgetRow(widget: widget, look: store.look(for: widget.id),
+                                  placed: store.placed[widget.id] ?? 0)
+                            // The whole widget opens it, without a chevron beside it
+                            .background {
+                                NavigationLink(value: widget.id) { EmptyView() }.opacity(0)
                             }
-                        }
+                            // Gaps between the cards
+                            .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 8, trailing: 0))
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                            .accessibilityHint("Edit this widget")
                     }
                     .onDelete { offsets in
                         for id in offsets.map({ store.saved.widgets[$0].id }) { store.delete(id) }
                     }
                     .onMove { store.move(fromOffsets: $0, toOffset: $1) }
                     .deleteDisabled(store.saved.widgets.count == 1)
-                    Button(action: add) {
-                        Label("Add a Widget", systemImage: "plus.circle.fill")
-                    }
-                } footer: {
-                    Text("Long-press a widget on your Home Screen, choose Edit Widget, and pick one of these. Changes here update every widget showing it.")
                 }
             }
             .navigationDestination(for: UUID.self) { id in
                 WidgetEditor(id: id)
             }
+            // Start the first card as far under the toolbar as the Nearby tab's first card
+            .contentMargins(.top, 0, for: .scrollContent)
+            // Inline, level with Add, as Nearby's is
+            .navigationTitle("Widgets")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) { EditButton() }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Menu("Add", systemImage: "plus") {
-                        Button("Create New", systemImage: "plus.circle", action: add)
-                        Menu("Add from Favorites", systemImage: "star") {
-                            // A favorite's train, with its walking time, to name and add
-                            ForEach(favorites.favorites, id: \.trainID) { selection in
-                                Button {
-                                    newWidget = NewWidget(selection: selection)
-                                } label: {
-                                    Text(selection.station?.name ?? "Train")
-                                    Text(selection.caption)
-                                }
-                            }
-                        }
-                        .disabled(favorites.favorites.isEmpty)
-                    }
+                    Button("Add", systemImage: "plus", action: add)
                 }
             }
-            // Once the train's chosen, the rest; cancelled, nothing
+            // On dismiss, continue to AddWidget; nothing if cancelled
             .sheet(isPresented: $choosingTrain, onDismiss: {
-                if let chosenTrain { newWidget = NewWidget(selection: chosenTrain) }
+                if let chosenTrain { newWidget = NewWidget(selection: chosenTrain, bothWays: chosenBoth) }
             }) {
-                TrainPicker(selection: newTrain)
+                TrainPicker(selection: newTrain, bothWays: $chosenBoth)
             }
             .sheet(item: $newWidget) { widget in
-                AddWidget(starting: widget.selection)
+                AddWidget(starting: widget.selection, bothWays: widget.bothWays)
             }
-            // Which widgets are out there changes outside the app
+            // Placed widgets change outside the app, so recount on appear and foreground
             .task { await store.countPlaced() }
             .onChange(of: scenePhase) { _, phase in
                 if phase == .active { Task { await store.countPlaced() } }
             }
-            // And which saved widget some of them show changes here
+            // ...and when edits here change which saved widget some of them show
             .onChange(of: placement) {
                 Task { await store.countPlaced() }
             }
@@ -112,116 +102,108 @@ struct WidgetsView: View {
 
 private struct WidgetRow: View {
     let widget: SavedWidget
-    let isDefault: Bool
+    /// As last shown while editing it.
+    let look: WidgetLook
     let placed: Int
 
-    /// The station under a name of its own; under the station's name, which
-    /// way. Then any change: "R Manhattan, then D or N".
+    /// The station name if the widget has a custom title, else the caption; then any change
+    /// (e.g. "R Manhattan, then D or N").
     private var subtitle: String {
         let selection = widget.selection
         let base = widget.title == selection.station?.name
             ? selection.caption
             : selection.station?.name ?? ""
         guard let change = widget.change else { return base }
-        return "\(base), then \(Lines.list(change.routes, joinedBy: "or"))"
+        return "\(base), then \(Lines.list(change.allRoutes, joinedBy: "or"))"
     }
 
+    /// Its name and train, then the widget as the Home Screen shows it.
     var body: some View {
-        HStack(spacing: 12) {
-            LineBullets(routes: widget.selection.routes, size: 30)
-                .frame(width: 40)
+        VStack(alignment: .leading, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(widget.title).font(.headline)
-                    if isDefault {
-                        Image(systemName: "star.fill")
-                            .font(.caption)
-                            .foregroundStyle(.yellow)
-                            .accessibilityLabel("Default")
-                    }
+                    Spacer()
+                    Text(placed == 0 ? "Not placed" : "\(placed) placed")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
                 Text(subtitle)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
-            Spacer()
-            Text(placed == 0 ? "Not placed" : "\(placed) placed")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+            .padding(.horizontal, 4)
+            // On the page itself, as on the Home Screen, not in a card of its own
+            WidgetPreview(widget: widget, look: look)
         }
-        .padding(.vertical, 2)
+        .frame(maxWidth: WidgetLook.medium.size.width)
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 8)
+        .contentShape(Rectangle())
+        .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 26, style: .continuous))
     }
 }
 
-/// One saved widget's setup. Star its train in the Live tab for its live times.
+/// Edits one saved widget.
 private struct WidgetEditor: View {
     let id: UUID
     @Environment(WidgetStore.self) private var store
-    @Environment(\.dismiss) private var dismiss
-    @State private var confirmingDelete = false
+
+    /// Remembered, so the Widgets tab draws it as last shown here.
+    private var look: Binding<WidgetLook> {
+        Binding {
+            store.look(for: id)
+        } set: {
+            store.setLook($0, for: id)
+        }
+    }
 
     var body: some View {
         if let widget = store.binding(for: id) {
-            let isDefault = id == store.saved.defaultID
-            let placed = store.placed[id] ?? 0
             Form {
+                WidgetHeader(widget: widget.wrappedValue, look: look)
                 WidgetFields(widget: widget)
-                Section {
-                    // The count takes in the Lock Screen's widgets as well
-                    LabeledContent("On your Home and Lock Screens", value: placed == 0 ? "None" : "\(placed)")
-                    if isDefault {
-                        Label("Default for new widgets", systemImage: "star.fill")
-                    } else {
-                        Button("Make Default", systemImage: "star") { store.makeDefault(id) }
-                    }
-                }
-                if store.saved.widgets.count > 1 {
-                    Section {
-                        Button("Delete Widget", role: .destructive) { confirmingDelete = true }
-                    }
-                }
             }
             .listSectionSpacing(.compact)
-            .navigationTitle(widget.wrappedValue.title)
+            .pinnedWidget(widget.wrappedValue, look: look)
+            // The name is edited in its field, as Clock's Edit Alarm does
+            .navigationTitle("Edit Widget")
             .navigationBarTitleDisplayMode(.inline)
-            .confirmationDialog("Delete \(widget.wrappedValue.title)?", isPresented: $confirmingDelete, titleVisibility: .visible) {
-                Button("Delete Widget", role: .destructive) {
-                    dismiss()
-                    store.delete(id)
-                }
-            } message: {
-                Text(placed == 0 ? "" : "Next train widgets showing it will show the default instead, and Transfers widgets the first one that changes trains, or else the default.")
-            }
         }
     }
 }
 
-/// A new widget, its train already chosen, to name and set up before it's added.
+/// Sets up a new widget whose train is already chosen.
 private struct AddWidget: View {
     @Environment(WidgetStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     @State private var widget: SavedWidget
+    @State private var look = WidgetLook.medium
 
-    init(starting selection: Selection) {
-        _widget = State(initialValue: SavedWidget(selection: selection))
+    init(starting selection: Selection, bothWays: Bool) {
+        _widget = State(initialValue: SavedWidget(selection: selection, bothWays: bothWays))
     }
 
     var body: some View {
         NavigationStack {
             Form {
+                WidgetHeader(widget: widget, look: $look)
                 WidgetFields(widget: $widget)
             }
             .listSectionSpacing(.compact)
+            .pinnedWidget(widget, look: $look)
             .navigationTitle("New Widget")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel", role: .cancel) { dismiss() }
+                    Button(role: .cancel) { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Add") {
+                    // The standard tick, still named "Add" for VoiceOver
+                    Button("Add", systemImage: "checkmark", role: .confirm) {
                         store.add(widget)
+                        store.setLook(look, for: widget.id)
                         dismiss()
                     }
                 }
@@ -230,14 +212,191 @@ private struct AddWidget: View {
     }
 }
 
-/// What adding and editing a widget have in common: its name, its train, any
-/// change of trains, any commuting hours, and which alerts it mentions.
+/// The three widgets as tiles, each its outline with its name and size: Next train comes small
+/// and medium, Transfers large.
+private struct LookTiles: View {
+    @Binding var look: WidgetLook
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ForEach(WidgetLook.allCases) { tile in
+                let selected = tile == look
+                Button {
+                    look = tile
+                } label: {
+                    VStack(spacing: 6) {
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(selected ? Color.accentColor.opacity(0.2) : .clear)
+                            .strokeBorder(lineWidth: 1.5)
+                            .frame(width: tile.glyph.width, height: tile.glyph.height)
+                            .frame(height: 34)
+                        Text(tile.kindName)
+                            .font(.caption2.weight(.semibold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                        Text(tile.sizeName)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    .foregroundStyle(selected ? Color.accentColor : .primary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(RoundedRectangle.pickerCard
+                        .fill(selected ? Color.accentColor.opacity(0.1) : Color(.secondarySystemGroupedBackground)))
+                    .contentShape(RoundedRectangle.pickerCard)
+                }
+                .buttonStyle(.plain)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(tile.title)
+                .accessibilityAddTraits(selected ? .isSelected : [])
+            }
+        }
+    }
+}
+
+/// The widget being set up, as the Home Screen will show it and redrawn as its fields change,
+/// with which widget to show it as. The top of the form, so it scrolls away with it; then
+/// `pinnedWidget` keeps a small copy.
+private struct WidgetHeader: View {
+    let widget: SavedWidget
+    @Binding var look: WidgetLook
+    /// Not saved: it only shows how the Home Screen may draw the widget.
+    @State private var appearance = WidgetAppearance.standard
+
+    var body: some View {
+        Section {
+            VStack(spacing: 10) {
+                // Clear and Tinted on a stand-in wallpaper, for their glass to show
+                WidgetPreview(widget: widget, look: look, appearance: appearance)
+                    .shadow(color: .black.opacity(appearance == .standard ? 0.12 : 0), radius: 8, y: 2)
+                    .padding(appearance == .standard ? 0 : 14)
+                    .background {
+                        if appearance != .standard {
+                            WallpaperBackdrop()
+                                .clipShape(RoundedRectangle(cornerRadius: 38, style: .continuous))
+                                .transition(.opacity)
+                        }
+                    }
+                    .animation(.snappy, value: appearance)
+                Picker("Home Screen", selection: $appearance) {
+                    ForEach(WidgetAppearance.allCases) { appearance in
+                        Text(appearance.name).tag(appearance)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: WidgetLook.medium.size.width)
+                LookTiles(look: $look)
+                    .frame(maxWidth: WidgetLook.medium.size.width)
+            }
+            .padding(.top, 4)
+            .frame(maxWidth: .infinity)
+            .id(PinnedWidget.top)
+        }
+        .listRowBackground(Color.clear)
+        .listRowInsets(EdgeInsets())
+    }
+}
+
+extension View {
+    /// Once `WidgetHeader` has mostly scrolled away, a bar at the top with a small copy of the
+    /// widget and a menu for which widget and size; tapping the copy goes back up to the full one.
+    fileprivate func pinnedWidget(_ widget: SavedWidget, look: Binding<WidgetLook>) -> some View {
+        modifier(PinnedWidget(widget: widget, look: look))
+    }
+}
+
+/// See `View.pinnedWidget(_:look:)`.
+private struct PinnedWidget: ViewModifier {
+    let widget: SavedWidget
+    @Binding var look: WidgetLook
+    @State private var compact = false
+
+    /// The id of `WidgetHeader`'s row, to scroll back to. A Form is a List, which
+    /// `scrollPosition` doesn't scroll, so this goes through a `ScrollViewReader`.
+    static let top = "widgetHeader"
+
+    /// Small enough for a bar: half size, or less for the large widget.
+    private var scale: CGFloat { min(0.5, 90 / look.size.height) }
+
+    func body(content: Content) -> some View {
+        ScrollViewReader { proxy in
+            content
+                // Shown once the header's widget is mostly out of sight, and hidden a little
+                // higher, so it doesn't flip back and forth at the line
+                .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                    geometry.contentOffset.y + geometry.contentInsets.top
+                } action: { _, scrolled in
+                    let line = look.size.height * 0.7
+                    let shown = compact ? scrolled > line - 24 : scrolled > line
+                    guard shown != compact else { return }
+                    withAnimation(.snappy(duration: 0.25)) { compact = shown }
+                }
+                // Floating over the form under the navigation bar, not a safeAreaBar: adding or
+                // removing one changes the form's top inset, and its scroll position jumps
+                // far enough to show or hide the bar again, over and over
+                .overlay(alignment: .top) {
+                    if compact {
+                        bar(proxy)
+                            .glassEffect(.regular, in: .rect(cornerRadius: 26))
+                            .padding(.horizontal, 16)
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+                }
+        }
+    }
+
+    private func bar(_ proxy: ScrollViewProxy) -> some View {
+        HStack(spacing: 14) {
+            Button {
+                withAnimation { proxy.scrollTo(Self.top, anchor: .top) }
+            } label: {
+                // At its full size, then shrunk: offered less room, it would narrow instead
+                WidgetPreview(widget: widget, look: look)
+                    .frame(width: look.size.width, height: look.size.height)
+                    .scaleEffect(scale, anchor: .topLeading)
+                    .frame(width: look.size.width * scale, height: look.size.height * scale, alignment: .topLeading)
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint("Shows the widget full size")
+            // The widget's name and size as plain text, all of it the menu: a glass button
+            // inside the glass card looked cramped
+            Menu {
+                Picker("Widget", selection: $look) {
+                    ForEach(WidgetLook.allCases) { look in
+                        Text(look.title).tag(look)
+                    }
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(look.kindName)
+                            .font(.headline)
+                        Text(look.sizeName)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .lineLimit(1)
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .contentShape(Rectangle())
+            }
+            .accessibilityLabel("Widget")
+            .accessibilityValue(look.title)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity)
+    }
+}
+
+/// Fields shared by adding and editing a widget.
 private struct WidgetFields: View {
     @Binding var widget: SavedWidget
 
-    private var station: Station? { widget.selection.station }
-
-    /// Its train, which keeps or drops the change with it in the one change to the widget.
+    /// Goes through `setSelection`, which keeps or drops the change in the same update.
     private var train: Binding<Selection> {
         Binding {
             widget.selection
@@ -247,58 +406,46 @@ private struct WidgetFields: View {
     }
 
     var body: some View {
-        TripSections(selection: train, change: $widget.change)
+        TripSections(selection: train, change: $widget.change, destinationID: $widget.destinationID,
+                     bothWays: $widget.bothWays) {
+            // Labelled like Depart from and Arrive at below it; empty shows the station's name
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Name")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                TextField(widget.selection.station?.name ?? "Name", text: $widget.name)
+                    .font(.headline)
+                    .accessibilityLabel("Name")
+            }
+            .padding(.vertical, 4)
+        }
         CommuteSection(widget: $widget)
-        Section("Name") {
-            TextField(station?.name ?? "Name", text: $widget.name)
-        }
-        Section {
-            WalkStepper(minutes: $widget.selection.walkMinutes)
-        } header: {
-            Text("Getting there")
-        } footer: {
-            Text("Trains you can't reach in time are left out, and the widget counts down to when to leave.")
-        }
         Section {
             Toggle("Service alerts", isOn: $widget.selection.serviceAlerts)
             Toggle("Elevator outages", isOn: $widget.selection.elevatorAlerts)
-        } header: {
-            Text("Mentions")
-        } footer: {
-            Text("The app always lists them all.")
         }
     }
 }
 
-/// The walk to the station, in minutes: a widget's, or a favorite's.
-struct WalkStepper: View {
-    @Binding var minutes: Int
-
-    var body: some View {
-        Stepper(value: $minutes, in: Selection.walkRange) {
-            Text(minutes == 0 ? "Walk to the station: not set" : "Walk to the station: \(minutes) min")
-        }
-    }
-}
-
-/// A train, tapped to choose another, and any change of trains on the way:
-/// a widget's own, or its commuting hours'. `selection` is bound through their
-/// `setSelection`, which keeps or drops the change with a new train.
-private struct TripSections: View {
+/// A train row (tap to change) and its optional change of trains, for a widget or its
+/// commuting hours. Bind `selection` through `setSelection`, which keeps or drops the change.
+private struct TripSections<Leading: View>: View {
     @Binding var selection: Selection
     @Binding var change: Change?
-    /// Over the train; none for a widget's own.
-    var trainHeader: String? = nil
+    /// Where you're going without a change; with one, the change's destination is edited instead.
+    @Binding var destinationID: String?
+    /// A widget's Both directions, picked as the train's direction; nil where it isn't offered.
+    var bothWays: Binding<Bool>?
+    /// The card's header, e.g. when the other trip shows; nil for none.
+    var header: String?
+    /// Rows above Depart from and Arrive at, in the same card: the widget's name, or the other
+    /// trip's days and hours.
+    let leading: Leading
     @State private var choosingTrain = false
     @State private var choosingChange = false
-
-    private var quickMinutes: Binding<Int> {
-        Binding {
-            change?.quickMinutes ?? Change.defaultQuickMinutes
-        } set: {
-            change?.quickMinutes = $0
-        }
-    }
+    /// Which of the change's `stops` the change picker edits; nil to add one.
+    @State private var editingStop: Int?
+    @State private var choosingDestination = false
 
     private var walkMinutes: Binding<Int> {
         Binding {
@@ -308,92 +455,256 @@ private struct TripSections: View {
         }
     }
 
+    init(selection: Binding<Selection>, change: Binding<Change?>, destinationID: Binding<String?>,
+         bothWays: Binding<Bool>? = nil, header: String? = nil, @ViewBuilder leading: () -> Leading) {
+        _selection = selection
+        _change = change
+        _destinationID = destinationID
+        self.bothWays = bothWays
+        self.header = header
+        self.leading = leading()
+    }
+
+    /// `leading`, then where you start and where you're going, side by side, then the change,
+    /// all in one card.
     var body: some View {
         Section {
-            Button {
-                choosingTrain = true
-            } label: {
-                TrainChoiceRow(selection: selection)
+            leading
+            HStack(alignment: .top, spacing: 12) {
+                departButton
+                Divider()
+                arriveButton
             }
-            .buttonStyle(.plain)
-            .accessibilityHint("Choose another station, line or direction")
-            // On the row, not the section: a section passes its modifiers to
-            // each row, header and footer, and the extra sheets knock this one out
-            .sheet(isPresented: $choosingTrain) {
-                TrainPicker(selection: $selection)
-            }
+            .padding(.vertical, 4)
+            changeRows
         } header: {
-            if let trainHeader { Text(trainHeader) }
+            if let header { Text(header) }
         }
-        changeSection
+        if let change {
+            suggestionsSection(change)
+        }
+    }
+
+    private var departButton: some View {
+        Button {
+            choosingTrain = true
+        } label: {
+            EndpointCell(title: "Depart from", routes: selection.routes, name: selection.station?.name,
+                         detail: bothWays?.wrappedValue == true ? "Both ways" : selection.heading,
+                         placeholder: "Choose a train")
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint("Choose another station, line or direction")
+        // On the button, not the Section: a Section applies modifiers to each row, header
+        // and footer, and the duplicate sheets break this one
+        .sheet(isPresented: $choosingTrain) {
+            TrainPicker(selection: $selection, bothWays: bothWays)
+        }
+    }
+
+    private var arriveButton: some View {
+        let station = destination.wrappedValue.flatMap(StationDirectory.station(id:))
+        return Button {
+            choosingDestination = true
+        } label: {
+            EndpointCell(title: "Arrive at", routes: [], name: station?.name, detail: nil,
+                         placeholder: "Add a destination")
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint(change == nil ? "Choose where you're going, to show when you'd get there"
+                                         : "Choose where you're going, to time each way there")
+        .sheet(isPresented: $choosingDestination) {
+            DestinationPicker(selection: selection, change: change, destinationID: destination)
+        }
+    }
+}
+
+/// Half of the Depart from and Arrive at row: its label, then the station (or a placeholder to
+/// tap) with any line bullets and a caption.
+private struct EndpointCell: View {
+    let title: String
+    let routes: [String]
+    let name: String?
+    let detail: String?
+    let placeholder: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            if let name {
+                Text(name)
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.8)
+                // The lines' bullets, then which way: (R) Manhattan
+                if !routes.isEmpty || detail != nil {
+                    HStack(spacing: 6) {
+                        if !routes.isEmpty {
+                            LineBullets(routes: routes, size: 18)
+                        }
+                        if let detail {
+                            Text(detail)
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+                    }
+                }
+            } else {
+                Text(placeholder)
+                    .font(.headline)
+                    .foregroundStyle(.tint)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .contentShape(Rectangle())
     }
 }
 
 extension TripSections {
-    /// Where the train is left for another, and how short a wait the large
-    /// widget highlights; or a button to add one.
-    @ViewBuilder fileprivate var changeSection: some View {
-        Section {
-            // One row, with or without a change, so the sheet stays on it
-            // when Done adds the change
+    /// The change's stations, each a row to edit or swipe away, the walk between platforms if
+    /// any is on another, then an Add button. Rows of the Depart from and Arrive at card.
+    @ViewBuilder fileprivate var changeRows: some View {
+        let stops = change?.stops ?? []
+        let parts = change?.smartChanges(for: selection) ?? []
+        ForEach(Array(stops.enumerated()), id: \.offset) { index, stop in
             Button {
+                editingStop = index
                 choosingChange = true
             } label: {
-                if let change {
-                    ChangeRow(change: change, selection: selection)
-                } else {
-                    Label("Add a Change", systemImage: "arrow.triangle.swap")
-                        .foregroundStyle(.tint)
-                }
+                ChangeRow(change: stop, selection: selection,
+                          lines: stops.count > 1 ? parts.first { $0.change == stop }?.lines : nil,
+                          isAlternative: index > 0)
             }
             .buttonStyle(.plain)
-            .accessibilityHint(change == nil ? "" : "Choose another station or lines to change to")
-            .sheet(isPresented: $choosingChange) {
-                ChangePicker(selection: selection, change: $change)
+            .accessibilityHint("Choose another station or lines to change to")
+        }
+        .onDelete { offsets in
+            remove(at: offsets)
+        }
+        if let change, parts.contains(where: { !$0.change.isAllAcross(from: selection.only($0.lines)) }) {
+            Stepper(value: walkMinutes, in: 1...15) {
+                Text("Walk between platforms: \(change.walkMinutes) min")
             }
-            if let change {
-                Stepper(value: quickMinutes, in: 0...15) {
-                    Text("Quick change: up to \(change.quickMinutes) min")
-                }
-                if !change.isAllAcross(from: selection) {
-                    Stepper(value: walkMinutes, in: 1...15) {
-                        Text("Walk between platforms: \(change.walkMinutes) min")
+        }
+        // Always here, so the sheet stays attached when Done adds the first change
+        Button {
+            editingStop = nil
+            choosingChange = true
+        } label: {
+            // "Or": another station to change at instead, not a second change along the way
+            Label(change == nil ? "Add a Change" : "Or Change At",
+                  systemImage: change == nil ? "arrow.triangle.swap" : "plus.circle.fill")
+                .foregroundStyle(.tint)
+        }
+        .buttonStyle(.plain)
+        .sheet(isPresented: $choosingChange) {
+            ChangePicker(selection: selection, change: pickedStop)
+        }
+    }
+
+    /// Stations next to the change's where a useful line is across the platform, each with a
+    /// button to add it.
+    @ViewBuilder private func suggestionsSection(_ change: Change) -> some View {
+        let suggestions = change.suggestions(for: selection)
+        if !suggestions.isEmpty {
+            Section {
+                ForEach(suggestions, id: \.change.stationID) { suggestion in
+                    Button {
+                        add(suggestion.change)
+                    } label: {
+                        SuggestionRow(suggestion: suggestion)
                     }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Adds this change")
                 }
-                Button("Remove Change", role: .destructive) {
-                    self.change = nil
+            } header: {
+                Text("Also worth trying")
+            } footer: {
+                if let destination = change.destination {
+                    Text("Stops next to your changes where a line to \(destination.name) is across the platform.")
+                } else {
+                    Text("Stops next to your changes where a line you'd walk to is across the platform.")
                 }
-            }
-        } header: {
-            Text("Then change")
-        } footer: {
-            if let change, let name = change.station?.name {
-                Text("The Transfers widget pairs each \(Lines.list(selection.routes)) with the first \(Lines.list(change.routes, joinedBy: "or")) it can catch at \(name), and highlights waits this short.")
-            } else {
-                Text("Change trains on the way, say from a local to an express. The Transfers widget pairs each train with the first one it can catch there.")
             }
         }
     }
+
+    /// Removes the change's `stops` at `offsets`, and with none left the change, keeping where
+    /// you're going as the widget's own destination again.
+    private func remove(at offsets: IndexSet) {
+        guard let change else { return }
+        var stops = change.stops
+        stops.remove(atOffsets: offsets)
+        if stops.isEmpty {
+            destinationID = change.destinationID
+            self.change = nil
+        } else {
+            self.change = Change(stops: stops)
+        }
+    }
+
+    /// Adds `stop` to the change, joining it to one already at its station.
+    private func add(_ stop: Change) {
+        guard var stops = change?.stops else { return }
+        if let index = stops.firstIndex(where: { $0.stationID == stop.stationID && $0.direction == stop.direction }) {
+            stops[index].routes += stop.routes.filter { !stops[index].routes.contains($0) }
+        } else {
+            stops.append(stop)
+        }
+        change = Change(stops: stops)
+    }
+
+    /// The change's destination, or without a change, the widget's own.
+    private var destination: Binding<String?> {
+        Binding {
+            change == nil ? destinationID : change?.destinationID
+        } set: {
+            if change == nil { destinationID = $0 } else { change?.destinationID = $0 }
+        }
+    }
+
+    /// The stop `editingStop` for `ChangePicker`, or nil to add one. A picked station already
+    /// among the stops replaces it. A change starts without a destination, so a first one takes
+    /// the widget's: with a change, Arrive at edits the change's destination instead.
+    private var pickedStop: Binding<Change?> {
+        Binding {
+            guard let editingStop, let stops = change?.stops, stops.indices.contains(editingStop) else { return nil }
+            return stops[editingStop]
+        } set: {
+            guard var picked = $0 else { return }
+            guard let change else {
+                if picked.destinationID == nil { picked.destinationID = destinationID }
+                self.change = picked
+                return
+            }
+            var stops = change.stops
+            let index = editingStop.flatMap { stops.indices.contains($0) ? $0 : nil }
+                ?? stops.firstIndex { $0.stationID == picked.stationID }
+            if let index { stops[index] = picked } else { stops.append(picked) }
+            // One stop per station
+            let kept = index ?? stops.count - 1
+            stops = stops.enumerated().filter { $0.offset == kept || $0.element.stationID != picked.stationID }.map(\.element)
+            // The stops share the first's walk and destination
+            var joined = Change(stops: stops)
+            joined?.walkMinutes = change.walkMinutes
+            joined?.quickMinutes = change.quickMinutes
+            joined?.destinationID = change.destinationID
+            self.change = joined
+        }
+    }
+
 }
 
-/// A widget's commuting hours: the times of day, and the days, it shows
-/// another train instead, with any change of its own, say the train home in
-/// the evening.
+/// Times and days when a widget shows another train (with its own change), e.g. the
+/// train home in the evening.
 private struct CommuteSection: View {
     @Binding var widget: SavedWidget
 
-    private var isOn: Binding<Bool> {
-        Binding {
-            widget.commute != nil
-        } set: { on in
-            // Starts out as the widget's own train, with its walking time and
-            // change, for you to choose another
-            widget.commute = on ? CommutingHours(selection: widget.selection, change: widget.change) : nil
-        }
-    }
-
-    /// The commuting hours, while there are any; the last ones if they're
-    /// turned off while still on screen.
+    /// Falls back to `commute` if removed while still on screen.
     private func hours(_ commute: CommutingHours) -> Binding<CommutingHours> {
         Binding {
             widget.commute ?? commute
@@ -402,8 +713,7 @@ private struct CommuteSection: View {
         }
     }
 
-    /// The train in these hours, which keeps or drops their change with it in
-    /// the one change to the widget.
+    /// Goes through `setSelection`, which keeps or drops the change in the same update.
     private func train(_ hours: Binding<CommutingHours>) -> Binding<Selection> {
         Binding {
             hours.wrappedValue.selection
@@ -412,50 +722,91 @@ private struct CommuteSection: View {
         }
     }
 
-    /// The minutes after midnight as a time of day today, for a time picker.
+    /// Minutes after midnight as a `Date` today.
+    private static func date(_ minutes: Int) -> Date {
+        Calendar.current.date(bySettingHour: minutes / 60, minute: minutes % 60, second: 0, of: .now) ?? .now
+    }
+
+    /// Minutes after midnight as a `Date` today, for a time picker.
     private func time(_ minutes: Binding<Int>) -> Binding<Date> {
         Binding {
-            let value = minutes.wrappedValue
-            return Calendar.current.date(bySettingHour: value / 60, minute: value % 60, second: 0, of: .now) ?? .now
+            Self.date(minutes.wrappedValue)
         } set: { date in
             let components = Calendar.current.dateComponents([.hour, .minute], from: date)
             minutes.wrappedValue = (components.hour ?? 0) * 60 + (components.minute ?? 0)
         }
     }
 
-    var body: some View {
-        Section {
-            Toggle("Switch at certain times", isOn: isOn)
-            if let commute = widget.commute {
-                let hours = hours(commute)
-                DatePicker("From", selection: time(hours.start), displayedComponents: .hourAndMinute)
-                DatePicker("Until", selection: time(hours.end), displayedComponents: .hourAndMinute)
-                WeekdayPicker(weekdays: hours.weekdays)
-            }
-        } header: {
-            Text("Commuting hours")
-        } footer: {
-            if widget.commute == nil {
-                Text("Show another train at certain times, say your train home in the evening.")
-            } else {
-                Text("During these hours the widget shows the train below instead, with the alerts this one mentions.")
-            }
+    /// When the other trip shows, as its card's header: "Weekdays, 4:00 PM–6:00 PM".
+    private static func summary(_ hours: CommutingHours) -> String {
+        let calendar = Calendar.current
+        let days: String
+        switch hours.weekdays {
+        case Set(1...7): days = "Every day"
+        case [2, 3, 4, 5, 6]: days = "Weekdays"
+        case [1, 7]: days = "Weekends"
+        case []: days = "No days"
+        default:
+            // In the locale's order, as the day buttons are
+            let first = calendar.firstWeekday
+            let ordered = (0..<7).map { (first - 1 + $0) % 7 + 1 }.filter(hours.weekdays.contains)
+            days = ordered.map { calendar.shortWeekdaySymbols[$0 - 1] }.formatted(.list(type: .and))
         }
+        let from = date(hours.start).formatted(date: .omitted, time: .shortened)
+        let until = date(hours.end).formatted(date: .omitted, time: .shortened)
+        return "\(days), \(from)–\(until)"
+    }
+
+    var body: some View {
         if let commute = widget.commute {
             let hours = hours(commute)
-            TripSections(selection: train(hours), change: hours.change, trainHeader: "During commuting hours")
+            TripSections(selection: train(hours), change: hours.change, destinationID: hours.destinationID,
+                         header: Self.summary(hours.wrappedValue)) {
+                WeekdayPicker(weekdays: hours.weekdays)
+                    // Line the divider below up with the others
+                    .alignmentGuide(.listRowSeparatorLeading) { $0[.leading] }
+                    .swipeActions { removeButton }
+                // From and until on one row
+                HStack {
+                    Text("From")
+                    DatePicker("From", selection: time(hours.start), displayedComponents: .hourAndMinute)
+                        .labelsHidden()
+                    Spacer()
+                    Text("Until")
+                    DatePicker("Until", selection: time(hours.end), displayedComponents: .hourAndMinute)
+                        .labelsHidden()
+                }
+                .swipeActions { removeButton }
+            }
+        } else {
             Section {
-                WalkStepper(minutes: hours.selection.walkMinutes)
+                Button {
+                    // Starts as a copy of the widget's train and change
+                    widget.commute = CommutingHours(selection: widget.selection, change: widget.change)
+                } label: {
+                    Label("Show Another Trip at Set Times", systemImage: "clock.arrow.2.circlepath")
+                        .foregroundStyle(.tint)
+                }
+                .buttonStyle(.plain)
+            } footer: {
+                Text("E.g. the train home in the evening")
             }
         }
     }
+
+    /// Swiping the days or hours removes the other trip, as swiping a change removes it.
+    private var removeButton: some View {
+        Button("Remove", role: .destructive) { widget.commute = nil }
+    }
 }
 
-/// The days of the week, in the phone's order, each tapped on or off.
+/// Weekday toggles, in the locale's order.
 private struct WeekdayPicker: View {
     @Binding var weekdays: Set<Int>
+    /// Each day's circle, growing with its letter.
+    @ScaledMetric(relativeTo: .subheadline) private var size: CGFloat = 22
 
-    /// `Calendar` weekdays from the first day of the week.
+    /// `Calendar` weekday numbers starting from `firstWeekday`.
     private var days: [Int] {
         let first = Calendar.current.firstWeekday
         return (0..<7).map { (first - 1 + $0) % 7 + 1 }
@@ -470,11 +821,12 @@ private struct WeekdayPicker: View {
                 } label: {
                     Text(Calendar.current.veryShortWeekdaySymbols[day - 1])
                         .font(.subheadline.weight(.semibold))
-                        .frame(width: 34, height: 34)
-                        .foregroundStyle(isOn ? Color.white : Color.primary)
-                        .background(Circle().fill(isOn ? Color.accentColor : Color.secondary.opacity(0.15)))
+                        .frame(width: size, height: size)
                 }
-                .buttonStyle(.plain)
+                // Glass, tinted when on, as the system's own toggle buttons are
+                .buttonStyle(.glass(isOn ? .regular.tint(.accentColor) : .regular))
+                .buttonBorderShape(.circle)
+                .foregroundStyle(isOn ? Color.white : Color.primary)
                 .accessibilityLabel(Calendar.current.weekdaySymbols[day - 1])
                 .accessibilityAddTraits(isOn ? .isSelected : [])
                 if day != days.last { Spacer(minLength: 0) }
@@ -484,15 +836,26 @@ private struct WeekdayPicker: View {
     }
 }
 
-/// A widget's change: the lines changed to, where, which way and how.
+/// A widget's change: lines, station, direction and how (across or walk).
 private struct ChangeRow: View {
     let change: Change
     let selection: Selection
+    /// Those of your train's lines it's for, to say so when not all; nil for all of them.
+    var lines: [String]? = nil
+    /// After the first, so it reads as a choice between changes rather than a second one.
+    var isAlternative = false
 
     private var subtitle: String {
-        let heading = change.heading(for: selection)
-        let how = change.isAllAcross(from: selection) ? "across the platform" : "\(change.walkMinutes) min walk"
+        let from = lines.map(selection.only) ?? selection
+        let heading = change.heading(for: from)
+        let how = change.isAllAcross(from: from) ? "across the platform" : "\(change.walkMinutes) min walk"
         return "\(Lines.list(change.routes, joinedBy: "or")) \(heading) · \(how)"
+    }
+
+    /// "From the Q", when it's for only some of your lines.
+    private var fromLines: String? {
+        guard let lines, lines.count < selection.routes.count else { return nil }
+        return "From the \(Lines.list(lines, joinedBy: "or"))"
     }
 
     var body: some View {
@@ -500,10 +863,19 @@ private struct ChangeRow: View {
             LineBullets(routes: change.routes, size: 36)
                 .frame(width: 46)
             VStack(alignment: .leading, spacing: 2) {
+                // Labelled like Depart from and Arrive at, as it shares their card
+                Text(isAlternative ? "Or change at" : "Then change at")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
                 Text(change.station?.name ?? "Choose a station").font(.headline).foregroundStyle(.primary)
                 Text(subtitle)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+                if let fromLines {
+                    Text(fromLines)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
             Spacer()
             Image(systemName: "chevron.right")
@@ -515,10 +887,43 @@ private struct ChangeRow: View {
     }
 }
 
-/// A widget's train, or the train page's; tapping it chooses another, in three steps.
+/// A station worth adding to the change: its lines, where it is next to the change, and a button.
+private struct SuggestionRow: View {
+    let suggestion: ChangeSuggestion
+
+    /// "Across the platform, a stop after Atlantic Av".
+    private var detail: String {
+        let besides = suggestion.besides.station?.name.mainStationName ?? "your change"
+        return "Across the platform, a stop \(suggestion.sooner ? "before" : "after") \(besides)"
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            LineBullets(routes: suggestion.change.routes, size: 28)
+                .frame(width: 46)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(Lines.list(suggestion.change.routes, joinedBy: "or")) at \(suggestion.change.station?.name ?? "")")
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                Text(detail)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Image(systemName: "plus.circle.fill")
+                .font(.title2)
+                .foregroundStyle(.tint)
+                .accessibilityHidden(true)
+        }
+        .padding(.vertical, 2)
+        .contentShape(Rectangle())
+    }
+}
+
+/// The train on a widget or train page; tapping it opens the picker.
 struct TrainChoiceRow: View {
     let selection: Selection
-    /// In place of the station's name, where it has none.
+    /// Shown when there's no station.
     var placeholder = "Choose a train"
 
     var body: some View {
@@ -543,9 +948,27 @@ struct TrainChoiceRow: View {
     }
 }
 
+#Preview("Edit Widget") {
+    let store = WidgetStore()
+    NavigationStack {
+        WidgetEditor(id: store.saved.widgets[0].id)
+    }
+    .environment(store)
+    .environment(SettingsStore())
+}
+
+#Preview("Large Transfers") {
+    // The R from Prospect Av, changing at Atlantic Av-Barclays Ctr to the D or N
+    var widget = SavedWidget(selection: .fallback)
+    widget.change = TrainEntry.transferPreview().change
+    return Form {
+        WidgetHeader(widget: widget, look: .constant(.largeTransfers))
+    }
+    .environment(SettingsStore())
+}
+
 #Preview {
     WidgetsView()
         .environment(WidgetStore())
-        .environment(FavoritesStore())
         .environment(SettingsStore())
 }

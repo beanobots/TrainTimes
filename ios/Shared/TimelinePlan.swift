@@ -1,25 +1,28 @@
 import Foundation
 
-/// How the Next train and Transfers widgets plan their timelines, apart from
-/// fetching the times and drawing them (RTrainWidget.swift's `Provider`), so
-/// the push server's tests can check it, as nothing in the app can.
+/// Timeline planning for the Next train and Transfers widgets, separate from fetching and drawing
+/// (RTrainWidget.swift's `Provider`) so the push server's tests can check it.
 enum TimelinePlan {
-    /// How many of the trains to catch get entries of their own.
+    /// How many trains to catch get their own entries.
     static let trainsAhead = 10
-    /// How long after the times were fetched the maps go by where the feed
-    /// said the trains were; after that, by when they're due at each stop.
+    /// How long after fetching the maps use the feed's train positions; after that, due times.
     static let positionLife: TimeInterval = 60
-    /// How old saved times can be for a widget to redraw with them rather
-    /// than fetch its own.
+    /// Max age of saved times a widget redraws with instead of fetching.
     static let reuseWindow: TimeInterval = 30
+    /// As `reuseWindow`, for a trip just started on Transit Directions: the times fetched as its
+    /// journeys showed, which its card's tap drew at once, so the board matches what that drew.
+    static let quickTripReuseWindow: TimeInterval = 5 * 60
+    /// On a first draw with no saved times, how long to wait for other lines' trains, alerts and
+    /// outages after the widget's own times arrive; the rest come at the next reload.
+    static let firstDrawWait: TimeInterval = 1
+    /// As `firstDrawWait`, with saved times: longer, as nothing waits to draw, but not as long
+    /// as a slow feed takes, as the widget extension draws one widget at a time.
+    static let extrasWait: TimeInterval = 5
 
-    /// When the entries after the one for `now` come: as the time to leave for
-    /// each of the next `trainsAhead` of `toCatch` (soonest first) passes, and
-    /// the last moment to leave for it, as a train held at the platform can
-    /// still be caught until it leaves; so the widget moves on to the next
-    /// train without going back to the network. With `everyMinute`, for the
-    /// medium and large widgets' minutes to go and maps, also a minute apart,
-    /// up to the last time to leave or for an hour. Soonest first, all after `now`.
+    /// Entry dates after `now`, sorted: each of the next `trainsAhead` trains' leave time and last
+    /// leave time (a held train can be caught until it leaves), so the widget moves on without
+    /// fetching. With `everyMinute` (medium/large widgets' minutes and maps), also every minute
+    /// until the last leave time, at most an hour.
     static func dates(after now: Date, toCatch: [Arrival], selection: Selection, everyMinute: Bool) -> [Date] {
         let trains = toCatch.prefix(trainsAhead)
         let leaveTimes = trains.map(selection.leaveTime(for:))
@@ -35,19 +38,14 @@ enum TimelinePlan {
         return dates.filter { $0 > now }.sorted()
     }
 
-    /// After the last entry's date, the widget knows of no train of `toCatch` to show.
+    /// When the widget runs out of trains in `toCatch` to show.
     static func runsOut(_ toCatch: [Arrival], selection: Selection) -> Date? {
         toCatch.prefix(trainsAhead).map(selection.lastLeaveTime(for:)).max()
     }
 
-    /// `trains`, fetched at `fetched`, as the entry at `date` shows them: those
-    /// still to catch. Only the maps show a train's stops, and only the next
-    /// train's; the timeline holds many entries, in the widget's little memory,
-    /// so no other train keeps them. With `keepsStops`, as on the medium and
-    /// large widgets, the next one keeps them with the map off too, as their
-    /// map button swaps to them before the widget reloads. After a minute,
-    /// where the feed said each train was goes, and the maps go by when it's
-    /// due at each stop.
+    /// The catchable `trains` for the entry at `date`. Stops are stripped to save the widget's
+    /// limited memory, except the next train's with `keepsStops` (medium/large widgets, whose map
+    /// button shows them before a reload). Positions are dropped after `positionLife`.
     static func trains(_ trains: [Arrival], at date: Date, selection: Selection, fetched: Date,
                        keepsStops: Bool) -> [Arrival] {
         let positionStale = !fetched.isWithin(positionLife, before: date)
@@ -59,8 +57,7 @@ enum TimelinePlan {
         }
     }
 
-    /// The same for the connections of a widget with a change: only the
-    /// first's trains keep their stops, and only with `keepsStops`.
+    /// As `trains(...)`, for a widget with a change.
     static func connections(_ connections: [Connection], at date: Date, selection: Selection, fetched: Date,
                             keepsStops: Bool) -> [Connection] {
         let positionStale = !fetched.isWithin(positionLife, before: date)
@@ -80,33 +77,44 @@ enum TimelinePlan {
         }
     }
 
-    /// When the widget reloads: `reloadInterval` after its times were
-    /// `fetched`, as they may be ones another widget fetched a while ago.
-    /// Without new ones, it goes by when the try for them `failed` (nil for
-    /// now), so a tap that redraws the widget after doesn't put the next try
-    /// off: 2 minutes after it, or showing `old` ones instead, fetched then,
-    /// as long after as they were old, up to `reloadInterval`, as the MTA can
-    /// be out of reach for a whole ride underground, and a widget's reloads
-    /// are budgeted by the day. Sooner if its entries run out of trains first,
-    /// rather than say there are none, or as commuting hours start or end
-    /// (`switches`), for the other train; and never within a minute. Times
-    /// fetched after `now`, before the clock was set back, are old; a try
-    /// that failed then is taken to have failed now.
+    /// For when the MTA can't be reached: the saved `trains` still to catch, then the
+    /// timetable's after the last of them (theirs is the better guess until then); just the
+    /// timetable's if none is.
+    static func filling(_ trains: [Arrival], from timetable: [Arrival], selection: Selection, now: Date) -> [Arrival] {
+        let saved = selection.catchable(trains, now: now)
+        guard let last = saved.map(\.time).max() else { return timetable }
+        return saved + timetable.filter { $0.time > last }
+    }
+
+    /// As `filling(_:from:selection:now:)`, for a widget with a change, by the trains that get there.
+    static func filling(_ connections: [Connection], from timetable: [Connection], selection: Selection,
+                        now: Date) -> [Connection] {
+        let saved = selection.catchable(connections, now: now)
+        guard let last = saved.map(\.first.time).max() else { return timetable }
+        return saved + timetable.filter { $0.first.time > last }
+    }
+
+    /// When to reload: `reloadInterval` after `fetched` (which may be another widget's older
+    /// fetch). Without new times, timed from the `failed` attempt (nil for now) so a later redraw
+    /// doesn't postpone it: 2 minutes later, or when showing `old` times, as long as they were old,
+    /// capped at `reloadInterval` (the MTA can be unreachable for a whole ride underground, and
+    /// reloads are budgeted daily). Sooner if entries run out of trains (`runsOut`) or commuting
+    /// hours switch (`switches`); immediately if not `complete` (see `firstDrawWait`); never
+    /// within a minute. Times or failures after `now` (clock set back) count as now.
     static func reload(now: Date, fetched: Date?, old: Date? = nil, failed: Date? = nil, runsOut: Date?,
-                       switches: Date?) -> Date {
+                       switches: Date?, complete: Bool = true) -> Date {
         let tried = min(failed ?? now, now)
         let retry = old.map { min(reloadInterval(at: tried), max(2 * 60, tried.timeIntervalSince($0))) } ?? 2 * 60
         var reload = fetched.map { $0 > now ? now : $0.addingTimeInterval(reloadInterval(at: now)) }
             ?? tried.addingTimeInterval(retry)
         if let runsOut { reload = min(reload, runsOut) }
         if let switches { reload = min(reload, switches) }
+        if !complete { reload = now }
         return max(reload, now.addingTimeInterval(60))
     }
 
-    /// How long to wait for new times: 5 minutes, about as often as iOS
-    /// reloads a widget, from 6 am to 11 pm in New York; 15 overnight. A
-    /// widget's reloads are budgeted by the day, so fewer at night leaves
-    /// more for the day.
+    /// 5 minutes (about iOS's widget reload rate) from 6 am to 11 pm New York time; 15 overnight
+    /// to save the daily reload budget for daytime.
     static func reloadInterval(at date: Date) -> TimeInterval {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "America/New_York") ?? .current
@@ -114,17 +122,20 @@ enum TimelinePlan {
         return (6..<23).contains(hour) ? 5 * 60 : 15 * 60
     }
 
-    /// Whether a widget redraws with times saved at `saved` rather than
-    /// fetching its own: ones fetched in the last 30 seconds, by another
-    /// widget or the countdown; or, after a tap on the map or walk button or
-    /// the alert banner in the last 30 seconds (`toggled`), which changes only
-    /// how the widget looks, ones of any age while any of their trains is
-    /// still to catch. Never ones from before the widget's ↻ (`refreshed`).
-    /// Times after `now`, saved before the clock was set back, are old.
-    static func reuses(saved: Date, refreshed: Date?, toggled: Date?, anyToCatch: () -> Bool, now: Date) -> Bool {
+    /// Whether to redraw with times saved at `saved` instead of fetching: if saved within
+    /// `reuseWindow` (by another widget or the countdown), or of any age with a train still to
+    /// catch after a recent toggle tap (`toggled`; it only changes the look), or when another
+    /// widget for the train had it reload to show the times it had just saved (`synced` soon
+    /// after `saved`), however late iOS gets to it, up to a `reloadInterval` after: fetching
+    /// instead would have it show others, and have that widget reload in turn. Never if older
+    /// than the last ↻ (`refreshed`). Times after `now` (clock set back) are old.
+    static func reuses(saved: Date, refreshed: Date?, toggled: Date?, synced: Date? = nil, anyToCatch: () -> Bool,
+                       now: Date) -> Bool {
         guard saved > refreshed ?? .distantPast else { return false }
         if saved.isWithin(reuseWindow, before: now) { return true }
         let tapped = toggled?.isWithin(reuseWindow, before: now) ?? false
-        return tapped && anyToCatch()
+        let sharing = synced.map { saved.isWithin(reuseWindow, before: $0) && $0.isWithin(reloadInterval(at: now), before: now) }
+            ?? false
+        return (tapped || sharing) && anyToCatch()
     }
 }

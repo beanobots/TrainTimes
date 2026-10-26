@@ -41,8 +41,20 @@ final class FakePusher: Pusher, @unchecked Sendable {
         }
     }
 
+    private var widgetTokens: [String] = []
+    /// What widget reloads return.
+    var widgetResult: PushResult = .sent
+
+    func sendWidgetReload(token: String, environment: PushEnvironment) async -> PushResult {
+        lock.withLock {
+            widgetTokens.append(token)
+            return widgetResult
+        }
+    }
+
     func shutdown() async {}
     var pushes: [Push] { lock.withLock { sent } }
+    var widgetReloads: [String] { lock.withLock { widgetTokens } }
     var maxInFlight: Int { lock.withLock { peak } }
 }
 
@@ -116,6 +128,154 @@ func testRegistration(token: String = sampleToken, owner: String = "key", starte
         await poller.pass(at: now.addingTimeInterval(7 * 60))
         #expect(pusher.pushes.count == 2)
         #expect(pusher.pushes.last?.state.trip == "c")
+    }
+
+    @Test func pushesTheNextTrainAsTheTrainIsDue() async throws {
+        let store = try Store(directory: nil)
+        try await registered(store)
+        let pusher = FakePusher()
+        let poller = poller(store, pusher)
+        await poller.pass(at: now)
+        // b, then c (an N) and d
+        #expect(await poller.nextDue(after: now) == now.addingTimeInterval(6 * 60))
+        #expect(await poller.pushDue(at: now.addingTimeInterval(5 * 60)).updates == 0)
+        #expect(pusher.pushes.count == 1)
+
+        let stats = await poller.pushDue(at: now.addingTimeInterval(6 * 60))
+        #expect(stats.updates == 1)
+        #expect(pusher.pushes.count == 2)
+        let moved = try #require(pusher.pushes.last)
+        #expect(moved.event == .update)
+        #expect(moved.priority == 10)
+        #expect(moved.state.train == now.addingTimeInterval(9 * 60))
+        #expect(moved.state.route == "N")
+        #expect(moved.state.following == [now.addingTimeInterval(15 * 60)])
+        #expect(moved.staleDate == moved.state.train)
+        #expect(await store.registration(for: sampleToken)?.lastState == moved.state)
+        // Then d, and after that nothing to move on to until the next pass
+        #expect(await poller.nextDue(after: now.addingTimeInterval(6 * 60)) == now.addingTimeInterval(9 * 60))
+        await poller.pushDue(at: now.addingTimeInterval(9 * 60))
+        #expect(pusher.pushes.last?.state.train == now.addingTimeInterval(15 * 60))
+        #expect(await poller.nextDue(after: now.addingTimeInterval(9 * 60)) == nil)
+    }
+
+    @Test func keepsTwoTrainsAfterTheOneDueFromTheLastPassesLaterOnes() async throws {
+        let store = try Store(directory: nil)
+        try await registered(store)
+        let pusher = FakePusher()
+        var board = fixtureBoard()
+        board.trains += [arrival(20, trip: "e", route: "W"), arrival(24, trip: "f"), arrival(30, trip: "g"),
+                         arrival(36, trip: "h")]
+        let poller = poller(store, pusher, board: board)
+        await poller.pass(at: now)
+        // b, then c and d; e, f and g kept for later
+        #expect(pusher.pushes.last?.state.following == [9, 15].map { now.addingTimeInterval($0 * 60) })
+        #expect(await store.registration(for: sampleToken)?.later.map(\.trip) == ["e", "f", "g"])
+
+        await poller.pushDue(at: now.addingTimeInterval(6 * 60))
+        var moved = try #require(pusher.pushes.last?.state)
+        #expect(moved.train == now.addingTimeInterval(9 * 60))
+        #expect(moved.following == [15, 20].map { now.addingTimeInterval($0 * 60) })
+        #expect(moved.followingRoutes == ["R", "W"])
+        // Due again before the next pass: still two after it
+        await poller.pushDue(at: now.addingTimeInterval(9 * 60))
+        moved = try #require(pusher.pushes.last?.state)
+        #expect(moved.train == now.addingTimeInterval(15 * 60))
+        #expect(moved.following == [20, 24].map { now.addingTimeInterval($0 * 60) })
+        #expect(moved.followingRoutes == ["W", "R"])
+    }
+
+    // MARK: Widgets
+
+    let widgetToken = String(repeating: "cd34", count: 16)
+
+    func registeredWithWidgets(_ store: Store, token: String = sampleToken) async throws {
+        var registration = testRegistration(token: token)
+        registration.widgetToken = widgetToken
+        _ = try await store.upsert(registration, maxTotal: 10, maxPerOwner: 5)
+    }
+
+    @Test func reloadsThePhonesWidgetsWhenTheCountdownsTimesChange() async throws {
+        let store = try Store(directory: nil)
+        try await registeredWithWidgets(store)
+        let pusher = FakePusher()
+        let poller = poller(store, pusher)
+
+        var stats = await poller.pass(at: now)
+        #expect(pusher.widgetReloads == [widgetToken])
+        #expect(stats.widgetReloads == 1)
+        #expect(stats.description.contains("1 widget reloads"))
+
+        // A refresh with the same times: the widgets already show them
+        stats = await poller.pass(at: now.addingTimeInterval(300))
+        #expect(pusher.pushes.count == 2)
+        #expect(pusher.widgetReloads.count == 1)
+
+        // Moving on to the next train between passes: they show that too
+        await poller.pushDue(at: now.addingTimeInterval(6 * 60))
+        #expect(pusher.widgetReloads.count == 2)
+    }
+
+    @Test func reloadsOnlyWhenTheTimesMovedAtAll() throws {
+        let last = state(train: 4)
+        var new = last
+        new.updated = now.addingTimeInterval(30)
+        new.notice = "Delays"
+        #expect(!ActivityState.changesWidgets(new, from: last))
+        // However little: they'd otherwise show other times from the Lock Screen
+        new.train = last.train.addingTimeInterval(5)
+        #expect(ActivityState.changesWidgets(new, from: last))
+        #expect(ActivityState.changesWidgets(last, from: nil))
+    }
+
+    @Test func reloadsEachPhoneOnceAndNotWithoutAToken() async throws {
+        let store = try Store(directory: nil)
+        try await registeredWithWidgets(store)
+        try await registeredWithWidgets(store, token: String(repeating: "ef56", count: 16))
+        _ = try await store.upsert(testRegistration(token: String(repeating: "0123", count: 16)), maxTotal: 10, maxPerOwner: 5)
+        let pusher = FakePusher()
+        await poller(store, pusher).pass(at: now)
+        #expect(pusher.pushes.count == 3)
+        #expect(pusher.widgetReloads == [widgetToken])
+    }
+
+    @Test func forgetsAWidgetTokenAPNsDoesntKnowButKeepsPushing() async throws {
+        let store = try Store(directory: nil)
+        try await registeredWithWidgets(store)
+        let pusher = FakePusher()
+        pusher.widgetResult = .invalidToken("410 Unregistered")
+        let poller = poller(store, pusher)
+        await poller.pass(at: now)
+        let registration = try #require(await store.registration(for: sampleToken))
+        #expect(registration.widgetToken == nil)
+        #expect(registration.lastState != nil)
+
+        await poller.pushDue(at: now.addingTimeInterval(6 * 60))
+        #expect(pusher.pushes.count == 2)
+        #expect(pusher.widgetReloads.count == 1)
+    }
+
+    @Test func registeringAgainForgetsTheLaterTrains() async throws {
+        let store = try Store(directory: nil)
+        try await registered(store)
+        var board = fixtureBoard()
+        board.trains += [arrival(20, trip: "e")]
+        await poller(store, FakePusher(), board: board).pass(at: now)
+        #expect(await store.registration(for: sampleToken)?.later.count == 1)
+        try await registered(store)
+        #expect(await store.registration(for: sampleToken)?.later.isEmpty == true)
+    }
+
+    @Test func doesntMoveOnOnceItsTimeIsUp() async throws {
+        let store = try Store(directory: nil)
+        // Ends 5 minutes from now, before b is due
+        try await registered(store, started: now.addingTimeInterval(-ActivityState.lifetime + 5 * 60))
+        let pusher = FakePusher()
+        let poller = poller(store, pusher)
+        await poller.pass(at: now)
+        #expect(await poller.nextDue(after: now) == nil)
+        #expect(await poller.pushDue(at: now.addingTimeInterval(6 * 60)).updates == 0)
+        #expect(pusher.pushes.count == 1)
     }
 
     @Test func registeredAgainMidwayTheFirstPushMovesOnFromTheAppsState() async throws {
@@ -196,7 +356,7 @@ func testRegistration(token: String = sampleToken, owner: String = "key", starte
         var board = fixtureBoard()
         board.trains = []
         let stats = await poller(store, pusher, board: board).pass(at: now)
-        #expect(stats == Poller.Stats(registrations: 1))
+        #expect(stats == Poller.Stats(registrations: 1, keys: 0))
         #expect(pusher.pushes.isEmpty)
         #expect(await store.registration(for: sampleToken)?.lastState == nil)
     }
@@ -293,7 +453,7 @@ func testRegistration(token: String = sampleToken, owner: String = "key", starte
         #expect(await store.count == 1)
     }
 
-    @Test func endsAfterEightHours() async throws {
+    @Test func endsOnceItsTimeIsUp() async throws {
         let store = try Store(directory: nil)
         try await registered(store, started: now.addingTimeInterval(-ActivityState.lifetime + 10))
         let pusher = FakePusher()
@@ -338,7 +498,7 @@ func testRegistration(token: String = sampleToken, owner: String = "key", starte
         #expect(failing.pushes.filter { $0.event == .end }.count == 12)
         #expect(stats.ended == 12)
         #expect(stats.failed == 15)
-        #expect("\(stats)" == "15 countdowns, 0 updates, 0 refreshes, 12 ended, 0 dropped, 15 failed, 0 without feeds")
+        #expect("\(stats)" == "15 countdowns, 0 updates, 0 refreshes, 12 ended, 0 dropped, 15 failed, 0 without feeds, 0 widget reloads, 0 attest keys")
         #expect(await store.count == 3)
     }
 
@@ -447,6 +607,29 @@ func testRegistration(token: String = sampleToken, owner: String = "key", starte
         #expect(await store.count == 1)
     }
 
+    @Test(.timeLimit(.minutes(1))) func wakesBetweenPassesToPushADueTrain() async throws {
+        let store = try Store(directory: nil)
+        let started = Date.now
+        var registration = testRegistration(started: started)
+        var last = state(train: 0)
+        last.train = started.addingTimeInterval(0.2)
+        last.following = [started.addingTimeInterval(60)]
+        last.followingRoutes = ["R"]
+        registration.lastState = last
+        registration.lastPush = started
+        _ = try await store.upsert(registration, maxTotal: 10, maxPerOwner: 5)
+        let pusher = FakePusher()
+        // No feeds, so passes push nothing; the next would be an hour away
+        let poller = Poller(store: store, pusher: pusher, interval: 60 * 60) { _, _ in [:] }
+        let run = Task { try await poller.run() }
+        while pusher.pushes.isEmpty { try await Task.sleep(for: .milliseconds(5)) }
+        run.cancel()
+        try await run.value
+        #expect(pusher.pushes.count == 1)
+        #expect(pusher.pushes.first?.state.train == started.addingTimeInterval(60))
+        #expect(pusher.pushes.first?.timestamp == last.train)
+    }
+
     @Test(.timeLimit(.minutes(1))) func stopsWaitingWhenShutDownGracefully() async throws {
         let store = try Store(directory: nil)
         _ = try await store.upsert(testRegistration(started: .now), maxTotal: 10, maxPerOwner: 5)
@@ -468,5 +651,40 @@ func testRegistration(token: String = sampleToken, owner: String = "key", starte
         await #expect(throws: Concurrency.TimedOut.self) {
             try await Concurrency.withTimeout(0.05) { try await Task.sleep(for: .seconds(10)) }
         }
+    }
+}
+
+/// A Transfers widget's countdown, which mentions its changed-to lines' alerts too.
+@Suite struct TransferCountdownTests {
+    /// Your R's board (a service change), and a delay on the D you change to at Atlantic Av.
+    private func poller(_ store: Store, _ pusher: FakePusher) -> Poller {
+        Poller(store: store, pusher: pusher, interval: 30) { selections, _ in
+            Dictionary(selections.map { selection in
+                var board = fixtureBoard()
+                if selection != prospect {
+                    board.alerts = [ServiceAlert(id: "d", kind: .delays, type: "Delays", header: "D trains are delayed",
+                                                 details: "", period: nil)]
+                }
+                return (selection, board)
+            }, uniquingKeysWith: { a, _ in a })
+        }
+    }
+
+    @Test func mentionsTheChangedToLinesAlerts() async throws {
+        let store = try Store(directory: nil)
+        var registration = testRegistration()
+        registration.change = Change(stationID: "R31", routes: ["D", "N"])
+        _ = try await store.upsert(registration, maxTotal: 10, maxPerOwner: 5)
+        let pusher = FakePusher()
+        await poller(store, pusher).pass(at: now)
+        #expect(pusher.pushes.last?.state.notice == "Delays")
+    }
+
+    @Test func withoutAChangeOnlyItsOwn() async throws {
+        let store = try Store(directory: nil)
+        _ = try await store.upsert(testRegistration(), maxTotal: 10, maxPerOwner: 5)
+        let pusher = FakePusher()
+        await poller(store, pusher).pass(at: now)
+        #expect(pusher.pushes.last?.state.notice == "Service change")
     }
 }

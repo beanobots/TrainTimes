@@ -1,18 +1,17 @@
 import AppIntents
 import SwiftUI
 
-/// "When's my next train in Train Times?"
+/// "When's my next train in Leeway?"
 struct NextTrainIntent: AppIntent {
     static let title: LocalizedStringResource = "When's my next train?"
     static let description = IntentDescription("Says when your next train comes, and when to leave if you've set a walking time.")
 
-    @Parameter(title: "Train", description: "Leave empty for the train your default widget shows.")
+    @Parameter(title: "Train", description: "Leave empty for your default train, set in Settings.")
     var stop: StopEntity?
 
     func perform() async throws -> some IntentResult & ProvidesDialog & ShowsSnippetView {
         let now = Date.now
-        // In the default widget's commuting hours, their train, as the widget shows
-        let app = Selection.defaultWidgetTrain(at: now)
+        let app = Selection.defaultTrain
         let selection = stop?.selection(basedOn: app) ?? app
         let settings = SharedStore.loadSettings()
         // Only the alerts and outages Siri can mention
@@ -22,30 +21,30 @@ struct NextTrainIntent: AppIntent {
         }
         let trains = selection.catchable(board.trains, now: now)
         let notice = board.notice(for: selection, settings: settings)
-        // The board's trains are all still to come, so any not caught are too soon to reach
+        // All board trains are upcoming, so any not catchable are too soon to reach
         let sentence = Spoken.nextTrain(selection: selection, trains: trains, unreachable: trains.count < board.trains.count,
                                         notice: notice, now: now)
         return .result(dialog: "\(sentence)", view: NextTrainSnippet(selection: selection, trains: Array(trains.prefix(3))))
     }
 }
 
-/// "Start my train countdown in Train Times": the Lock Screen and Dynamic Island countdown.
+/// "Start my train countdown in Leeway": Lock Screen and Dynamic Island countdown.
 struct StartCountdownIntent: LiveActivityIntent {
     static let title: LocalizedStringResource = "Start my train countdown"
     static let description = IntentDescription("Counts down to your next train on the Lock Screen and in the Dynamic Island.")
 
-    @Parameter(title: "Train", description: "Leave empty for the train your default widget shows.")
+    @Parameter(title: "Train", description: "Leave empty for your default train, set in Settings.")
     var stop: StopEntity?
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        let app = Selection.defaultWidgetTrain()
+        let app = Selection.defaultTrain
         let selection = stop?.selection(basedOn: app) ?? app
         let train = try await TrainActivityController.start(for: selection)
         return .result(dialog: "Counting down to the \(Spoken.clock(train)) train.")
     }
 }
 
-/// What Siri listens for, with nothing to set up. iOS needs the app's name in each phrase.
+/// Siri phrases, no setup needed. iOS requires the app's name in each phrase.
 struct TrainShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(
@@ -71,7 +70,7 @@ struct TrainShortcuts: AppShortcutsProvider {
     }
 }
 
-/// The card Siri and Shortcuts show with the answer.
+/// The answer card Siri and Shortcuts show.
 struct NextTrainSnippet: View {
     let selection: Selection
     let trains: [Arrival]

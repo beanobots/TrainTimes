@@ -36,6 +36,60 @@ import Testing
         #expect(FileManager.default.fileExists(atPath: file + "-wal"))
     }
 
+    @Test func keepsATransfersChangeOverARestart() async throws {
+        let dir = try directory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        var registration = testRegistration()
+        registration.change = Change(stationID: "R31", routes: ["D", "N"])
+        _ = try await Store(directory: dir).upsert(registration, maxTotal: 10, maxPerOwner: 5)
+        #expect(try await Store(directory: dir).registration(for: sampleToken)?.change == registration.change)
+    }
+
+    @Test func keepsTheWidgetTokenUntilAPNsForgetsIt() async throws {
+        let dir = try directory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        var registration = testRegistration()
+        registration.widgetToken = String(repeating: "cd34", count: 16)
+        let store = try Store(directory: dir)
+        _ = try await store.upsert(registration, maxTotal: 10, maxPerOwner: 5)
+        #expect(try await Store(directory: dir).registration(for: sampleToken)?.widgetToken == registration.widgetToken)
+
+        // An outcome for an older registration of the token is ignored
+        try await store.apply([.dropWidgetToken(token: sampleToken, revision: UUID())])
+        #expect(await store.registration(for: sampleToken)?.widgetToken != nil)
+        try await store.apply([.dropWidgetToken(token: sampleToken, revision: registration.revision)])
+        #expect(await store.registration(for: sampleToken)?.widgetToken == nil)
+        // The countdown itself stays
+        let reloaded = try #require(try await Store(directory: dir).registration(for: sampleToken))
+        #expect(reloaded.widgetToken == nil)
+    }
+
+    @Test func addsTheChangeColumnToAVersion1Database() async throws {
+        let dir = try directory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        // As the first schema left it, with a registration in it
+        let old = try SQLite(path: dir.appendingPathComponent(Store.fileName).path)
+        try old.execute("""
+            CREATE TABLE registrations (token TEXT PRIMARY KEY, owner TEXT NOT NULL, environment TEXT NOT NULL,
+                selection BLOB NOT NULL, trip TEXT NOT NULL, started REAL NOT NULL, alert_kinds BLOB,
+                revision TEXT NOT NULL, last_state BLOB, last_push REAL);
+            CREATE TABLE attest_keys (key_id TEXT PRIMARY KEY, public_key BLOB NOT NULL, counter INTEGER NOT NULL,
+                environment TEXT NOT NULL, created REAL NOT NULL, last_used REAL NOT NULL);
+            PRAGMA user_version = 1;
+            """)
+        try old.query("INSERT INTO registrations VALUES (?, 'key', 'production', ?, 'b', 0, NULL, ?, NULL, NULL)", [
+            .text(sampleToken), .blob(try JSONEncoder().encode(prospect)), .text(UUID().uuidString),
+        ])
+
+        let store = try Store(directory: dir)
+        let kept = try #require(await store.registration(for: sampleToken))
+        #expect(kept.change == nil)
+        var registration = kept
+        registration.change = Change(stationID: "R31", routes: ["D", "N"])
+        _ = try await store.upsert(registration, maxTotal: 10, maxPerOwner: 5)
+        #expect(try await Store(directory: dir).registration(for: sampleToken)?.change == registration.change)
+    }
+
     @Test func migratesRegistrationsJSONOnce() async throws {
         let dir = try directory()
         defer { try? FileManager.default.removeItem(at: dir) }

@@ -24,30 +24,6 @@ import Testing
         #expect(Selection(stationID: "XYZ", routes: ["R"], direction: .north).validatedIfKnown() == nil)
     }
 
-    @Test func aLinkKeepsTheLinesStillThere() throws {
-        let url = try #require(URL(string: "traintimes://train?station=R34&lines=R,7&direction=N&elevators=1"))
-        let train = try #require(Selection(trainURL: url))
-        #expect(train.routes == ["R"])
-        #expect(train.elevatorAlerts)
-        let none = try #require(URL(string: "traintimes://alerts?station=R34&lines=7&direction=N&elevators=0"))
-        #expect(Selection(alertsURL: none) == nil)
-    }
-
-    // MARK: Walking time
-
-    /// A link to the Transfers page from Prospect Av, changing at Atlantic Av,
-    /// with this walk.
-    func transferLink(walk: String) throws -> URL {
-        try #require(URL(string: "traintimes://transfer?station=R34&lines=R&direction=N&elevators=0&walk=\(walk)&change=R31&to=D,N"))
-    }
-
-    @Test func aLinksWalkIsOneTheAppCouldSet() throws {
-        #expect(try Selection.transfer(from: transferLink(walk: "12"))?.selection.walkMinutes == 12)
-        #expect(try Selection.transfer(from: transferLink(walk: "999999999999999999"))?.selection.walkMinutes == 60)
-        #expect(try Selection.transfer(from: transferLink(walk: "-5"))?.selection.walkMinutes == 0)
-        #expect(try Selection.transfer(from: transferLink(walk: "far"))?.selection.walkMinutes == 0)
-    }
-
     @Test func anyWalkWorksOutWhenToLeave() {
         let train = arrival(5, trip: "a")
         var far = prospect

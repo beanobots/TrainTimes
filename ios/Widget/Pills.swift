@@ -12,7 +12,11 @@ struct Pill: View {
     var fills = false
     /// On the medium widget's larger layout.
     var large = false
+    /// A circle rather than a wider pill, for a lesser button (Transit Directions' ✕).
+    var round = false
     @Environment(\.widgetRenderingMode) private var renderingMode
+
+    private var height: CGFloat { large ? BoardStyle.large.buttonHeight : BoardStyle.compact.buttonHeight }
 
     var body: some View {
         Image(systemName: symbol)
@@ -20,7 +24,7 @@ struct Pill: View {
             // Held to what fits its face, which stays the height of the row of buttons
             .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
             .foregroundStyle(iconColor)
-            .frame(width: fills ? nil : 44, height: large ? BoardStyle.large.buttonHeight : BoardStyle.compact.buttonHeight)
+            .frame(width: fills ? nil : round ? height : 44, height: height)
             .frame(maxWidth: fills ? .infinity : nil)
             .background {
                 if let lit, renderingMode == .fullColor {
@@ -43,41 +47,21 @@ struct Pill: View {
     }
 }
 
-/// How every button answers a tap, ↻, map and walk alike: lit in its line's
-/// colour the moment it's tapped, then, as the widget (or the countdown)
-/// redraws with what the tap asked for, faded back over half a second.
-private let flashFade = Animation.easeOut(duration: 0.5)
-
-/// A button that flashes when tapped. It's a toggle that's always off: iOS
-/// turns a toggle on the moment it's tapped, before its intent has run, so it
-/// lights at once; the redraw after the intent draws it off again.
+/// Lit in its line's colour while on. A toggle because iOS flips it on tap, before the intent
+/// runs, so it responds instantly; the redraw then shows the real state. ↻ is always off (lit
+/// until new times arrive); walk is on while the countdown runs.
 private struct FlashButton<Intent: AppIntent>: View {
     let symbol: String
     let intent: Intent
     let route: String
     let label: String
+    var isOn = false
     var fills = false
     var large = false
 
     var body: some View {
-        Toggle(isOn: false, intent: intent) {
-            Text(label)
-        }
-        .toggleStyle(FlashToggleStyle(symbol: symbol, route: route, label: label, fills: fills, large: large))
-    }
-}
-
-private struct FlashToggleStyle: ToggleStyle {
-    let symbol: String
-    let route: String
-    let label: String
-    let fills: Bool
-    let large: Bool
-
-    func makeBody(configuration: Configuration) -> some View {
-        Button { configuration.isOn.toggle() } label: {
-            Pill(symbol: symbol, lit: configuration.isOn ? LineStyle.of(route) : nil, fills: fills, large: large)
-                .animation(configuration.isOn ? nil : flashFade, value: configuration.isOn)
+        Toggle(isOn: isOn, intent: intent) {
+            Pill(symbol: symbol, lit: isOn ? LineStyle.of(route) : nil, fills: fills, large: large)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(label)
@@ -86,17 +70,15 @@ private struct FlashToggleStyle: ToggleStyle {
 
 /// ↻: new times for the widgets and the countdown.
 struct RefreshButton: View {
-    /// The line whose colour it flashes in; Trains near you's has none, so grey.
+    /// The line whose colour it flashes; empty (grey) on Trains near you.
     var route = ""
     var fills = false
-    /// Unless the countdown is its own, a widget refreshes itself, which is
-    /// quicker than going through the app.
+    /// Refresh the widget itself (quicker than via the app), unless the countdown is its own.
     var widgetsOnly = false
     var large = false
     /// The `TrainEntry.widgetID` of the widget it's on; nil on the countdown.
     var widgetID: String? = nil
-    /// The last try for new times couldn't reach the MTA, so the times shown
-    /// are old: it shows no signal in place of ↻.
+    /// The last refresh couldn't reach the MTA, so times are stale; shows no-signal instead of ↻.
     var failed = false
 
     var body: some View {
@@ -112,40 +94,79 @@ struct RefreshButton: View {
     }
 }
 
-/// Starts or stops the countdown.
-struct WalkButton<Intent: AppIntent>: View {
-    let intent: Intent
-    let route: String
-    /// Whether the countdown is running, so a tap stops it.
-    let running: Bool
-    var fills = false
+/// Transit Directions' ✕, beside walk while it shows a trip or Favorite Stop: back to its Quick
+/// Trip and Favorite Stop buttons. With them to draw (`endTripFace`), a toggle, as iOS flips one
+/// on tap before the intent runs: the tap shows them at once, over the whole widget, until the
+/// redraw shows the real ones. With `closing`, Next train's or Transfers' open board's ✕
+/// instead: back to its card (`CloseBoardIntent`), which `endTripFace` then is.
+struct EndTripButton: View {
     var large = false
+    /// The `TrainEntry.widgetID` of the open board it closes; nil on Transit Directions.
+    var closing: String? = nil
+    @Environment(\.stillControls) private var still
+    @Environment(\.endTripFace) private var face
 
     var body: some View {
-        FlashButton(symbol: "figure.walk", intent: intent, route: route,
-                    label: running ? "Stop the countdown" : "I'm on my way", fills: fills, large: large)
+        if let closing {
+            button(CloseBoardIntent(widgetID: closing), label: "Hide the times")
+        } else {
+            button(EndSharedTripIntent(), label: "Back to Favorite Stop, Nearby and Trip")
+        }
+    }
+
+    @ViewBuilder private func button<Intent: AppIntent>(_ intent: Intent, label: String) -> some View {
+        if still {
+            Pill(symbol: "xmark", large: large, round: true)
+        } else if let face {
+            let style = SwapToggleStyle { isOn in
+                Pill(symbol: "xmark", large: large, round: true)
+                    .overlay(alignment: .topLeading) {
+                        if isOn.wrappedValue {
+                            GeometryReader { proxy in
+                                // From the ✕ back to the widget's top left
+                                let origin = proxy.frame(in: .named(EndTripFace.space)).origin
+                                face.view
+                                    .frame(width: face.size.width, height: face.size.height)
+                                    .background(Color.boardBackground)
+                                    .offset(x: -origin.x, y: -origin.y)
+                            }
+                            // Not crossfaded over the board
+                            .transition(.pressed)
+                        }
+                    }
+            }
+            Toggle(isOn: false, intent: intent) {
+                Text(label)
+            }
+            .toggleStyle(style)
+            .accessibilityLabel(label)
+            .accessibilityAddTraits(.isButton)
+        } else {
+            Button(intent: intent) {
+                Pill(symbol: "xmark", large: large, round: true)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(label)
+        }
     }
 }
 
-/// The medium and large widgets' switch between the later trains and the stops
-/// before yours (or, with a change, where the trains are). It's the one button
-/// in the map's toggle, which draws the times or the stops for its state, so
-/// they swap at once (see `SwapToggleStyle`). It flashes as the others do: lit
-/// while the toggle's state is ahead of the widget's, until the widget redraws.
-struct MapButton: View {
-    /// Whether the stops show: the state of the toggle it's in.
-    let isOn: Binding<Bool>
+/// Starts or stops the countdown; lit while it's running.
+struct WalkButton<Intent: AppIntent>: View {
+    let intent: Intent
     let route: String
-    /// Whether the widget hasn't yet redrawn since the tap.
-    var pending = false
+    /// The countdown is running, so a tap stops it.
+    let running: Bool
+    var fills = false
     var large = false
+    @Environment(\.stillControls) private var still
 
     var body: some View {
-        Button { isOn.wrappedValue.toggle() } label: {
-            Pill(symbol: "map", lit: pending ? LineStyle.of(route) : nil, fills: true, large: large)
-                .animation(pending ? nil : flashFade, value: pending)
+        if still {
+            Pill(symbol: "figure.walk", lit: running ? LineStyle.of(route) : nil, fills: fills, large: large)
+        } else {
+            FlashButton(symbol: "figure.walk", intent: intent, route: route,
+                        label: running ? "Stop the countdown" : "I'm on my way", isOn: running, fills: fills, large: large)
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(isOn.wrappedValue ? "Show times" : "Show where the train is")
     }
 }

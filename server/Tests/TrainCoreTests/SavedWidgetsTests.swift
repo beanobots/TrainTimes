@@ -21,7 +21,8 @@ import Testing
 
     @Test func widgetsSavedByOlderVersionsStillLoad() throws {
         // A change from before it had a way, commuting hours from before they
-        // had days, and a widget from before it had a name
+        // had days, a widget from before it had a name, and a default widget
+        // from before the default train moved to Settings
         let json = #"""
         {"widgets": [
             {"id": "5D1C8A0E-0F57-4E2B-9C3A-7B1E2D4F6A01", "name": "Home",
@@ -34,7 +35,6 @@ import Testing
         """#
         let saved = try JSONDecoder().decode(SavedWidgets.self, from: Data(json.utf8))
         #expect(saved.widgets.count == 2)
-        #expect(saved.defaultWidget.id == saved.widgets[1].id)
         let home = saved.widgets[0]
         #expect(home.change?.departureDirection(for: home.selection) == .north)
         #expect(home.commute?.weekdays == [2, 3, 4, 5, 6])
@@ -108,6 +108,39 @@ import Testing
         #expect(widget.shown(at: local(8)) == widget)
     }
 
+    // MARK: Destination without a change
+
+    @Test func aDestinationTimesNextTrainOnlyWithoutAChange() throws {
+        var widget = SavedWidget(selection: prospect, destinationID: "R17")
+        #expect(widget.directDestination?.name == "34 St-Herald Sq")
+        #expect(try JSONDecoder().decode(SavedWidget.self, from: JSONEncoder().encode(widget)) == widget)
+        // With a change, its own destination is used
+        widget.change = Change(stationID: "R31", routes: ["D", "N"])
+        #expect(widget.directDestination == nil)
+        // Kept for if the change is removed
+        widget.change = nil
+        #expect(widget.directDestination?.name == "34 St-Herald Sq")
+    }
+
+    @Test func aDestinationIsKeptOnlyOnTheSameLinesAndDirection() {
+        var widget = SavedWidget(selection: prospect, destinationID: "R17")
+        widget.setSelection(Selection(stationID: "R33", routes: ["R"], direction: .north))
+        #expect(widget.destinationID == "R17")
+        widget.setSelection(Selection(stationID: "R33", routes: ["R"], direction: .south))
+        #expect(widget.destinationID == nil)
+        // Not one to start from
+        var there = SavedWidget(selection: prospect, destinationID: "R17")
+        there.setSelection(Selection(stationID: "R17", routes: ["R"], direction: .north))
+        #expect(there.destinationID == nil)
+    }
+
+    @Test func commutingHoursHaveTheirOwnDestination() {
+        var widget = SavedWidget(selection: prospect, destinationID: "R17")
+        widget.commute = CommutingHours(selection: Selection(stationID: "R17", routes: ["R"], direction: .south),
+                                        destinationID: "R34", start: 0, end: 24 * 60, weekdays: Set(1...7))
+        #expect(widget.shown(at: .now).directDestination?.name == "Prospect Av")
+    }
+
     // MARK: Ordering
 
     @Test func movingWidgets() {
@@ -117,10 +150,9 @@ import Testing
         #expect(saved.widgets.map(\.id) == [ids[1], ids[3], ids[0], ids[2]])
         saved.move(fromOffsets: IndexSet([3]), toOffset: 0)
         #expect(saved.widgets.map(\.id) == [ids[2], ids[1], ids[3], ids[0]])
-        // Deleting the default makes the first of the rest it; the last one stays
-        saved.makeDefault(ids[2])
+        // The last one stays
         saved.delete(ids[2])
-        #expect(saved.defaultWidget.id == ids[1])
+        #expect(saved.widgets.map(\.id) == [ids[1], ids[3], ids[0]])
         for id in ids { saved.delete(id) }
         #expect(saved.widgets.count == 1)
     }
@@ -128,13 +160,13 @@ import Testing
     // MARK: Commuting hours
 
     @Test func hoursOnTheirDays() {
-        // 7 to 10 on weekdays, to start with; 19 October 2026 is a Monday
+        // 4 to 6pm on weekdays, to start with; 19 October 2026 is a Monday
         let hours = CommutingHours(selection: prospect)
-        #expect(hours.isActive(at: date(2026, 10, 19, 7), calendar: calendar))
-        #expect(hours.isActive(at: date(2026, 10, 19, 9, 59), calendar: calendar))
-        #expect(!hours.isActive(at: date(2026, 10, 19, 10), calendar: calendar))
-        #expect(!hours.isActive(at: date(2026, 10, 19, 6, 59), calendar: calendar))
-        #expect(!hours.isActive(at: date(2026, 10, 18, 8), calendar: calendar))
+        #expect(hours.isActive(at: date(2026, 10, 19, 16), calendar: calendar))
+        #expect(hours.isActive(at: date(2026, 10, 19, 17, 59), calendar: calendar))
+        #expect(!hours.isActive(at: date(2026, 10, 19, 18), calendar: calendar))
+        #expect(!hours.isActive(at: date(2026, 10, 19, 15, 59), calendar: calendar))
+        #expect(!hours.isActive(at: date(2026, 10, 18, 17), calendar: calendar))
     }
 
     @Test func hoursPastMidnightBelongToTheDayTheyStart() {
@@ -163,10 +195,10 @@ import Testing
 
     @Test func theNextSwitch() {
         let hours = CommutingHours(selection: prospect)
-        #expect(hours.nextSwitch(after: date(2026, 10, 19, 6), calendar: calendar) == date(2026, 10, 19, 7))
-        #expect(hours.nextSwitch(after: date(2026, 10, 19, 8), calendar: calendar) == date(2026, 10, 19, 10))
-        // Friday evening, it's Monday morning
-        #expect(hours.nextSwitch(after: date(2026, 10, 23, 21), calendar: calendar) == date(2026, 10, 26, 7))
+        #expect(hours.nextSwitch(after: date(2026, 10, 19, 15), calendar: calendar) == date(2026, 10, 19, 16))
+        #expect(hours.nextSwitch(after: date(2026, 10, 19, 17), calendar: calendar) == date(2026, 10, 19, 18))
+        // Friday evening, it's Monday afternoon
+        #expect(hours.nextSwitch(after: date(2026, 10, 23, 21), calendar: calendar) == date(2026, 10, 26, 16))
         // Past midnight, the end the next day
         let night = CommutingHours(selection: prospect, start: 22 * 60, end: 2 * 60, weekdays: [6])
         #expect(night.nextSwitch(after: date(2026, 10, 23, 23), calendar: calendar) == date(2026, 10, 24, 2))
@@ -176,10 +208,10 @@ import Testing
         // The clocks went forward at 2:00 on Sunday 8 March 2026, and back at 2:00 on Sunday 1 November
         let everyDay = CommutingHours(selection: prospect, weekdays: Set(1...7))
         let spring = everyDay.nextSwitch(after: date(2026, 3, 7, 23), calendar: calendar)
-        #expect(spring == date(2026, 3, 8, 7))
-        #expect(spring.map { calendar.component(.hour, from: $0) } == 7)
+        #expect(spring == date(2026, 3, 8, 16))
+        #expect(spring.map { calendar.component(.hour, from: $0) } == 16)
         let autumn = everyDay.nextSwitch(after: date(2026, 10, 31, 23), calendar: calendar)
-        #expect(autumn.map { calendar.component(.hour, from: $0) } == 7)
+        #expect(autumn.map { calendar.component(.hour, from: $0) } == 16)
         #expect(autumn.map { calendar.component(.day, from: $0) } == 1)
     }
 }

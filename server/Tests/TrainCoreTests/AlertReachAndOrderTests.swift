@@ -181,3 +181,63 @@ private func mtaAlertEntries(_ entities: [[String: Any]]) throws -> [AlertsFeed.
         #expect(alert.brief?.routes == ["SI"])
     }
 }
+
+/// `StationDirectory.direction(toward:on:from:)` for a borough: toward the end of the line in it.
+@Suite struct BoroughBoundTests {
+    @Test func towardTheEndInTheBorough() {
+        // From Canal St the J has Manhattan both ways, but only Broad St's end is in it
+        #expect(StationDirectory.direction(toward: "Manhattan", on: "J", from: ["M20"]) == .south)
+        #expect(StationDirectory.direction(toward: "Queens", on: "J", from: ["M20"]) == .north)
+        // From 3 Av the L has Manhattan both ways, but only 8 Av's end is in it
+        #expect(StationDirectory.direction(toward: "Manhattan", on: "L", from: ["L05"]) == .north)
+    }
+
+    @Test func neitherEndFallsBackToItsStations() {
+        // The R ends in Queens and Brooklyn: from Court St, Manhattan is all north
+        #expect(StationDirectory.direction(toward: "Manhattan", on: "R", from: ["R28"]) == .north)
+        // From Times Sq-42 St, it's both ways
+        #expect(StationDirectory.direction(toward: "Manhattan", on: "R", from: ["R16"]) == nil)
+    }
+
+    @Test func aManhattanBoundDelayTheOtherWayIsLeftOut() throws {
+        let entries = try mtaAlertEntries([
+            mtaAlertEntity("late", type: "Delays", header: "Manhattan-bound [J] trains are delayed.", informed: [("J", nil, nil)]),
+        ])
+        let towardQueens = Selection(stationID: "M20", routes: ["J"], direction: .north)
+        let towardBroadSt = Selection(stationID: "M20", routes: ["J"], direction: .south)
+        #expect(AlertsFeed.alerts(for: towardQueens, in: entries, now: now).isEmpty)
+        #expect(AlertsFeed.alerts(for: towardBroadSt, in: entries, now: now).count == 1)
+    }
+}
+
+/// A transfer's alerts: the train's, and the changed-to lines' at the change, going their way.
+@Suite struct TransferAlertTests {
+    /// The R from Prospect Av toward Manhattan, changing to the D or N at Atlantic Av-Barclays Ctr.
+    private let prospect = Selection(stationID: "R34", routes: ["R"], direction: .north)
+    private let atlantic = Change(stationID: "R31", routes: ["D", "N"])
+
+    private func alerts(_ entities: [[String: Any]]) throws -> [ServiceAlert] {
+        AlertsFeed.alerts(for: [prospect] + atlantic.departureSelections(for: prospect),
+                          in: try mtaAlertEntries(entities), now: now)
+    }
+
+    @Test func changedToLinesGoingTheirWay() throws {
+        let shown = try alerts([
+            mtaAlertEntity("d", type: "Delays", header: "Manhattan-bound [D] trains are delayed.", informed: [("D", nil, nil)]),
+            mtaAlertEntity("n", type: "Delays", header: "Coney Island-bound [N] trains are delayed.", informed: [("N", nil, nil)]),
+            mtaAlertEntity("f", type: "Delays", header: "[F] trains are delayed.", informed: [("F", nil, nil)]),
+        ])
+        #expect(shown.map(\.id) == ["d"])
+        #expect(shown.first?.brief?.routes == ["D"])
+    }
+
+    @Test func oneAlertForYoursAndTheirsOnceWithBoth() throws {
+        let shown = try alerts([
+            mtaAlertEntity("nr", type: "Delays", header: "[N][R] trains are running with delays in both directions.",
+                           informed: [("N", nil, nil), ("R", nil, nil)]),
+        ])
+        #expect(shown.count == 1)
+        // Your train's line first, then the one you change to
+        #expect(shown.first?.brief?.routes == ["R", "N"])
+    }
+}
