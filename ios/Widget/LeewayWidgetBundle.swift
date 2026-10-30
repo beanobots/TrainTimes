@@ -2,7 +2,7 @@ import SwiftUI
 import WidgetKit
 
 @main
-struct RTrainWidgetBundle: WidgetBundle {
+struct LeewayWidgetBundle: WidgetBundle {
     init() {
         // Alerts and outages shared with the app and kept a few minutes (`TrainService.sharedCache`)
         TrainService.sharedCache = SharedStore.FeedCache()
@@ -10,7 +10,7 @@ struct RTrainWidgetBundle: WidgetBundle {
 
     var body: some Widget {
         DirectionsWidget()
-        RTrainWidget()
+        LeewayWidget()
         TransfersWidget()
         NearbyWidget()
         TrainLiveActivity()

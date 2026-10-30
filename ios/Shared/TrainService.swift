@@ -49,6 +49,10 @@ struct Board: Sendable {
     /// With a destination and no change, when each of `trains` gets there, by trip; trains not
     /// predicted there are missing.
     var destinationTimes: [String: Date] = [:]
+    /// With a destination, every trip predicted there, by trip, as it gets there (its `approach`
+    /// the stops it has left on the way, with their times): trains already gone from your stop
+    /// too, for following the one you're on.
+    var destinationTrains: [String: Arrival] = [:]
     /// False if built without waiting for all other-line feeds, alerts or outages; see
     /// `TrainService.board`.
     var complete = true
@@ -252,6 +256,7 @@ enum TrainService {
                     board.destinationTimes[train.trip] = time
                 }
             }
+            board.destinationTrains = atDestination.compactMapValues { $0.min { $0.time < $1.time } }
         }
         return board
     }

@@ -167,12 +167,12 @@ Xcode.
 
 1. **Make the Xcode project.** Install [XcodeGen](https://github.com/yonaskolb/XcodeGen),
    then run `xcodegen generate` in `ios/`. Run it again after a pull that adds or
-   removes files, as `NextRTrain.xcodeproj` isn't stored in git.
+   removes files, as `Leeway.xcodeproj` isn't stored in git.
 2. **Set your team.** `DEVELOPMENT_TEAM` in `ios/project.yml` is the team builds
    are signed with; change it to yours and generate again. The app and widget
-   share the App Group `group.com.rtrainwidget.app` (`ios/Config/*.entitlements`).
-3. **Run it on your iPhone.** Open `ios/NextRTrain.xcodeproj`, pick your iPhone as
-   the destination and run the **NextRTrain** scheme. Turn on **Developer Mode**
+   share the App Group `group.dev.dctp.leeway` (`ios/Config/*.entitlements`).
+3. **Run it on your iPhone.** Open `ios/Leeway.xcodeproj`, pick your iPhone as
+   the destination and run the **Leeway** scheme. Turn on **Developer Mode**
    on the iPhone if it asks (Settings → Privacy & Security).
 4. **Choose your train.** Open **Leeway**, go to the **Widgets** tab, tap
    your widget, then tap its train. Search for your station (or show only one

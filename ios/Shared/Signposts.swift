@@ -3,7 +3,7 @@ import os
 /// Intervals for timing widget taps in Instruments (os_signpost, "Widget" category): a tap's
 /// intent, the reload after it, the fetch for times, and the first load of the station list.
 enum Signposts {
-    static let widget = OSSignposter(subsystem: "com.rtrainwidget.app", category: "Widget")
+    static let widget = OSSignposter(subsystem: "dev.dctp.leeway", category: "Widget")
 
     /// Times `work` as an interval named `name`.
     static func interval<T>(_ name: StaticString, _ work: () async throws -> T) async rethrows -> T {

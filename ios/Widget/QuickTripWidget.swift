@@ -16,7 +16,11 @@ struct DirectionsWidget: Widget {
         StaticConfiguration(kind: kind, provider: DirectionsProvider()) { entry in
             GeometryReader { proxy in
                 Group {
-                    if let bus = entry.busBoard {
+                    if let walk = entry.walk {
+                        WalkStageView(stage: walk, date: entry.date)
+                            .environment(\.endTripFace, EndTripFace(view: AnyView(QuickTripView(entry: entry.home, still: true)),
+                                                                    size: proxy.size))
+                    } else if let bus = entry.busBoard {
                         BusBoardView(entry: bus, date: entry.date)
                             .transition(.identity)
                             .environment(\.endTripFace, EndTripFace(view: AnyView(QuickTripView(entry: entry.home, still: true)),
@@ -70,6 +74,8 @@ struct DirectionsEntry: TimelineEntry {
     var buses: NearbyBusList? = nil
     /// A trip with a bus from New Trip (`SharedBusTrip`), drawn in place of everything else.
     var busBoard: BusBoardEntry? = nil
+    /// A walk from Go on its train or walking out (`WalkStage`), drawn in place of its trip's board.
+    var walk: WalkStage? = nil
 
     /// On `.nearbyLine`, shown straight from Nearby as the only station: the one within
     /// `DirectionsProvider.nearbyRange`, or the nearest when none is.
@@ -153,6 +159,9 @@ struct DirectionsProvider: TimelineProvider {
         if context.isPreview { return placeholder(in: context) }
         let now = Date.now
         let quickTrip = QuickTrip.load().shown(at: now)
+        if let walk = SharedStore.loadWalkStage(at: now) {
+            return DirectionsEntry(date: now, favorite: Self.favorite, walk: walk)
+        }
         if let shown = SharedStore.loadSharedBusTrip(at: now) {
             return DirectionsEntry(date: now, favorite: Self.favorite, busBoard: await BusBoardEntry.fetch(shown.trip, otherWay: shown.otherWay, now: now))
         }
@@ -168,6 +177,15 @@ struct DirectionsProvider: TimelineProvider {
     private func timeline(in context: Context, completion: @Sendable (Timeline<DirectionsEntry>) -> Void) async {
         let now = Date.now
         let quickTrip = QuickTrip.load().shown(at: now)
+        // A walk from Go on its train or walking out: redrawn as it's due where you get off; the
+        // app reloads it as the walk moves on, and once it's over
+        if let walk = SharedStore.loadWalkStage(at: now) {
+            let favorite = Self.favorite
+            let entries = walk.dates(from: now)
+                .map { DirectionsEntry(date: $0, favorite: favorite, walk: walk) }
+            completion(Timeline(entries: entries, policy: .after(walk.expires)))
+            return
+        }
         // A trip with a bus from New Trip: redrawn as each bus (or train) goes, reloaded for new
         // times every few minutes, then the buttons once it ends
         if let shown = SharedStore.loadSharedBusTrip(at: now) {
@@ -578,7 +596,7 @@ struct QuickTripView: View {
 
     /// How big Favorite Stop's line, Nearby's and Trip's circles are.
     private static let circleSize: CGFloat = 52
-    /// Between Nearby's and Trip's circles.
+    /// Between Nearby's and Trip's circles at least (`circlesSpacing`).
     private static let circleGap: CGFloat = 10
     /// Room to the right of Nearby's and Trip's circles, besides the margin.
     private static let circleTrailing: CGFloat = 8
@@ -590,6 +608,14 @@ struct QuickTripView: View {
         margins.trailing + Self.circleSize + Self.circleTrailing + margins.trailing
     }
 
+    /// Between Nearby's and Trip's circles: `circleGap`, plus half the room left beside Favorite
+    /// Stop's card, so they sit halfway between centred together and its top and bottom.
+    private var circlesSpacing: CGFloat {
+        guard let height = widgetSize?.height else { return Self.circleGap }
+        let card = height - margins.top - margins.bottom
+        return Self.circleGap + max(card - Self.circleSize * 2 - Self.circleGap, 0) / 2
+    }
+
     /// Favorite Stop's card, then Nearby's and Trip's circles one above the other, as drawn under
     /// the toggles and by a board's ✕.
     private var cards: some View {
@@ -598,7 +624,7 @@ struct QuickTripView: View {
                 .padding(.leading, margins.leading)
                 .padding(.top, margins.top)
                 .padding(.bottom, margins.bottom)
-            VStack(spacing: Self.circleGap) {
+            VStack(spacing: circlesSpacing) {
                 symbolBadge("location.fill", tint: HomeTint.nearby)
                 symbolBadge(QuickTripSymbol.name, tint: HomeTint.trip)
             }
@@ -1086,7 +1112,6 @@ struct QuickTripView: View {
         }
     }
 
-    /// ✕ back to the Favorite Stop, Nearby and Quick Trip buttons.
     /// A button for `intent`, or when `still` (a toggle's face) just its label. A face is there
     /// to be tapped before it shows, over the buttons, so its own buttons took taps meant for
     /// those under them: Nearby's direction cards, drawn on its face from a recent fix, took
@@ -1100,7 +1125,8 @@ struct QuickTripView: View {
         }
     }
 
-    /// Room for it only when `still`: a toggle's face can't hold buttons, and a ✕ drawn there
+    /// ✕ back to the Favorite Stop, Nearby and Quick Trip buttons. Room for it only when
+    /// `still`: a toggle's face can't hold buttons, and a ✕ drawn there
     /// would be over another toggle until the redraw, which a tap on it would flip.
     @ViewBuilder private var homeButton: some View {
         if still {

@@ -1,7 +1,7 @@
 import Foundation
 
 /// Timeline planning for the Next train and Transfers widgets, separate from fetching and drawing
-/// (RTrainWidget.swift's `Provider`) so the push server's tests can check it.
+/// (LeewayWidget.swift's `Provider`) so the push server's tests can check it.
 enum TimelinePlan {
     /// How many trains to catch get their own entries.
     static let trainsAhead = 10

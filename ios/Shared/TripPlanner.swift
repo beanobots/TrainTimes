@@ -5,14 +5,15 @@ import CoreLocation
 /// if no line goes straight there. Maps links don't say which lines the directions take.
 enum TripPlanner {
     /// A train and, if needed, a change, with the stations it was matched to.
-    struct Trip: Equatable {
+    struct Trip: Equatable, Sendable {
         var selection: Selection
         var change: Change?
         /// The station nearest the directions' end.
         var destination: Station
     }
 
-    /// Meters; stations further from either end aren't considered.
+    /// Meters; stations further from either end aren't considered, unless a plan's asked for
+    /// another walk (New Trip's Walk up to).
     static let walkRange: Double = 1_200
     /// Meters of walking a change is worth avoiding: a direct train from a station this much
     /// further away comes first.
@@ -24,17 +25,41 @@ enum TripPlanner {
     /// Trips from `start` to `end` leaving at `now`, to choose from, best first: by when they get
     /// there, with the downloaded timetable (`plan(from:to:at:timetable:)`); without one, by
     /// least walking (`byWalking(from:to:)`).
-    static func plan(from start: CLLocation, to end: CLLocation, at now: Date = .now) -> [Trip] {
+    static func plan(from start: CLLocation, to end: CLLocation, at now: Date = .now,
+                     walkRange: Double = walkRange) -> [Trip] {
         if let timetable = TimetableStore.load(now: now) {
-            return plan(from: start, to: end, at: now, timetable: timetable)
+            let planned = plan(from: start, to: end, at: now, timetable: timetable, walkRange: walkRange)
+            return withoutSlowerWalks(fromNearest(planned, to: start), from: start, to: end, at: now, timetable: timetable)
         }
-        return byWalking(from: start, to: end)
+        return fromNearest(byWalking(from: start, to: end, walkRange: walkRange), to: start)
+    }
+
+    /// `trips` (best first) without any whose lines all go the same way from a station nearer
+    /// `start` too, changing to the same lines if either changes: the R from the station on your
+    /// corner, not also from the next one along. One with more lines there stays: the D, N or R
+    /// from Atlantic Av-Barclays Ctr, with just the R at Union St.
+    static func fromNearest(_ trips: [Trip], to start: CLLocation) -> [Trip] {
+        func meters(_ trip: Trip) -> Double {
+            trip.selection.station.map { start.distance(from: CLLocation(latitude: $0.lat, longitude: $0.lon)) }
+                ?? .infinity
+        }
+        /// Whether `nearer` offers every line of `further`, the same way, and the same change.
+        func covers(_ nearer: Trip, _ further: Trip) -> Bool {
+            Set(nearer.change?.allRoutes ?? []) == Set(further.change?.allRoutes ?? [])
+                && further.selection.routes.allSatisfy { route in
+                    nearer.selection.routes.contains(route)
+                        && nearer.selection.direction(of: route) == further.selection.direction(of: route)
+                }
+        }
+        return trips.filter { trip in
+            !trips.contains { other in covers(other, trip) && meters(other) < meters(trip) }
+        }
     }
 
     /// Trips from `start` to `end`, best (least walking) first, to choose from: each train once,
     /// and each way to the end once, from the station nearest it. None if either end is too far
     /// from the subway, or walking there is as quick.
-    static func byWalking(from start: CLLocation, to end: CLLocation) -> [Trip] {
+    static func byWalking(from start: CLLocation, to end: CLLocation, walkRange: Double = walkRange) -> [Trip] {
         let origins = Nearby.stations(near: start, limit: 6).filter { $0.meters <= walkRange }
         let destinations = Nearby.stations(near: end, limit: 6).filter { $0.meters <= walkRange }
         var found: [(trip: Trip, cost: Double)] = []
@@ -155,6 +180,40 @@ enum TripPlanner {
                             destinationID: destination.id)
         guard let valid = change.validated(for: selection) else { return nil }
         return Trip(selection: selection, change: valid, destination: destination)
+    }
+
+    /// Whether `trip` rides backwards to meet its change: a line it changes to then calls at its
+    /// start, or where its own line gets to going the other way, before the end. From Prospect Av
+    /// for 34 St-Herald Sq, the R down to 36 St for a D up through Atlantic Av-Barclays Ctr, when
+    /// the R up gets there, to change to the same D. Maps apps suggest these.
+    static func ridesBack(_ trip: Trip) -> Bool {
+        guard let change = trip.change, let origin = trip.selection.station else { return false }
+        let here = Set(origin.platforms.map(\.id))
+        for route in trip.selection.routes {
+            let behind = Set(StationDirectory.stops(of: route, from: here, going: trip.selection.direction(of: route).opposite)
+                .compactMap { StationDirectory.station(id: $0)?.complex } + [origin.complex])
+            for stop in change.stops {
+                guard let station = stop.station else { continue }
+                let end = (stop.destination ?? trip.destination).complex
+                for onward in stop.routes {
+                    let boards = Set(StationDirectory.stations(inComplexOf: station)
+                        .flatMap { $0.platforms(serving: [onward]) }.map(\.id))
+                    let going = stop.departureDirection(for: trip.selection)
+                    // Branch by branch, as each gets to the end (or doesn't) on its own: the A from
+                    // Rockaway Blvd to Lefferts Blvd, then to the Rockaways
+                    let ahead = StationDirectory.branches(of: onward).compactMap { branch -> [String]? in
+                        guard let here = branch.firstIndex(where: boards.contains) else { return nil }
+                        let stops = going == .north ? Array(branch[..<here].reversed()) : Array(branch[(here + 1)...])
+                        return stops.compactMap { StationDirectory.station(id: $0)?.complex }
+                    }
+                    // Up to the end on those that get there; all of each if none does
+                    let toEnd = ahead.compactMap { complexes in complexes.firstIndex(of: end).map { complexes[..<$0] } }
+                    let checked = toEnd.isEmpty ? ahead.map { $0[...] } : toEnd
+                    if checked.contains(where: { $0.contains(where: behind.contains) }) { return true }
+                }
+            }
+        }
+        return false
     }
 
     /// Which way `route` goes from `origin` to one of `stations`, by its stops north to south on

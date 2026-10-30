@@ -7,7 +7,7 @@ struct APNSConfig: Sendable {
     var teamID: String
     var topic: String
 
-    static let defaultTopic = "com.rtrainwidget.app.push-type.liveactivity"
+    static let defaultTopic = "dev.dctp.leeway.push-type.liveactivity"
 
     /// The topic of widget reloads: the same app's, as `<bundle ID>.push-type.widgets`.
     var widgetTopic: String {
@@ -81,7 +81,7 @@ struct Config: Sendable {
     /// to the new one when newsyslog rotates it.
     var logFile: String?
 
-    static let defaultAppID = "XUU899AG4D.com.rtrainwidget.app"
+    static let defaultAppID = "XUU899AG4D.dev.dctp.leeway"
 
     struct Problem: Error, CustomStringConvertible {
         let description: String

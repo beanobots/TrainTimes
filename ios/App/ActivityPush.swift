@@ -14,7 +14,7 @@ import WidgetKit
 @MainActor
 enum ActivityPush {
     /// The background refresh, also in Info.plist's BGTaskSchedulerPermittedIdentifiers.
-    nonisolated static let refreshTaskID = "com.rtrainwidget.app.refresh"
+    nonisolated static let refreshTaskID = "dev.dctp.leeway.refresh"
 
     private static let log = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Leeway", category: "ActivityPush")
 

@@ -264,18 +264,7 @@ enum SubwayFeed {
                     return true
                 }
             case 2: // TripUpdate.stop_time_update
-                var stop = ""
-                var arrival: UInt64 = 0
-                var departure: UInt64 = 0
-                try reader.message { field in
-                    switch field {
-                    case 4: stop = try reader.string() // stop_id
-                    case 2: arrival = try eventTime(reader)
-                    case 3: departure = try eventTime(reader)
-                    default: return false
-                    }
-                    return true
-                }
+                let (stop, arrival, departure) = try stopTimeUpdate(reader)
                 let due = arrival != 0 ? arrival : departure
                 stops.append((stop, due == 0 ? nil : Date(timeIntervalSince1970: TimeInterval(due))))
             default:
@@ -316,18 +305,7 @@ enum SubwayFeed {
                     return true
                 }
             case 2: // TripUpdate.stop_time_update
-                var stop = ""
-                var arrival: UInt64 = 0
-                var departure: UInt64 = 0
-                try reader.message { field in
-                    switch field {
-                    case 4: stop = try reader.string()
-                    case 2: arrival = try eventTime(reader)
-                    case 3: departure = try eventTime(reader)
-                    default: return false
-                    }
-                    return true
-                }
+                let (stop, arrival, departure) = try stopTimeUpdate(reader)
                 lastStop = stop
                 // Without a time, it would be due in 1970
                 let due = arrival != 0 ? arrival : departure
@@ -358,6 +336,23 @@ enum SubwayFeed {
                 approach: doubled ? once(stops[...match.at]) : Array(stops[...match.at])
             )
         }
+    }
+
+    /// A StopTimeUpdate's stop id, and its arrival and departure times (`eventTime`; 0 for none).
+    private static func stopTimeUpdate(_ reader: ProtobufReader) throws -> (stop: String, arrival: UInt64, departure: UInt64) {
+        var stop = ""
+        var arrival: UInt64 = 0
+        var departure: UInt64 = 0
+        try reader.message { field in
+            switch field {
+            case 4: stop = try reader.string() // stop_id
+            case 2: arrival = try eventTime(reader)
+            case 3: departure = try eventTime(reader)
+            default: return false
+            }
+            return true
+        }
+        return (stop, arrival, departure)
     }
 
     /// `stops` with consecutive duplicates under another id (H19S, H04S) collapsed to the second,

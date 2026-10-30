@@ -9,7 +9,9 @@ enum Log {
 
     private static func write(_ level: String, _ message: String) {
         let line = "\(Date.now.formatted(.iso8601)) \(level)\(message)\n"
-        FileHandle.standardOutput.write(Data(line.utf8))
+        // Not `write(_:)`, which raises an Objective-C exception, ending the server, when the
+        // write fails (the disk full, say); a line that can't be written is lost
+        try? FileHandle.standardOutput.write(contentsOf: Data(line.utf8))
     }
 
     /// "in 4m30s", "1m05s ago": a train's time, for a log line.

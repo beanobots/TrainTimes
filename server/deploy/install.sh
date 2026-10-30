@@ -112,13 +112,20 @@ if grep -q '<string>[^<]*XXXX' "$PLIST"; then
     exit 0
 fi
 
+# Unloaded and loaded again, not kickstarted: launchd holds a loaded job to
+# the code hash of the program it was loaded with, so a kickstarted new build
+# fails to spawn (EX_CONFIG). Loading again also picks up changes to $PLIST.
 if launchctl print "system/$LABEL" >/dev/null 2>&1; then
-    step "Restarting the running daemon (launchctl kickstart -k)"
-    launchctl kickstart -k "system/$LABEL"
-else
-    step "Starting the daemon (launchctl bootstrap)"
-    launchctl bootstrap system "$PLIST"
+    step "Stopping the running daemon (launchctl bootout)"
+    launchctl bootout "system/$LABEL" || true
+    # bootout returns before the job's gone, and bootstrap fails until it is
+    for _ in {1..50}; do
+        launchctl print "system/$LABEL" >/dev/null 2>&1 || break
+        sleep 0.1
+    done
 fi
+step "Starting the daemon (launchctl bootstrap)"
+launchctl bootstrap system "$PLIST"
 
 if grep -q '<key>ATTEST_MODE</key>' "$PLIST" && grep -A1 '<key>ATTEST_MODE</key>' "$PLIST" | grep -q '>off<'; then
     echo "    Warning: ATTEST_MODE is off: anyone with API_SECRET can register. For development only."

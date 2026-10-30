@@ -9,6 +9,13 @@ actor TimetableCopy {
     private(set) var etag: String?
     private(set) var made: Date?
 
+    /// `data` and its `etag` read together, so a `set` between two reads can't pair one
+    /// timetable with another's ETag (which a phone would then keep until the next).
+    var current: (data: Data, etag: String)? {
+        guard let data, let etag else { return nil }
+        return (data, etag)
+    }
+
     func set(_ data: Data, made: Date) {
         self.data = data
         self.made = made

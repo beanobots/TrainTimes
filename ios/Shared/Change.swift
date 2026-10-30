@@ -426,9 +426,19 @@ struct Change: Codable, Hashable, Sendable {
         return platform.side(of: route, going: arriving) == platform.side(of: onward, going: leaving)
     }
 
-    /// Walk time from `arrival` to `departure`; zero across the platform.
+    /// Walk time from `arrival` to `departure`; zero across the platform, and the MTA's time for
+    /// the walk where it's longer (`walkMinutes(from:to:else:)`).
     func walk(from arrival: Arrival, to departure: Arrival) -> TimeInterval {
-        isAcross(from: arrival, to: departure) ? 0 : TimeInterval(walkMinutes * 60)
+        isAcross(from: arrival, to: departure) ? 0
+            : TimeInterval(Self.walkMinutes(from: arrival.stop, to: departure.stop, else: walkMinutes) * 60)
+    }
+
+    /// Minutes to walk from feed stop (or platform) `arrival` to `departure`: `minutes`, or the
+    /// MTA's time for the walk (`Platform.walks`) where that's longer, as at Atlantic Av-Barclays
+    /// Ctr from the D, N and R to the B and Q, the length of the station and its stairs.
+    static func walkMinutes(from arrival: String, to departure: String, else minutes: Int) -> Int {
+        let to = Direction(ofStop: departure) == nil ? departure : String(departure.dropLast())
+        return max(minutes, StationDirectory.platform(forStop: arrival)?.walks?[to] ?? 0)
     }
 
     /// `validatedStop(for:order:)` at each of `stops`, dropping those that aren't valid; nil if

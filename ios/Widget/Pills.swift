@@ -68,29 +68,15 @@ private struct FlashButton<Intent: AppIntent>: View {
     }
 }
 
-/// ↻: new times for the widgets and the countdown.
+/// ↻ on the countdown: new times for it and the widgets.
 struct RefreshButton: View {
-    /// The line whose colour it flashes; empty (grey) on Trains near you.
+    /// The line whose colour it flashes.
     var route = ""
     var fills = false
-    /// Refresh the widget itself (quicker than via the app), unless the countdown is its own.
-    var widgetsOnly = false
-    var large = false
-    /// The `TrainEntry.widgetID` of the widget it's on; nil on the countdown.
-    var widgetID: String? = nil
-    /// The last refresh couldn't reach the MTA, so times are stale; shows no-signal instead of ↻.
-    var failed = false
 
     var body: some View {
-        let symbol = failed ? "wifi.slash" : "arrow.clockwise"
-        let label = failed ? "Refresh. Couldn't reach the MTA, so these times are old" : "Refresh"
-        if widgetsOnly {
-            FlashButton(symbol: symbol, intent: RefreshWidgetsIntent(widgetID: widgetID ?? ""), route: route,
-                        label: label, fills: fills, large: large)
-        } else {
-            FlashButton(symbol: symbol, intent: RefreshIntent(widgetID: widgetID), route: route,
-                        label: label, fills: fills, large: large)
-        }
+        FlashButton(symbol: "arrow.clockwise", intent: RefreshIntent(widgetID: nil), route: route,
+                    label: "Refresh", fills: fills)
     }
 }
 
@@ -148,6 +134,17 @@ struct EndTripButton: View {
             .buttonStyle(.plain)
             .accessibilityLabel(label)
         }
+    }
+}
+
+/// A walk's countdown's "I'm on the train" (`BoardedTrainIntent`), at the station or the change.
+struct BoardButton: View {
+    let route: String
+    var fills = false
+
+    var body: some View {
+        FlashButton(symbol: "tram.fill", intent: BoardedTrainIntent(), route: route, label: "I'm on the train",
+                    fills: fills)
     }
 }
 

@@ -3,9 +3,9 @@ import OSLog
 
 extension TimetableStore {
     /// As in project.yml's BGTaskSchedulerPermittedIdentifiers.
-    static let refreshTaskID = "com.rtrainwidget.app.timetable"
+    static let refreshTaskID = "dev.dctp.leeway.timetable"
 
-    private static let log = Logger(subsystem: "com.rtrainwidget.app", category: "Timetable")
+    private static let log = Logger(subsystem: "dev.dctp.leeway", category: "Timetable")
 
     /// The background refresh: a new timetable, and another refresh a day on.
     static func backgroundRefresh() async {

@@ -3,7 +3,7 @@ import SwiftUI
 import UIKit
 import WidgetKit
 
-struct RTrainWidget: Widget {
+struct LeewayWidget: Widget {
     let kind = WidgetKind.train
 
     var body: some WidgetConfiguration {
@@ -417,8 +417,9 @@ struct Provider: AppIntentTimelineProvider {
         let now = Date.now
         // Just fetched: others showing this train redraw with the same, instead of their own. Not
         // for Transit Directions, as iOS draws one widget at a time, so its next tap waited for
-        // them all; they get the new times on their own next reload
-        if reloadsOthers, board.fetched >= tried {
+        // them all; they get the new times on their own next reload. Nor when drawn at once,
+        // fetching nothing: a board of only the timetable's is dated `tried`, but isn't saved
+        if reloadsOthers, !drewAtOnce, board.fetched >= tried {
             await WidgetCenter.shared.reloadWidgets(showing: selection.trainID, drawing: widgetID)
         }
         if let state = await countdownState {
@@ -1450,7 +1451,7 @@ extension TrainEntry {
 }
 
 #Preview(as: .systemSmall) {
-    RTrainWidget()
+    LeewayWidget()
 } timeline: {
     // The card until a tap, then the board open
     TrainEntry.preview.asCard()
@@ -1474,7 +1475,7 @@ extension TrainEntry {
 }
 
 #Preview(as: .systemMedium) {
-    RTrainWidget()
+    LeewayWidget()
 } timeline: {
     // The card until a tap, then the board open; the card under an alert, and for both directions
     TrainEntry.preview.asCard()
@@ -1504,7 +1505,7 @@ extension TrainEntry {
 }
 
 #Preview("With a change", as: .systemMedium) {
-    RTrainWidget()
+    LeewayWidget()
 } timeline: {
     TrainEntry.transferPreview().asCard()
     TrainEntry.transferPreview().asCard(opened: true)

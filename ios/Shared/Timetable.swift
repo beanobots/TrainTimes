@@ -121,15 +121,9 @@ struct Timetable: Sendable {
                 let pattern = patterns[index]
                 let call = pattern.calls[position]
                 let arrives = TimeInterval(call.arrives)
-                let leaves = arrives + TimeInterval(call.waits)
-                let starts = self.starts[index]
                 // The first trip that hasn't left by `start`
-                var low = 0, high = starts.count
-                while low < high {
-                    let middle = (low + high) / 2
-                    if TimeInterval(starts[middle]) + leaves < from { low = middle + 1 } else { high = middle }
-                }
-                for tripStart in starts[low...] {
+                let first = firstTrip(ofPattern: index, leaving: position, after: from)
+                for tripStart in self.starts[index][first...] {
                     let offset = TimeInterval(tripStart)
                     guard offset + arrives <= to else { break }
                     arrivals.append(arrival(of: pattern, index: index, call: position, starting: offset,
@@ -148,6 +142,13 @@ struct Timetable: Sendable {
     /// When (seconds after `base`) the first trip of pattern `index` that leaves its `call`th stop
     /// at or after `time` (also seconds after `base`) starts; nil if none does.
     func firstStart(ofPattern index: Int, leaving call: Int, after time: TimeInterval) -> TimeInterval? {
+        let first = firstTrip(ofPattern: index, leaving: call, after: time)
+        return first < starts[index].count ? TimeInterval(starts[index][first]) : nil
+    }
+
+    /// The index in `starts[index]` of the first trip of pattern `index` that leaves its `call`th
+    /// stop at or after `time` (seconds after `base`); its count if none does.
+    private func firstTrip(ofPattern index: Int, leaving call: Int, after time: TimeInterval) -> Int {
         let stop = patterns[index].calls[call]
         let leaves = TimeInterval(stop.arrives) + TimeInterval(stop.waits)
         let starts = self.starts[index]
@@ -156,7 +157,7 @@ struct Timetable: Sendable {
             let middle = (low + high) / 2
             if TimeInterval(starts[middle]) + leaves < time { low = middle + 1 } else { high = middle }
         }
-        return low < starts.count ? TimeInterval(starts[low]) : nil
+        return low
     }
 
     /// The trip of `pattern` starting `offset` seconds after `base`, at its `call`th stop.

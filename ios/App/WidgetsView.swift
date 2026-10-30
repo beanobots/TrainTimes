@@ -67,16 +67,27 @@ struct WidgetsView: View {
             }
             .navigationDestination(for: UUID.self) { id in
                 WidgetEditor(id: id)
+                    .toolbar(.visible, for: .navigationBar)
             }
-            // Start the first card as far under the toolbar as the Nearby tab's first card
-            .contentMargins(.top, 0, for: .scrollContent)
-            // Inline, level with Add, as Nearby's is
-            .navigationTitle("Widgets")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Add", systemImage: "plus", action: add)
+            // As the Home Screen: the widgets on a wallpaper, each named under it
+            .scrollContentBackground(.hidden)
+            .background(WallpaperBackdrop().ignoresSafeArea())
+            .contentMargins(.top, 16, for: .scrollContent)
+            // No title bar, as New Trip: the tab says where you are
+            .toolbar(.hidden, for: .navigationBar)
+            // Over the tab bar, by your thumb
+            .safeAreaBar(edge: .bottom) {
+                Button(action: add) {
+                    Label("New Widget", systemImage: "plus")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .padding(.horizontal, 14)
+                        .frame(height: 38)
+                        .contentShape(Capsule())
                 }
+                .buttonStyle(.plain)
+                .glassEffect(.regular.interactive(), in: Capsule())
+                .padding(.bottom, 8)
             }
             // On dismiss, continue to AddWidget; nothing if cancelled
             .sheet(isPresented: $choosingTrain, onDismiss: {
@@ -106,36 +117,16 @@ private struct WidgetRow: View {
     let look: WidgetLook
     let placed: Int
 
-    /// The station name if the widget has a custom title, else the caption; then any change
-    /// (e.g. "R Manhattan, then D or N").
-    private var subtitle: String {
-        let selection = widget.selection
-        let base = widget.title == selection.station?.name
-            ? selection.caption
-            : selection.station?.name ?? ""
-        guard let change = widget.change else { return base }
-        return "\(base), then \(Lines.list(change.allRoutes, joinedBy: "or"))"
-    }
-
-    /// Its name and train, then the widget as the Home Screen shows it.
+    /// The widget as the Home Screen shows it, then its name and how many are placed under it,
+    /// as an app's name is.
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(widget.title).font(.headline)
-                    Spacer()
-                    Text(placed == 0 ? "Not placed" : "\(placed) placed")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-                Text(subtitle)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            .padding(.horizontal, 4)
-            // On the page itself, as on the Home Screen, not in a card of its own
+        VStack(spacing: 6) {
             WidgetPreview(widget: widget, look: look)
+            Text("\(widget.title) · \(placed == 0 ? "Not placed" : "\(placed) placed")")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.white)
+                .shadow(color: .black.opacity(0.35), radius: 2, y: 1)
+                .lineLimit(1)
         }
         .frame(maxWidth: WidgetLook.medium.size.width)
         .frame(maxWidth: .infinity)

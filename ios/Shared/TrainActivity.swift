@@ -150,7 +150,24 @@ struct StopCountdownIntent: LiveActivityIntent {
 
     func perform() async throws -> some IntentResult {
         #if APP
+        // A walk's countdown stops the walk too: its location, and its screen. Another countdown
+        // that took its place leaves the walk be
+        if TrainActivityController.isWalking { await MainActor.run { ActiveWalk.shared.end() } }
         await TrainActivityController.endAll()
+        #endif
+        return .result()
+    }
+}
+
+/// A walk's countdown's "I'm on the train", at the station or the change: on to the ride, without
+/// opening the app.
+struct BoardedTrainIntent: LiveActivityIntent {
+    static let title: LocalizedStringResource = "I'm on the train"
+    static let isDiscoverable = false
+
+    func perform() async throws -> some IntentResult {
+        #if APP
+        await ActiveWalk.boardFromLockScreen()
         #endif
         return .result()
     }

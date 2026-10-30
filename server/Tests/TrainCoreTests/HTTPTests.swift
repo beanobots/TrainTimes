@@ -6,7 +6,7 @@ import NIOCore
 import Testing
 @testable import TrainCore
 
-let testAppID = "XUU899AG4D.com.rtrainwidget.app"
+let testAppID = "XUU899AG4D.dev.dctp.leeway"
 
 /// Lenient limits, so tests other than the rate limit's aren't throttled.
 func testLimits() -> Limits {

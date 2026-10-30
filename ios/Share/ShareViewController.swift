@@ -4,12 +4,18 @@ import UniformTypeIdentifiers
 
 /// The Share sheet's Leeway action: hosts `ShareView` and ends the request when it's done.
 final class ShareViewController: UIViewController {
+    /// Whether the request has been ended, so a second tap (Show, then Cancel as the sheet goes)
+    /// doesn't end it again.
+    private var finished = false
+
     override func viewDidLoad() {
         super.viewDidLoad()
         let items = extensionContext?.inputItems.compactMap { $0 as? NSExtensionItem } ?? []
         let model = ShareModel(attachments: items.flatMap { $0.attachments ?? [] })
         let host = UIHostingController(rootView: ShareView(model: model) { [weak self] in
-            self?.extensionContext?.completeRequest(returningItems: nil)
+            guard let self, !self.finished else { return }
+            self.finished = true
+            self.extensionContext?.completeRequest(returningItems: nil)
         })
         addChild(host)
         host.view.frame = view.bounds

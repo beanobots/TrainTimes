@@ -298,8 +298,10 @@ struct SharedBusTrip: Codable, Hashable, Sendable {
 
     var expires: Date { shared.addingTimeInterval(SharedTrip.duration) }
 
+    /// Whether it's showing at `date`: not before it was shared (clock set back), as
+    /// `SharedTrip.isActive(at:)`, as it would otherwise show until then.
     func isActive(at date: Date) -> Bool {
-        date < expires
+        shared <= date && date < expires
     }
 
     /// Shows it on Transit Directions for an hour from `shared`, in place of any other trip.
@@ -341,5 +343,62 @@ extension SharedStore {
     static func removeSharedBusTrip() {
         guard let busTripFile else { return }
         try? FileManager.default.removeItem(at: busTripFile)
+    }
+}
+
+/// Nearby's buses, with its "Bus" switch on: the bus places near you (a stop and the one across
+/// from it) and their next buses, from the push server's `GET /buses/nearby` (server/README.md),
+/// which keeps Bus Time's key. Drawn in Nearby's grid as stations are.
+enum NearbyBuses {
+    /// One stop, as the server sends it, with its next buses, every line.
+    struct Way: Codable, Hashable, Sendable {
+        /// Its name as Bus Time writes it: "7 AV/9 ST".
+        var stop: BusStopTimes.Stop
+        /// From where you were.
+        var meters: Double
+        var arrivals: [BusArrival]
+    }
+
+    /// The bus places near `location`, nearest first: none with no stop within a quarter mile;
+    /// nil if the server can't be reached or has no Bus Time key. From a server that predates
+    /// places, its one place's ways.
+    static func places(near location: CLLocation) async -> [NearbyBusPlace]? {
+        guard let baseURL = ServerRoutes.baseURL,
+              var components = URLComponents(url: baseURL.appendingPathComponent("buses/nearby"),
+                                             resolvingAgainstBaseURL: false) else { return nil }
+        components.queryItems = [URLQueryItem(name: "at", value: String(format: "%.5f,%.5f", location.coordinate.latitude,
+                                                                          location.coordinate.longitude))]
+        guard let url = components.url else { return nil }
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: wait)
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        struct Response: Decodable { var ways: [Way]; var places: [[Way]]? }
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let decoded = try? JSONDecoder().decode(Response.self, from: data) else { return nil }
+        return (decoded.places ?? [decoded.ways]).filter { !$0.isEmpty }.map(place)
+    }
+
+    /// The server's stops as a place.
+    static func place(_ ways: [Way]) -> NearbyBusPlace {
+        NearbyBusPlace(ways: ways.map { NearbyBusPick.Way(stop: $0.stop, destination: nil, arrivals: $0.arrivals) },
+                       meters: ways.map(\.meters).min() ?? 0)
+    }
+
+    /// How long Nearby waits for its buses before drawing without them.
+    static let wait: TimeInterval = 3
+}
+
+/// Nearby's buses, as found on its reload.
+enum NearbyBusList: Hashable {
+    /// Nearest first; none with no stop within a quarter mile.
+    case places([NearbyBusPlace])
+    /// The server couldn't say.
+    case unavailable
+    /// On Nearby's face, drawn at once on a tap, before they're fetched.
+    case finding
+
+    var places: [NearbyBusPlace] {
+        if case .places(let places) = self { return places }
+        return []
     }
 }

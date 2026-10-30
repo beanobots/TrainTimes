@@ -47,6 +47,16 @@ struct Platform: Codable, Hashable, Identifiable, Sendable {
     /// Other feed ids for it, e.g. H19 at Broad Channel (where the Rockaway Park Shuttle ends).
     /// Nil for none.
     var aliases: [String]? = nil
+    /// Minutes the MTA times a walk from here to other platforms at, by their ids, where it's
+    /// longer than `Change.defaultWalkMinutes` (GTFS transfers): Atlantic Av-Barclays Ctr's D N R
+    /// to its B Q. Nil for none.
+    var walks: [String: Int]? = nil
+    /// True where its two sides aren't joined inside the fare gates, as at 23 St on the 6: each
+    /// entrance's stairs go down to one side (`Station.Entrance.side`). Nil if they are, or unknown.
+    var noCrossover: Bool? = nil
+    /// Degrees clockwise from north that its `south` trains go, by the GTFS shapes. Nil where none
+    /// pass it.
+    var heading: Int? = nil
 
     /// The accessibility label, or nil without step-free access.
     var accessibility: String? {
@@ -207,6 +217,66 @@ struct Platform: Codable, Hashable, Identifiable, Sendable {
 
     /// Its first line's position in the MTA's order.
     fileprivate var rank: Int { routes.map(Lines.rank).min() ?? Int.max }
+
+    /// A third of a train, from the way it's going.
+    enum TrainPart: String, Sendable {
+        case back, middle, front
+    }
+
+    /// Which third of `route`'s train going `direction` stops by `entrance`, one of this platform's,
+    /// by the entrance's `along`: the platform taken to be centred on its stop and as long as its
+    /// division's (`platformLength(of:)`), and a shorter train to stop at its front end, as the
+    /// L's 8 cars do. Stairs past an end are by the end car. Nil without `along`, or for the G and
+    /// the shuttles, whose short trains stop where that isn't known.
+    func part(of route: String, going direction: Direction, by entrance: Station.Entrance) -> TrainPart? {
+        guard let along = entrance.along ?? self.along(of: entrance), let length = Self.trainLength(of: route)
+        else { return nil }
+        // `along` is the way the `south` side's trains go
+        let ahead = Double(side(of: route, going: direction) == .south ? along : -along)
+        // The train's middle, ahead of the stop
+        let middle = (max(length, Self.platformLength(of: route)) - length) / 2
+        // From -1 at the back to 1 at the front
+        let place = (ahead - middle) / (length / 2)
+        switch place {
+        case ..<(-1.0 / 3): return .back
+        case ...(1.0 / 3): return .middle
+        default: return .front
+        }
+    }
+
+    /// Metres from its stop the way its `south` trains go of `entrance`, from elsewhere in its
+    /// station, by `heading`: Times Sq-42 St's 42 St stairs, listed with the 1 2 3, for the R.
+    /// Nil without a heading, or for one too far off to the side or along to be by this platform
+    /// (more than a passage under the street, or past a train's length).
+    func along(of entrance: Station.Entrance) -> Int? {
+        guard let heading else { return nil }
+        let east = (entrance.lon - lon) * 111_320 * cos(lat * .pi / 180)
+        let north = (entrance.lat - lat) * 111_320
+        let angle = Double(heading) * .pi / 180
+        let along = east * sin(angle) + north * cos(angle)
+        let beside = abs(east * cos(angle) - north * sin(angle))
+        guard abs(along) <= 120, beside <= 150 else { return nil }
+        return Int(along.rounded())
+    }
+
+    /// Metres of a full train of `route`: 10 cars of 51 ft on the numbered lines (11 on the 7),
+    /// 600 ft on the lettered ones, 8 cars of 60 ft on the J, L, M and Z. Nil for the G and shuttles.
+    static func trainLength(of route: String) -> Double? {
+        let line = Lines.normalized(route)
+        switch line {
+        case "7": return 171
+        case "J", "L", "M", "Z": return 146
+        case "G", "GS", "FS", "H", "SI": return nil
+        default: return isNumbered(line) ? 156 : 183
+        }
+    }
+
+    /// Metres of a platform of `route`'s division: 10 numbered-line cars, or 600 ft.
+    static func platformLength(of route: String) -> Double {
+        isNumbered(Lines.normalized(route)) ? 156 : 183
+    }
+
+    private static func isNumbered(_ line: String) -> Bool { line.first?.isNumber == true }
 }
 
 extension Array where Element == Platform {
@@ -247,8 +317,38 @@ struct Station: Hashable, Identifiable, Sendable {
         /// "Stair", "Elevator", "Escalator", "Station House", "Easement - Street", ...
         let type: String
         var exitOnly: Bool? = nil
+        /// True for one that can't be left by.
+        var entryOnly: Bool? = nil
+        /// The streets it's at, the north-south one first: ["4 Av", "9 St"]. Nil if unknown (the
+        /// MTA's 2015 list, which names them, hasn't newer entrances).
+        var streets: [String]? = nil
+        /// "NE", "NW", "SE" or "SW" of `streets`' crossing. Nil if unknown.
+        var corner: String? = nil
+        /// Metres from its platform's stop the way that platform's `south` trains go: where to
+        /// board for it. Nil for one along a passage from elsewhere in the complex.
+        var along: Int? = nil
+        /// The side its stairs go down to, named as its platform's `north` and `south` are, where
+        /// the sides aren't joined inside (`Platform.noCrossover`). Nil if either, or unknown.
+        var side: Direction? = nil
 
         var isElevator: Bool { type.contains("Elevator") }
+
+        /// Its place, not what's known of it: a complex's shared entrance is listed under each
+        /// platform, with that platform's `along` and `side`.
+        var place: Place { Place(lat: lat, lon: lon, type: type) }
+
+        struct Place: Hashable {
+            let lat: Double
+            let lon: Double
+            let type: String
+        }
+
+        /// "NW corner of 4 Av & 9 St", "4 Av & 9 St" without a corner, or nil without streets.
+        var address: String? {
+            guard let streets, !streets.isEmpty else { return nil }
+            let crossing = streets.joined(separator: " & ")
+            return corner.map { "\($0) corner of \(crossing)" } ?? crossing
+        }
     }
 
     /// `platforms` share a name and a complex.
@@ -269,9 +369,9 @@ struct Station: Hashable, Identifiable, Sendable {
         complex = first.complex
         lat = platforms.map(\.lat).reduce(0, +) / Double(platforms.count)
         lon = platforms.map(\.lon).reduce(0, +) / Double(platforms.count)
-        // Shared entrances may be listed under each platform
-        var seen = Set<Entrance>()
-        entrances = platforms.flatMap(\.entrances).filter { seen.insert($0).inserted }
+        // Shared entrances may be listed under each platform, each with its own `along` and `side`
+        var seen = Set<Entrance.Place>()
+        entrances = platforms.flatMap(\.entrances).filter { seen.insert($0.place).inserted }
     }
 
     func platforms(serving routes: [String]) -> [Platform] {

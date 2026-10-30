@@ -30,6 +30,73 @@ struct CountdownState: Codable, Hashable, Sendable {
     /// push server and older apps.
     var marksLiveTimes: Bool? = nil
     var marksScheduledTimes: Bool? = nil
+    /// From New Trip's Go, the walk to the train, the ride, or the walk from it
+    /// (`WalkSession`). Nil for a countdown to a train, and from the push server, which doesn't
+    /// have walks (a walk's countdown isn't registered with it).
+    var walk: WalkState? = nil
+}
+
+/// The walk a countdown from Go is on, as the Lock Screen and Dynamic Island show it: the next
+/// turn over the train, as on the walking screen.
+struct WalkState: Codable, Hashable, Sendable {
+    enum Phase: String, Codable, Sendable {
+        /// Walking to the train: the turn, and the train's countdown under it.
+        case toTrain
+        /// At the entrance: the way down, and the countdown.
+        case atStation
+        /// On the train: a countdown to getting off.
+        case riding
+        /// Off the first train where the trip changes: the way to the next, and its countdown.
+        case changing
+        /// Off the train by the clock, the app not having run since: what to do now (`next`),
+        /// until it's opened (`movedOn(at:)`).
+        case off
+        /// Walking from the train: the turn, and when you'll get there.
+        case fromTrain
+    }
+
+    var phase: Phase
+    /// The next turn's SF Symbol (`Walk.Turn.systemImage`).
+    var symbol: String
+    /// To it: "250 ft"; "Here" at the entrance, "Now" for the way up.
+    var distance: String
+    /// "Take a left onto 4th Ave", "Down the stairs at the NE corner of 4 Av & 9 St".
+    var instruction: String
+    /// "Manhattan-bound only", or the turn after.
+    var detail: String? = nil
+    /// Minutes to spare for the train counted down to, walking on as you are; under none means
+    /// you'll miss it. Nil once you're down, or unknown.
+    var spare: Int? = nil
+    /// Which part of the train to ride in for the exit: "back", "middle" or "front".
+    var part: String? = nil
+    /// When the train's due at the end's station, on the train.
+    var getOff: Date? = nil
+    /// The end's station, where to get off.
+    var getOffAt: String? = nil
+    /// Where the walk ends, and when you'll be there.
+    var endName: String
+    var arrives: Date? = nil
+    /// "Faster: Q from 7 Av, 5 min sooner", walking to the train.
+    var faster: String? = nil
+    /// On the train, what to do once it's due where you get off: "Up the stairs to the NE corner
+    /// of Broadway & 42 St", "Across the platform to the Q". Shown by itself as iOS redraws then
+    /// (`CountdownState.staleDate`), the app being asleep while you ride.
+    var next: String? = nil
+    var nextSymbol: String? = nil
+    /// Under `next`: "Tap for the turns to The Town Hall".
+    var nextNote: String? = nil
+
+    /// On the train once it's due where you get off: `next` in its place, as `off`.
+    func movedOn(at now: Date) -> WalkState {
+        guard phase == .riding, let getOff, getOff <= now, let next else { return self }
+        var walk = self
+        walk.phase = .off
+        walk.symbol = nextSymbol ?? "figure.walk"
+        walk.distance = "Now"
+        walk.instruction = next
+        walk.detail = nextNote
+        return walk
+    }
 }
 
 extension CountdownState {
@@ -41,8 +108,12 @@ extension CountdownState {
     /// train under a new trip id, or one without an id whose time moved up a little.
     static let leeway: TimeInterval = 60
 
-    /// Stale when the train is due, so iOS redraws and it moves on (`movedOn(at:)`).
-    var staleDate: Date { train }
+    /// Stale when the train is due, so iOS redraws and it moves on (`movedOn(at:)`). On a walk's
+    /// train, when it's due where you get off instead, for what to do then (`WalkState.next`).
+    var staleDate: Date {
+        if let walk, walk.phase == .riding, let getOff = walk.getOff { return getOff }
+        return train
+    }
 
     /// Whether widgets for its train show the same as with `other`: they take its trains'
     /// times, lines and liveness (`CountdownSync`), however little they move, but not its notice.
@@ -99,8 +170,10 @@ extension CountdownState {
     /// next. With no trains, keeps the last one and says so, or names the service alert (not an
     /// elevator outage, which would otherwise take priority).
     func refreshed(for selection: Selection, board: Board, settings: AppSettings, now: Date) -> CountdownState {
-        if let state = CountdownState(for: selection, board: board, settings: settings, now: now,
+        if var state = CountdownState(for: selection, board: board, settings: settings, now: now,
                                       following: trip, after: train) {
+            // The walk's the app's to change
+            state.walk = walk
             return state
         }
         let alert = board.notice(includingElevators: false, includingAlerts: selection.serviceAlerts,
@@ -118,8 +191,9 @@ extension CountdownState {
     /// until the app updates it. A following train's trip and terminal are unknown; it's live if
     /// this one was.
     func movedOn(at now: Date) -> CountdownState {
-        guard train <= now, let index = following.firstIndex(where: { $0 > now }) else { return self }
         var state = self
+        state.walk = walk?.movedOn(at: now)
+        guard train <= now, let index = following.firstIndex(where: { $0 > now }) else { return state }
         state.train = following[index]
         state.trip = ""
         state.terminal = nil

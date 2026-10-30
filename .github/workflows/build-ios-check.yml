@@ -38,8 +38,8 @@ jobs:
         working-directory: ios
         run: |
           xcodebuild \
-            -project NextRTrain.xcodeproj \
-            -scheme NextRTrain \
+            -project Leeway.xcodeproj \
+            -scheme Leeway \
             -configuration Debug \
             -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \
@@ -50,8 +50,8 @@ jobs:
       - name: Check the bundled data
         working-directory: ios
         run: |
-          APP=build/Build/Products/Debug-iphonesimulator/NextRTrain.app
-          WIDGET="$APP/PlugIns/RTrainWidget.appex"
+          APP=build/Build/Products/Debug-iphonesimulator/Leeway.app
+          WIDGET="$APP/PlugIns/LeewayWidget.appex"
           # the widget and Share extension must be inside the app
           test -d "$WIDGET"
           test -d "$APP/PlugIns/ShareExtension.appex"

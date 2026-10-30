@@ -232,6 +232,10 @@ private let today = newYork(2026, 10, 22, 7)
         let saved = try Data(contentsOf: folder.appendingPathComponent("timetable.bin"))
         #expect(await copy.data == saved)
         let etag = try #require(await copy.etag)
+        // Read together, as `GET /timetable` reads them
+        let current = try #require(await copy.current)
+        #expect(current.data == saved && current.etag == etag)
+        #expect(await TimetableCopy().current == nil)
 
         struct Failed: Error {}
         let failing = TimetableMaker(copy: copy, directory: folder) { _ in throw Failed() }

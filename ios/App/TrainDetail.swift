@@ -289,7 +289,9 @@ struct TrainDetail: View {
                 .listRowInsets(EdgeInsets())
             Button {
                 // Named so Maps shows the station, not the street address
-                let item = MKMapItem(placemark: MKPlacemark(coordinate: walkingDestination(station)))
+                let destination = walkingDestination(station)
+                let item = MKMapItem(location: CLLocation(latitude: destination.latitude, longitude: destination.longitude),
+                                     address: nil)
                 item.name = station.name
                 item.openInMaps(launchOptions: [MKLaunchOptionsDirectionsModeKey: MKLaunchOptionsDirectionsModeWalking])
             } label: {

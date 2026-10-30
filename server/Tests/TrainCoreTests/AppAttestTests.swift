@@ -49,7 +49,7 @@ import Testing
                 bytes(fixture.attestation), keyID: RecordedAppAttest.Development.keyID,
                 challenge: bytes(fixture.challenge), now: recorded)
         }
-        let otherApp = AppAttest(appID: "XUU899AG4D.com.rtrainwidget.app", environments: [.production],
+        let otherApp = AppAttest(appID: "XUU899AG4D.dev.dctp.leeway", environments: [.production],
                                  certificateTime: recorded)
         await #expect(throws: AppAttest.Problem.wrongApp) {
             try await otherApp.verifyAttestation(
@@ -104,7 +104,7 @@ import Testing
 }
 
 @Suite struct SyntheticAppAttestTests {
-    let appID = "XUU899AG4D.com.rtrainwidget.app"
+    let appID = "XUU899AG4D.dev.dctp.leeway"
     let challenge = Array("challenge-123".utf8)
 
     func verifier(_ authority: TestAuthority, _ environments: Set<AttestEnvironment> = [.production]) -> AppAttest {

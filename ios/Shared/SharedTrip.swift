@@ -142,6 +142,64 @@ extension SharedStore {
     }
 }
 
+/// Where a walk from New Trip's Go is, for the Transit Directions widget to follow: on the train,
+/// or walking out from it. Walking to a train, or at a change, there's none, and the widget shows
+/// the trip's board for that train (the app shows the train changed to as the trip then).
+struct WalkStage: Codable, Hashable, Sendable {
+    enum Phase: String, Codable, Sendable {
+        /// On a train: getting off counted down, then what to do there.
+        case riding
+        /// Walking from the train to the end.
+        case fromTrain
+    }
+
+    var phase: Phase
+    /// The line you're on, or got off.
+    var route: String
+    /// "Times Sq-42 St"; "The Town Hall" walking out.
+    var title: String
+    /// "Ride in the front", "Change at DeKalb Av for the Q"; walking out, the first step.
+    var instruction: String
+    /// Riding, when it's due where you get off, and what to do then: "Up the stairs to the NE
+    /// corner of Broadway & 41 St", "Across the platform to the Q".
+    var getOff: Date? = nil
+    var next: String? = nil
+    var nextSymbol: String? = nil
+    /// Where the walk ends, and when you'll be there.
+    var endName: String
+    var arrives: Date? = nil
+    /// When the walk's countdown ends, at the latest: it's not shown after.
+    var expires: Date
+
+    /// The dates to draw it at: now, and on the train, getting off, when it says what to do there.
+    func dates(from now: Date) -> [Date] {
+        guard phase == .riding, let getOff, getOff > now else { return [now] }
+        return [now, getOff]
+    }
+}
+
+extension SharedStore {
+    private static let walkStageFile = url(named: "walk-stage.json")
+
+    /// The walk's stage, if one's on a train or walking out at `date`.
+    static func loadWalkStage(at date: Date = .now) -> WalkStage? {
+        guard let stage = read(WalkStage.self, from: walkStageFile), date < stage.expires else { return nil }
+        return stage
+    }
+
+    /// Saves the walk's stage (nil for none: walking to a train, at a change, or ended), and
+    /// redraws Transit Directions with it.
+    static func saveWalkStage(_ stage: WalkStage?) {
+        guard let walkStageFile else { return }
+        if let stage, let data = try? JSONEncoder().encode(stage) {
+            try? data.write(to: walkStageFile, options: .atomic)
+        } else {
+            try? FileManager.default.removeItem(at: walkStageFile)
+        }
+        WidgetCenter.shared.reloadTimelines(ofKind: WidgetKind.directions)
+    }
+}
+
 /// The Transit Directions widget's ✕: ends the shared trip or Quick Trip, or leaves Favorite
 /// Stop, so it goes back to its Quick Trip and Favorite Stop buttons.
 struct EndSharedTripIntent: AppIntent {
@@ -152,6 +210,7 @@ struct EndSharedTripIntent: AppIntent {
 
     func perform() async throws -> some IntentResult {
         SharedStore.saveSharedTrip(nil)
+        SharedStore.saveWalkStage(nil)
         QuickTrip.update { $0.screen = .home }
         return .result()
     }

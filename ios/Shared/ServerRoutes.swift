@@ -41,6 +41,13 @@ enum ServerRoutes {
 
             var location: CLLocation { CLLocation(latitude: latitude, longitude: longitude) }
         }
+
+        /// Whether its first ride starts and its last ends within `meters` of `start` and `end`,
+        /// as the crow flies.
+        func walks(within meters: Double, from start: CLLocation, to end: CLLocation) -> Bool {
+            guard let first = legs.first, let last = legs.last else { return false }
+            return first.from.location.distance(from: start) <= meters && last.to.location.distance(from: end) <= meters
+        }
     }
 
     /// Info.plist's TrainTimesServerURL.
@@ -82,20 +89,27 @@ enum ServerRoutes {
     /// the app's own (`TripPlanner`), each once, ranked together by when they get there with the
     /// timetable (`TripPlanner.ranked`). Google's come first where they tie, or with no timetable.
     /// The same train changing on to the same end is one trip, changing at each of their stations
-    /// (`TripPlanner.joiningChanges(_:)`).
-    static func plan(from start: CLLocation, to end: CLLocation) async -> [TripPlanner.Trip] {
-        let google = await routes(from: start, to: end).map(trips(from:)) ?? []
+    /// (`TripPlanner.joiningChanges(_:)`). Neither walks more than `walkRange` to or from a train.
+    static func plan(from start: CLLocation, to end: CLLocation,
+                     walkRange: Double = TripPlanner.walkRange) async -> [TripPlanner.Trip] {
+        let found = (await routes(from: start, to: end) ?? []).filter { $0.walks(within: walkRange, from: start, to: end) }
+        let google = trips(from: found).filter { !TripPlanner.ridesBack($0) }
         var seen = Set<String>()
-        let planned = TripPlanner.joiningChanges(google + TripPlanner.plan(from: start, to: end)).filter { trip in
+        let planned = TripPlanner.joiningChanges(google + TripPlanner.plan(from: start, to: end, walkRange: walkRange)).filter { trip in
             seen.insert("\(trip.selection.trainID) \(trip.change.map { "\($0.stationID) \($0.routes)" } ?? "")").inserted
         }
-        return Array(TripPlanner.ranked(planned, from: start, to: end).prefix(maxOptions))
+        let nearest = TripPlanner.withoutSlowerWalks(TripPlanner.fromNearest(planned, to: start), from: start, to: end)
+        return Array(TripPlanner.ranked(nearest, from: start, to: end).prefix(maxOptions))
     }
 
-    /// A trip New Trip offers: by train, or with a bus.
+    /// A trip New Trip offers: by train, with a bus, or walking all the way (Apple Maps' walk,
+    /// which New Trip asks for itself).
     enum Choice: Hashable, Sendable {
         case train(SharedTrip.Option)
         case bus(BusTrip)
+        case walk(Walk)
+        /// With a Citi Bike (New Trip's Bike), which `BikePlanner` plans.
+        case bike(BikeTrip)
     }
 
     /// One of `planWithBuses`'s trips, with the train trip it is, for timing it by the timetable.
@@ -108,9 +122,12 @@ enum ServerRoutes {
     /// buses: Google's routes by train, bus, or a bus and one train, in Google's order, then the
     /// app's own train trips (`TripPlanner`), each once. A route needing more than one change
     /// isn't offered, as a widget shows one. The same train changing on to the same end is one
-    /// trip, changing at each of their stations, as in `plan`.
-    static func planWithBuses(from start: CLLocation, to end: CLLocation) async -> [Planned] {
-        let google = await routes(from: start, to: end, buses: true) ?? []
+    /// trip, changing at each of their stations, as in `plan`. None walks more than `walkRange`
+    /// to or from a ride.
+    static func planWithBuses(from start: CLLocation, to end: CLLocation,
+                              walkRange: Double = TripPlanner.walkRange) async -> [Planned] {
+        let google = (await routes(from: start, to: end, buses: true) ?? [])
+            .filter { $0.walks(within: walkRange, from: start, to: end) }
         var planned: [Planned] = []
         var seen = Set<String>()
         func add(_ trip: TripPlanner.Trip) {
@@ -127,11 +144,17 @@ enum ServerRoutes {
             if let trip = busTrip(from: route) {
                 let key = "\(trip.bus.line) \(trip.bus.from.name) \(trip.train?.selection.trainID ?? "")"
                 if seen.insert(key).inserted { planned.append(Planned(choice: .bus(trip))) }
-            } else if !route.legs.contains(where: \.isBus), let trip = trips(from: [route]).first {
+            } else if !route.legs.contains(where: \.isBus), let trip = trips(from: [route]).first,
+                      !TripPlanner.ridesBack(trip) {
                 add(trip)
             }
         }
-        TripPlanner.ranked(TripPlanner.plan(from: start, to: end), from: start, to: end).forEach(add)
+        TripPlanner.ranked(TripPlanner.plan(from: start, to: end, walkRange: walkRange), from: start, to: end).forEach(add)
+        // The same line from a further station than another trip's, Google's or the app's, isn't
+        // offered, nor one walking more to get there later than another on its line
+        let nearest = TripPlanner.withoutSlowerWalks(TripPlanner.fromNearest(planned.compactMap(\.trip), to: start),
+                                                     from: start, to: end)
+        planned.removeAll { $0.trip.map { !nearest.contains($0) } ?? false }
         return planned.prefix(maxOptions).map { planned in
             guard let trip = planned.trip.map(TripPlanner.changingNearby) else { return planned }
             return Planned(choice: .train(trip.option), trip: trip)

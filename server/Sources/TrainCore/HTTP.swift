@@ -167,7 +167,7 @@ enum HTTPRoutes {
         // The timetable the app falls back on when the MTA can't be reached (`TimetableMaker`).
         // Public, like the feeds; with If-None-Match, 304 if the phone has the current one.
         router.get("/timetable") { request, _ -> Response in
-            guard let data = await services.timetable.data, let etag = await services.timetable.etag else {
+            guard let (data, etag) = await services.timetable.current else {
                 throw HTTPError(.serviceUnavailable)
             }
             let headers: HTTPFields = [.contentType: "application/octet-stream", .eTag: etag,

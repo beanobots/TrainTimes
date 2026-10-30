@@ -37,12 +37,12 @@ struct SharedTripPreview: View {
                               settings: settings, change: change, transfers: change != nil, tripSource: trip.source)
         }
         return TrainEntry(date: date, selection: selection,
-                          trains: TimelinePlan.trains(selection.catchable(board.trains, now: date), at: date,
-                                                      selection: selection, fetched: board.fetched, keepsStops: false),
+                          trains: TimelinePlan.trains(board.trains, at: date, selection: selection,
+                                                      fetched: board.fetched, keepsStops: false),
                           notice: board.notice, settings: settings,
                           connections: change == nil ? nil
-                              : TimelinePlan.connections(selection.catchable(board.connections ?? [], now: date), at: date,
-                                                         selection: selection, fetched: board.fetched, keepsStops: false),
+                              : TimelinePlan.connections(board.connections ?? [], at: date, selection: selection,
+                                                         fetched: board.fetched, keepsStops: false),
                           change: change, transfers: change != nil,
                           destination: option.directDestination, destinationTimes: board.destinationTimes ?? [:],
                           tripSource: trip.source)
@@ -97,49 +97,26 @@ struct TripOptionRow: View {
             LineBullets(routes: option.selection.routes, size: 24)
                 .frame(width: 52)
             VStack(alignment: .leading, spacing: 2) {
+                // Where from and to the row's whole width, the minutes on the line under it
                 Text("\(option.selection.station?.name ?? "") → \(option.endStation?.name ?? "")")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.primary)
-                if let change = option.change, describesChange {
-                    // The station on a line of its own, as long names wrap, then the lines and how
-                    HStack(spacing: 4) {
-                        Text(changeStations(change))
-                        if let stationsOpen {
-                            Image(systemName: stationsOpen ? "chevron.up" : "chevron.down")
-                                .font(.caption2.weight(.bold))
-                                .foregroundStyle(.tint)
-                                .accessibilityHidden(true)
-                        }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                HStack(alignment: .lastTextBaseline, spacing: 8) {
+                    details
+                    Spacer(minLength: 0)
+                    if let minutes {
+                        Text("\(minutes) min")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .fixedSize()
                     }
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    ChangeKindLabel(change: change, selection: option.selection)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                } else if let change = option.change {
-                    HStack(spacing: 4) {
-                        Text("Change at \(change.stationNames(for: option.selection)) to")
-                        LineBullets(routes: change.allRoutes, size: 14)
+                    if picked, checksPicked {
+                        Image(systemName: "checkmark")
+                            .font(.body.weight(.semibold))
+                            .foregroundStyle(.tint)
                     }
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                } else {
-                    Text(option.selection.heading)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
                 }
-            }
-            Spacer(minLength: 0)
-            if let minutes {
-                Text("\(minutes) min")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .fixedSize()
-            }
-            if picked, checksPicked {
-                Image(systemName: "checkmark")
-                    .font(.body.weight(.semibold))
-                    .foregroundStyle(.tint)
             }
         }
         .contentShape(Rectangle())
@@ -147,6 +124,61 @@ struct TripOptionRow: View {
         .accessibilityAddTraits(picked ? .isSelected : [])
         .accessibilityHint(stationsOpen == nil ? "" : stationsOpen == true ? "Hides the stations to change at"
                                : "Shows the stations to change at")
+    }
+
+    /// Under where from and to: any change, or which way the train goes.
+    private var details: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            if let change = option.change, describesChange {
+                // The station on a line of its own, as long names wrap, then the lines and how
+                HStack(spacing: 4) {
+                    Text(changeStations(change))
+                    if let stationsOpen {
+                        Image(systemName: stationsOpen ? "chevron.up" : "chevron.down")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(.tint)
+                            .accessibilityHidden(true)
+                    }
+                }
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                ChangeKindLabel(change: change, selection: option.selection)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else if let change = option.change {
+                HStack(spacing: 4) {
+                    Text("Change at \(change.stationNames(for: option.selection)) to")
+                    LineBullets(routes: change.allRoutes, size: 14)
+                }
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            } else {
+                Text(toward)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// Which way its train goes, by where its lines end that way, as the train's own sign has it:
+    /// "Toward Jamaica" for the F from 4 Av-9 St, rather than the platform's "Manhattan - Queens".
+    /// The platform's name where they end in more than two places (the A's three branches).
+    private var toward: String {
+        let selection = option.selection
+        guard let station = selection.station else { return selection.heading }
+        let here = Set(station.platforms.map(\.id))
+        var ends: [String] = []
+        for route in selection.routes {
+            let direction = selection.direction(of: route)
+            for branch in StationDirectory.branches(of: route) where branch.contains(where: here.contains) {
+                guard let id = direction == .north ? branch.first : branch.last, !here.contains(id),
+                      let end = StationDirectory.station(id: id)?.platforms.first(where: { $0.id == id })?.short,
+                      !ends.contains(end) else { continue }
+                ends.append(end)
+            }
+        }
+        guard !ends.isEmpty, ends.count <= 2 else { return selection.heading }
+        return "Toward \(ends.joined(separator: " or "))"
     }
 
     /// Where it changes: "Change at Atlantic Av-Barclays Ctr"; where the stations open, how many

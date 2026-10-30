@@ -3,7 +3,8 @@ import WidgetKit
 /// Kinds of widgets showing a saved widget's train, used for reloads and counting placed
 /// widgets. Trains near you's is `Nearby.widgetKind`.
 enum WidgetKind {
-    /// Next train.
+    /// Next train. Its kind is still the app's old name, though nothing depends on that now:
+    /// the app's new bundle ID makes it a separate install, its widgets placed afresh.
     static let train = "RTrainWidget"
     static let transfers = "TransfersWidget"
     /// Transit Directions: a trip shared from a maps app or planned with Quick Trip, else its

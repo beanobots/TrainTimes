@@ -54,11 +54,11 @@ only for rate limits, and logs it only as a keyed hash.
 | `APNS_KEY_PATH` | required | the APNs auth key (.p8) |
 | `APNS_KEY_ID` | required | its key ID |
 | `APNS_TEAM_ID` | required | `XUU899AG4D` |
-| `APNS_TOPIC` | `com.rtrainwidget.app.push-type.liveactivity` | |
+| `APNS_TOPIC` | `dev.dctp.leeway.push-type.liveactivity` | |
 | `DATA_DIR` | required | holds `traintimes.sqlite` |
 | `ATTEST_MODE` | `on` | `off` is for development only, e.g. the simulator; it then needs `API_SECRET` |
 | `ATTEST_ENVIRONMENT` | `production` | `development` (builds from Xcode), `production` (TestFlight, App Store) or `both` |
-| `APP_ID` | `XUU899AG4D.com.rtrainwidget.app` | the App ID App Attest checks |
+| `APP_ID` | `XUU899AG4D.dev.dctp.leeway` | the App ID App Attest checks |
 | `API_SECRET` | | only with `ATTEST_MODE=off`; at least 16 characters |
 | `HOST` | `127.0.0.1` | |
 | `PORT` | `8080` | |

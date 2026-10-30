@@ -99,26 +99,27 @@ import Testing
 
     @Test func whetherYouWalkGoesByThePlatformsTheTwoTrainsUse() {
         // The N and Q from 14 St-Union Sq to the D: the N gets to the D's
-        // platform at Atlantic, the Q to the B and Q's
+        // platform at Atlantic, the Q to the B and Q's, five minutes' walk away by
+        // the MTA's time for it (`Platform.walks`)
         let nq = Selection(stationID: "R20", routes: ["N", "Q"], direction: .south)
         let d = Change(stationID: "R31", routes: ["D"], walkMinutes: 3)
         #expect(d.arrivalStops(for: nq) == ["D24S", "R31S"])
         #expect(!d.isAcross("D", from: nq))
         #expect(!d.isExpress(for: nq))
-        let departures = [train("D", 10.5, trip: "d1", at: "R31S"), train("D", 14, trip: "d2", at: "R31S")]
+        let departures = [train("D", 10.5, trip: "d1", at: "R31S"), train("D", 15.5, trip: "d2", at: "R31S")]
         let connections = d.connections(
             for: [train("N", 2, trip: "n1", at: "R20S"), train("Q", 3, trip: "q1", at: "R20S")],
             atChange: [train("N", 10, trip: "n1", at: "R31S"), train("Q", 10, trip: "q1", at: "D24S")],
             departures: departures, selection: nq)
         #expect(connections.map { $0.next?.trip } == ["d1", "d2"])
 
-        // An N rerouted to the B and Q's platform is a walk from the R's
+        // An N rerouted to the B and Q's platform is a walk from the R's, of five minutes
         let nAndQ = Change(stationID: "R31", routes: ["N", "Q"])
         #expect(nAndQ.departureStops(for: prospect) == ["D24N", "R31N"])
         let rerouted = nAndQ.connections(
             for: [train("R", 2, trip: "r1", at: "R34N")],
             atChange: [train("R", 10, trip: "r1", at: "R31N")],
-            departures: [train("N", 10.3, trip: "n1", at: "D24N"), train("Q", 13.5, trip: "q1", at: "D24N")],
+            departures: [train("N", 10.3, trip: "n1", at: "D24N"), train("Q", 15.5, trip: "q1", at: "D24N")],
             selection: prospect)
         #expect(rerouted.first?.next?.trip == "q1")
         #expect(nAndQ.isAcross(from: train("R", 10, trip: "r1", at: "R31N"), to: train("N", 11, trip: "n2", at: "R31N")))

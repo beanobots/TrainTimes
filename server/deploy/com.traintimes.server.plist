@@ -31,7 +31,7 @@
         <key>APNS_TEAM_ID</key>
         <string>XUU899AG4D</string>
         <key>APNS_TOPIC</key>
-        <string>com.rtrainwidget.app.push-type.liveactivity</string>
+        <string>dev.dctp.leeway.push-type.liveactivity</string>
         <!-- on: App Attest. off (development only, e.g. the simulator) also needs
              API_SECRET (openssl rand -hex 32) -->
         <key>ATTEST_MODE</key>
@@ -41,7 +41,7 @@
         <key>ATTEST_ENVIRONMENT</key>
         <string>production</string>
         <key>APP_ID</key>
-        <string>XUU899AG4D.com.rtrainwidget.app</string>
+        <string>XUU899AG4D.dev.dctp.leeway</string>
         <key>DATA_DIR</key>
         <string>/usr/local/traintimes/data</string>
         <key>HOST</key>

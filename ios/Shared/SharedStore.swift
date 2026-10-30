@@ -5,7 +5,7 @@ import Foundation
 /// own files).
 enum SharedStore {
     /// As in Config/App.entitlements and Config/Widget.entitlements.
-    static let groupID = "group.com.rtrainwidget.app"
+    static let groupID = "group.dev.dctp.leeway"
 
     /// Nil if not in the App Group (e.g. signed without the entitlement).
     private static let container: URL? = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: groupID)

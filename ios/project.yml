@@ -1,6 +1,6 @@
 # Describes the Xcode project; run `xcodegen generate` here to make
-# NextRTrain.xcodeproj, so no .xcodeproj is stored.
-name: NextRTrain
+# Leeway.xcodeproj, so no .xcodeproj is stored.
+name: Leeway
 options:
   deploymentTarget:
     # WidgetKit push updates (the push server reloading widgets with the countdown's times), and
@@ -14,21 +14,21 @@ settings:
     # Signing for builds from Xcode
     DEVELOPMENT_TEAM: XUU899AG4D
 targets:
-  NextRTrain:
+  Leeway:
     type: application
     platform: iOS
     sources:
       - App
       - Shared
       # The Widgets tab draws the Next train and Transfers widgets as on the Home Screen
-      - Widget/RTrainWidget.swift
+      - Widget/LeewayWidget.swift
       - Widget/NextTrainBoard.swift
       - Widget/WaysBoard.swift
       - Widget/Pills.swift
       - Widget/BoardStyle.swift
       - Widget/StopCard.swift
     dependencies:
-      - target: RTrainWidget
+      - target: LeewayWidget
         embed: true
       - target: ShareExtension
         embed: true
@@ -52,12 +52,15 @@ targets:
         # A countdown the push server doesn't have refreshes in the background, and the
         # timetable to fall back on (TimetableStore) about once a day
         BGTaskSchedulerPermittedIdentifiers:
-          - com.rtrainwidget.app.refresh
-          - com.rtrainwidget.app.timetable
+          - dev.dctp.leeway.refresh
+          - dev.dctp.leeway.timetable
+        # fetch: as above; location: following a walk to and from the train with the screen
+        # off, from Go (WalkSession), with the blue location pill
         UIBackgroundModes:
           - fetch
-        # Stations near you, in the Nearby tab and on the Nearby widget
-        NSLocationWhenInUseUsageDescription: Your location shows the stations near you and their next trains, in the app and on the Nearby widget.
+          - location
+        # Stations near you, in the Nearby tab and on the Nearby widget; walks to and from trains
+        NSLocationWhenInUseUsageDescription: Your location shows the stations near you and their next trains, in the app and on the Nearby widget, and the turns on your walk to and from the train.
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
@@ -66,7 +69,7 @@ targets:
       path: Config/App.entitlements
       properties:
         com.apple.security.application-groups:
-          - group.com.rtrainwidget.app
+          - group.dev.dctp.leeway
         # The countdown's push token; Xcode signs distribution builds with production
         aps-environment: development
         # App Attest, for the push server. Ignored once distributed (TestFlight, App Store),
@@ -74,11 +77,11 @@ targets:
         com.apple.developer.devicecheck.appattest-environment: development
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.rtrainwidget.app
+        PRODUCT_BUNDLE_IDENTIFIER: dev.dctp.leeway
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         # Code shared with the widget checks this: only the app may start or update Live Activities
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) APP
-  RTrainWidget:
+  LeewayWidget:
     type: app-extension
     platform: iOS
     sources:
@@ -102,12 +105,12 @@ targets:
       path: Config/Widget.entitlements
       properties:
         com.apple.security.application-groups:
-          - group.com.rtrainwidget.app
+          - group.dev.dctp.leeway
         # WidgetKit push updates: the push server reloads the widgets as the countdown's times change
         aps-environment: development
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.rtrainwidget.app.widget
+        PRODUCT_BUNDLE_IDENTIFIER: dev.dctp.leeway.widget
         SKIP_INSTALL: YES
   # The Share sheet's action for Apple Maps and Google Maps directions, which the Transit
   # Directions widget then shows for an hour
@@ -140,8 +143,8 @@ targets:
       path: Config/Share.entitlements
       properties:
         com.apple.security.application-groups:
-          - group.com.rtrainwidget.app
+          - group.dev.dctp.leeway
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.rtrainwidget.app.share
+        PRODUCT_BUNDLE_IDENTIFIER: dev.dctp.leeway.share
         SKIP_INSTALL: YES

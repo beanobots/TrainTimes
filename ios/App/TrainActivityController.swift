@@ -217,6 +217,96 @@ enum TrainActivityController {
                                      includingOutages: selection.elevatorAlerts, now: now)
     }
 
+    // MARK: Walks
+
+    /// How long a walk's countdown can run: the walk, the ride and the walk again, over an hour
+    /// for the longest trips.
+    static let walkLifetime: TimeInterval = 2 * 60 * 60
+
+    /// Starts the countdown for New Trip's Go: to the first of `trains` (soonest first) that
+    /// leaves once you're down, with `walk` over it. Not registered with the push server, whose
+    /// countdowns have no walk; the app, following you, updates it (`updateWalk`). Replaces any
+    /// running countdown.
+    static func startWalk(for selection: Selection, trains: [Arrival], walk: WalkState) async throws {
+        try await inTurn {
+            guard ActivityAuthorizationInfo().areActivitiesEnabled else { throw Problem.notAllowed }
+            let now = Date.now
+            var state = CountdownState(for: selection, trains: trains, notice: nil, now: now, following: nil, after: nil)
+            if state == nil, let board = try? await fetchBoard(for: selection, settings: SharedStore.loadSettings(), now: now) {
+                state = CountdownState(for: selection, board: board, settings: SharedStore.loadSettings(), now: now,
+                                       following: nil, after: nil)
+            }
+            guard var state else { throw Problem.noTrains }
+            state.walk = walk
+            let ends = now.addingTimeInterval(walkLifetime)
+            let attributes = TrainActivityAttributes(selection: selection, stationName: selection.station?.name ?? "",
+                                                     heading: selection.heading, ends: ends)
+            let activity = try Activity.request(attributes: attributes, content: content(state, ends: ends))
+            await endActivities(except: activity.id)
+            let countdown = SharedStore.Countdown(trainID: selection.trainID, ends: ends, widgetID: nil)
+            let old = record(countdown)
+            share(activity)
+            await reloadWidgets(from: old, to: countdown)
+        }
+    }
+
+    /// Puts up a walk with no train, walking all the way (`WalkSession.isWalkOnly`): its turns
+    /// and when you'll get there, as walking out from a train. No station or line, so nothing for
+    /// the widgets or the push server to follow; it's stale only once its time's up.
+    static func startPlainWalk(_ walk: WalkState) async throws {
+        try await inTurn {
+            guard ActivityAuthorizationInfo().areActivitiesEnabled else { throw Problem.notAllowed }
+            let now = Date.now
+            let ends = now.addingTimeInterval(walkLifetime)
+            var state = CountdownState(train: ends, trip: "", isLive: false, terminal: nil, following: [],
+                                       notice: nil, updated: now)
+            state.walk = walk
+            let attributes = TrainActivityAttributes(selection: Selection(stationID: "", routes: [], direction: .north),
+                                                     stationName: "", heading: "", ends: ends)
+            let activity = try Activity.request(attributes: attributes, content: content(state, ends: ends))
+            await endActivities(except: activity.id)
+            // Another countdown it took the place of is gone from the widgets
+            await tellWidgets(nil)
+        }
+    }
+
+    /// Updates the walk's countdown: `walk` over it, and the first of `trains` you can catch if
+    /// given (soonest first, those you'd miss left out), else its train as it was. Nil `walk`
+    /// makes it a plain countdown again.
+    static func updateWalk(_ walk: WalkState?, trains: [Arrival]?) async {
+        _ = try? await inTurn {
+            for activity in running where activity.content.state.walk != nil {
+                let selection = activity.attributes.selection
+                var state = activity.content.state.movedOn(at: .now)
+                if let trains, var fresh = CountdownState(for: selection, trains: trains, notice: state.notice, now: .now,
+                                                          following: nil, after: nil) {
+                    fresh.updated = .now
+                    state = fresh
+                }
+                state.walk = walk
+                guard state != activity.content.state else { continue }
+                await post(state, to: activity)
+            }
+        }
+    }
+
+    /// Whether a walk's countdown is up: not swiped away, or ended for another countdown.
+    static var isWalking: Bool {
+        running.contains { $0.content.state.walk != nil }
+    }
+
+    /// Ends the walk's countdown, leaving any other.
+    static func endWalk() async {
+        _ = try? await inTurn {
+            let walks = running.filter { $0.content.state.walk != nil }
+            guard !walks.isEmpty else { return }
+            for activity in walks {
+                await activity.end(nil, dismissalPolicy: .immediate)
+            }
+            if running.isEmpty { await tellWidgets(nil) }
+        }
+    }
+
     /// A widget's walk button: stops the countdown if that widget shows it, else starts one
     /// (to `trip` if given, mentioning `change`'s alerts too; see `startNow`).
     static func toggle(for selection: Selection, change: Change? = nil, widgetID: String,
@@ -242,7 +332,9 @@ enum TrainActivityController {
             let settings = SharedStore.loadSettings()
             let now = Date.now
             var changed = false
+            // Not a walk's, whose trains its walk keeps (it may be past this train, at a change)
             for activity in running where activity.attributes.selection.trainID == selection.trainID
+                && activity.content.state.walk == nil
                 && (activity.content.state.updated < fetched || activity.content.state.updated > now) {
                 let board = await withChangeAlerts(board, for: activity.attributes.selection,
                                                    change: activity.attributes.change, now: fetched)
@@ -260,6 +352,8 @@ enum TrainActivityController {
     /// next. With no trains it stays up, saying so, until stopped.
     static func refresh() async {
         _ = try? await inTurn { await refreshNow() }
+        // A walk's, by its walk: the leg it's on, restored if iOS had closed the app
+        await ActiveWalk.refreshFromLockScreen()
         // Another try at the server for any it doesn't have, without waiting for it
         Task { await ActivityPush.retry() }
     }
@@ -269,7 +363,8 @@ enum TrainActivityController {
         // May have ended unnoticed (swiped away)
         if running.isEmpty { await tellWidgets(nil) }
         var changed: Set<String> = []
-        for activity in running {
+        // Not a walk's: its walk refreshes it (`refresh()`)
+        for activity in running where activity.content.state.walk == nil {
             let selection = activity.attributes.selection
             let settings = SharedStore.loadSettings()
             let now = Date.now

@@ -13,7 +13,7 @@ enum AttestKey {
     /// False in the simulator and on devices without a Secure Enclave.
     static var isSupported: Bool { DCAppAttestService.shared.isSupported }
 
-    private static let service = "com.rtrainwidget.app.appattest"
+    private static let service = "dev.dctp.leeway.appattest"
     private static let account = "keyID"
     private static let attestedKey = "attestKeyAttested"
 
