@@ -141,8 +141,8 @@ struct Selection: Codable, Hashable, Sendable {
         connections.first { leaveTime(for: $0.first) > now }
     }
 
-    /// Default until you choose: Prospect Av, R, toward Manhattan.
-    static let fallback = Selection(stationID: "R34", routes: ["R"], direction: .north)
+    /// Default until you choose: 14 St-Union Sq, N Q R W, toward Uptown & Queens.
+    static let fallback = Selection(stationID: "R20", routes: ["N", "Q", "R", "W"], direction: .north)
 
     var station: Station? { StationDirectory.station(id: stationID) }
 

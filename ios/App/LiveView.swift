@@ -961,7 +961,7 @@ struct LiveView: View {
             if showsBuses { busTiles }
             if showsBikes { dockTiles }
             if !SharedStore.isAvailable {
-                Label("The widget can't see your choice on this install, so it keeps showing Prospect Av (R) toward Manhattan. Make sure the app and widget both have the App Group in Xcode, then reinstall.",
+                Label("The widget can't see your choice on this install, so it keeps showing 14 St-Union Sq (N Q R W) uptown. Make sure the app and widget both have the App Group in Xcode, then reinstall.",
                       systemImage: "exclamationmark.triangle")
                     .font(.footnote)
                     .foregroundStyle(.orange)

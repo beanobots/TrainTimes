@@ -45,6 +45,11 @@ final class SettingsStore {
     /// The selection saved by older versions, read once: Settings reads `defaultTrain` as it
     /// redraws, and nothing writes the file now.
     @ObservationIgnored private lazy var savedSelection = SharedStore.load()
+    @ObservationIgnored private lazy var hasSavedSelection = SharedStore.hasSavedSelection
+
+    /// No default train, nor one older versions saved, as setup's No Primary Stop leaves it:
+    /// `defaultTrain` is then only `Selection.fallback`, which Siri and new widgets still use.
+    var hasNoStop: Bool { settings.defaultTrain == nil && !hasSavedSelection }
 
     /// Which times get a symbol; live ones always do with Differentiate Without Color.
     func timeMarks(withoutColor: Bool) -> TimeMarks {
@@ -143,7 +148,8 @@ struct SettingsView: View {
             .accessibilityAddTraits(.isHeader)
     }
 
-    /// The default train as a faint card, as the others; a tap picks another.
+    /// The default train as a faint card, as the others; a tap picks another. Or, with none
+    /// chosen, No Primary Stop and the train used meanwhile.
     private var homeStation: some View {
         @Bindable var store = store
         let selection = store.defaultTrain
@@ -151,16 +157,32 @@ struct SettingsView: View {
             choosingDefaultTrain = true
         } label: {
             HStack(spacing: 12) {
-                LineBullets(routes: selection.routes, size: 36)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(selection.station?.name ?? "Choose a Train").font(.headline)
-                    if selection.station != nil {
-                        Text(store.settings.defaultBothWays ? "Both ways" : "Toward \(selection.heading)")
+                if store.hasNoStop {
+                    Image(systemName: "mappin.slash")
+                        .font(.headline)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 36, height: 36)
+                        .background(.quaternary, in: Circle())
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("No Primary Stop").font(.headline)
+                        Text("Widgets use \(selection.station?.name ?? "14 St-Union Sq") until you pick one")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
+                    .lineLimit(2)
+                } else {
+                    LineBullets(routes: selection.routes, size: 36)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(selection.station?.name ?? "Choose a Train").font(.headline)
+                        if selection.station != nil {
+                            Text(store.settings.defaultBothWays ? "Both ways" : "Toward \(selection.heading)")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .lineLimit(1)
                 }
-                .lineLimit(1)
                 Spacer(minLength: 0)
                 Image(systemName: "pencil")
                     .font(.body.weight(.semibold))
@@ -173,7 +195,8 @@ struct SettingsView: View {
         .buttonStyle(.plain)
         .background(Self.faint, in: Self.card)
         .accessibilityElement(children: .combine)
-        .accessibilityHint("Choose another station, line or direction")
+        .accessibilityHint(store.hasNoStop ? "Choose a station, line and direction"
+                                           : "Choose another station, line or direction")
         .sheet(isPresented: $choosingDefaultTrain) {
             TrainPicker(selection: $store.defaultTrain, bothWays: $store.settings.defaultBothWays)
         }
