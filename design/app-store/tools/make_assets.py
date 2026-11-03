@@ -2,7 +2,8 @@
 """Leeway's App Store artwork: banners, and screenshots framed in the icon's platform edge.
 
     python3 make_assets.py banners
-        Writes the banners into ../banners/.
+        Writes the banners (5244x2950, 1200x630, 1500x500) and the search results image
+        (2950x5244) into ../banners/.
 
     python3 make_assets.py screenshots RAW_DIR CAPTIONS_JSON OUT_DIR [--size 1320x2868]
         Frames each raw screenshot named in CAPTIONS_JSON ({"file.png": "Headline", ...}, in
@@ -100,7 +101,47 @@ def icon_tile(size):
 TAGLINE = "For the New Yorker without a car"
 
 
+def portrait(w, h, path):
+    """The banner stood upright, for the search results image: the icon, LEEWAY and the subhead
+    stacked over the concrete, the platform's edge across the lower part."""
+    W, H = w * SS, h * SS
+    im = Image.new("RGB", (W, H), FLOOR)
+    d = ImageDraw.Draw(im)
+    strip_top, strip_bottom = H * 0.66, H * 0.84
+    platform_edge(d, 0, W, strip_top, strip_bottom, H, W * 0.11)
+
+    tile = round(W * 0.40)
+    room = W * 0.84
+    size = round(W * 0.13)
+    while True:
+        f = font(size)
+        tr = size * 0.04
+        if tracked_width("LEEWAY", f, tr) <= room or size < 20:
+            break
+        size -= 2
+    sub = font(round(size * 0.3), weight=500, width=100)
+    while sub.getlength(TAGLINE) > room:
+        sub = font(sub.size - 2, weight=500, width=100)
+    lee = f.getbbox("LEEWAY")
+    sb = sub.getbbox(TAGLINE)
+    gap1, gap2 = W * 0.09, size * 0.32
+    group = tile + gap1 + (lee[3] - lee[1]) + gap2 + (sb[3] - sb[1])
+    y0 = round((strip_top - group) / 2)
+    tx = round((W - tile) / 2)
+    sh, pad = shadow((tile, tile), round(tile * 0.2237), round(W * 0.025), 0.3)
+    im.paste(sh, (tx - pad, y0 - pad + round(W * 0.015)), sh)
+    t = icon_tile(tile)
+    im.paste(t, (tx, y0), t)
+    ly = y0 + tile + gap1 - lee[1]
+    draw_tracked(d, (W - tracked_width("LEEWAY", f, tr)) / 2, ly, "LEEWAY", f, INK, tr)
+    d.text(((W - sub.getlength(TAGLINE)) / 2, ly + lee[3] + gap2 - sb[1]), TAGLINE, font=sub, fill=INK)
+    im.resize((w, h), Image.LANCZOS).save(path, optimize=True)
+    print("wrote", path)
+
+
 def banner(w, h, path):
+    if h > w:
+        return portrait(w, h, path)
     W, H = w * SS, h * SS
     im = Image.new("RGB", (W, H), FLOOR)
     d = ImageDraw.Draw(im)
@@ -198,8 +239,8 @@ def main(argv):
     if len(argv) >= 2 and argv[1] == "banners":
         out = os.path.join(ROOT, "banners")
         os.makedirs(out, exist_ok=True)
-        for w, h, name in [(1920, 1080, "leeway-banner-1920x1080.png"), (1200, 630, "leeway-banner-1200x630.png"),
-                           (1500, 500, "leeway-banner-1500x500.png")]:
+        for w, h, name in [(5244, 2950, "leeway-banner-5244x2950.png"), (2950, 5244, "leeway-search-results-2950x5244.png"),
+                           (1200, 630, "leeway-banner-1200x630.png"), (1500, 500, "leeway-banner-1500x500.png")]:
             banner(w, h, os.path.join(out, name))
     elif len(argv) >= 5 and argv[1] == "screenshots":
         raw_dir, captions, out = argv[2], argv[3], argv[4]
