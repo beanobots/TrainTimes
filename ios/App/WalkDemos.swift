@@ -31,16 +31,26 @@ enum WalkDemos {
              to: .init(latitude: 40.77400, longitude: -73.97120), endName: "Bethesda Terrace"),
     ]
 
-    static var launchIndex: Int? {
-        let args = ProcessInfo.processInfo.arguments
-        guard let index = args.firstIndex(of: "-walkdemo"), index + 1 < args.count else { return nil }
-        return Int(args[index + 1])
+    /// Watches Documents/walkdemo-request.txt, starting the walk it names and deleting it: the
+    /// app's relaunched by iOS for the walk under way, so launch arguments don't get through.
+    @MainActor
+    static func watch() async {
+        let url = URL.documentsDirectory.appending(path: "walkdemo-request.txt")
+        while !Task.isCancelled {
+            if let text = try? String(contentsOf: url, encoding: .utf8),
+               let index = Int(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                try? FileManager.default.removeItem(at: url)
+                await start(index)
+            }
+            try? await Task.sleep(for: .seconds(1))
+        }
     }
 
     /// Plans demo `index` as Go would and starts it, printing a point a third of the way along.
     @MainActor
     static func start(_ index: Int) async {
         guard all.indices.contains(index) else { return }
+        note("DEMO \(index) starting")
         let demo = all[index]
         do {
             let walk = try await WalkingDirections.walk(from: demo.from, to: demo.to)
@@ -48,12 +58,20 @@ enum WalkDemos {
                                       end: CLLocation(latitude: demo.to.latitude, longitude: demo.to.longitude))
             ActiveWalk.shared.begin(session)
             let point = walk.path(last: walk.meters * 0.67).first ?? walk.points[0]
-            print("DEMO \(index) \(demo.title): \(Int(walk.meters)) m, \(walk.steps.count) steps, "
-                  + "\(walk.crossings?.count ?? 0) crossings, fitted \(walk.crossings != nil)")
-            print("DEMO AT \(point.lat),\(point.lon)")
+            note("DEMO \(index) \(demo.title): \(Int(walk.meters)) m, \(walk.steps.count) steps, "
+                 + "\(walk.crossings?.count ?? 0) crossings, fitted \(walk.crossings != nil)")
+            note("DEMO AT \(point.lat),\(point.lon)")
         } catch {
-            print("DEMO \(index) failed: \(error)")
+            note("DEMO \(index) failed: \(error)")
         }
+    }
+
+    /// Printed, and added to Documents/walkdemo.txt for reading from outside.
+    static func note(_ line: String) {
+        print(line)
+        let url = URL.documentsDirectory.appending(path: "walkdemo.txt")
+        let old = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        try? (old + line + "\n").write(to: url, atomically: true, encoding: .utf8)
     }
 }
 #endif

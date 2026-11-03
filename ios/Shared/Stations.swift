@@ -250,8 +250,8 @@ struct Platform: Codable, Hashable, Identifiable, Sendable {
     /// (more than a passage under the street, or past a train's length).
     func along(of entrance: Station.Entrance) -> Int? {
         guard let heading else { return nil }
-        let east = (entrance.lon - lon) * 111_320 * cos(lat * .pi / 180)
-        let north = (entrance.lat - lat) * 111_320
+        let east = (entrance.lon - lon) * Earth.metresPerDegree * cos(lat * .pi / 180)
+        let north = (entrance.lat - lat) * Earth.metresPerDegree
         let angle = Double(heading) * .pi / 180
         let along = east * sin(angle) + north * cos(angle)
         let beside = abs(east * cos(angle) - north * sin(angle))
@@ -481,6 +481,26 @@ struct LineWay {
     let trains: [Arrival]?
 
     var direction: Direction { selection.direction }
+}
+
+extension String {
+    /// A station's name before any second name: "Atlantic Av" for Atlantic Av-Barclays Ctr.
+    /// A hyphen after a single word or number isn't a split, so Hoyt-Schermerhorn Sts stays whole.
+    var mainStationName: String {
+        var rest = self[...]
+        while let hyphen = rest.firstIndex(of: "-") {
+            if self[..<hyphen].contains(" ") { return String(self[..<hyphen]) }
+            rest = self[index(after: hyphen)...]
+        }
+        return self
+    }
+}
+
+/// The earth as the app takes it over the city's few miles: flat.
+enum Earth {
+    /// Metres in a degree of latitude, and of longitude at the equator (times the cosine of the
+    /// latitude elsewhere).
+    static let metresPerDegree: Double = 111_320
 }
 
 extension Station {
@@ -854,8 +874,10 @@ enum StationDirectory {
 }
 
 /// Station search by name and borough (train picker, shortcuts): "86 st brooklyn", "34th street".
-/// Each query word must prefix a station word, ignoring case and punctuation; MTA abbreviations
-/// ("St", "Av", "Sq") match the full words, and numbers match ordinals ("34th").
+/// Each query word must prefix a station word, ignoring case, accents and punctuation; MTA
+/// abbreviations ("St", "Av", "Sq") match the full words, numbers match ordinals ("34th"), and two
+/// words run together match too ("timessq"). With nothing found that way, `filter` finds near
+/// spellings instead: "brodway junction", "lexinton".
 struct StationSearch {
     private let words: [String]
 
@@ -863,16 +885,49 @@ struct StationSearch {
         words = Self.words(in: text)
     }
 
-    /// An empty search matches every station.
+    /// An empty search matches every station. Exact only: no near spellings.
     func matches(_ station: Station) -> Bool {
         guard !words.isEmpty else { return true }
-        let forms = Self.formsByStation[station.id] ?? Self.forms(of: station)
+        let forms = forms(of: station)
         return words.allSatisfy { word in forms.contains { $0.hasPrefix(word) } }
     }
 
-    /// Lowercased, apostrophes dropped ("St Mary's" is "st marys"), split on non-alphanumerics.
+    /// The stations the search finds, in their order. If none match exactly, those a typo or two
+    /// away instead, closest first: "Fultn St" is Fulton St.
+    func filter(_ stations: [Station]) -> [Station] {
+        let exact = stations.filter(matches)
+        guard exact.isEmpty, words.contains(where: { Typos.allowed(in: $0) > 0 }) else { return exact }
+        let near = stations.enumerated().compactMap { index, station in
+            typos(in: station).map { (station: station, typos: $0, index: index) }
+        }
+        return near.sorted { ($0.typos, $0.index) < ($1.typos, $1.index) }.map(\.station)
+    }
+
+    /// The fewest typos that make each search word start one of the station's words, added up;
+    /// nil if a word is further than `Typos.allowed` from all of them.
+    private func typos(in station: Station) -> Int? {
+        let forms = forms(of: station)
+        var total = 0
+        for word in words {
+            let allowed = Typos.allowed(in: word)
+            var best = allowed + 1
+            for form in forms where best > 0 {
+                best = min(best, Typos.count(from: word, toStartOf: form, upTo: best - 1))
+            }
+            guard best <= allowed else { return nil }
+            total += best
+        }
+        return total
+    }
+
+    private func forms(of station: Station) -> [String] {
+        Self.formsByStation[station.id] ?? Self.forms(of: station)
+    }
+
+    /// Lowercased without accents, apostrophes dropped ("St Mary's" is "st marys"), split on
+    /// non-alphanumerics.
     private static func words(in text: String) -> [String] {
-        text.lowercased()
+        text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil).lowercased()
             .filter { $0 != "'" && $0 != "’" }
             .split { !$0.isLetter && !$0.isNumber }
             .map(String.init)
@@ -892,16 +947,18 @@ struct StationSearch {
         for word in entry.value { shortenings[word, default: []].append(entry.key) }
     }
 
-    /// Each word of a station's name and borough, plus abbreviated/expanded forms and ordinals
-    /// ("34" is also "34th").
+    /// Each word of a station's name and borough, plus abbreviated/expanded forms, ordinals
+    /// ("34" is also "34th"), and each two words of the name run together ("Times Sq" is "timessq").
     private static func forms(of station: Station) -> [String] {
-        words(in: "\(station.name) \(station.borough)").flatMap { word -> [String] in
+        let name = words(in: station.name)
+        let joined = zip(name, name.dropFirst()).map { $0 + $1 }
+        return (name + words(in: station.borough)).flatMap { word -> [String] in
             var forms = [word]
             forms += abbreviations[word] ?? []
             forms += shortenings[word] ?? []
             if let number = Int(word) { forms.append(ordinal(number)) }
             return forms
-        }
+        } + joined
     }
 
     /// "1st", "22nd", "103rd", "111th".
@@ -913,4 +970,43 @@ struct StationSearch {
     /// Every station's forms by id, computed once.
     private static let formsByStation: [String: [String]] = Dictionary(
         StationDirectory.all.map { ($0.id, forms(of: $0)) }, uniquingKeysWith: { first, _ in first })
+}
+
+/// Counting typos between what's typed and a name, for searches that forgive misspellings.
+enum Typos {
+    /// How many typos a typed word may have: none in numbers or words under four letters, where
+    /// one wrong letter makes another word ("av", "86"); one up to seven letters; then two.
+    static func allowed(in word: String) -> Int {
+        guard word.allSatisfy(\.isLetter) else { return 0 }
+        switch word.count {
+        case ..<4: return 0
+        case ..<8: return 1
+        default: return 2
+        }
+    }
+
+    /// The fewest letters to add, drop, change or swap with the next so `word` is how `name`
+    /// starts, as the word may be partly typed: "brodw" is one from "broadway". Stops counting
+    /// past `limit`, returning `limit + 1`.
+    static func count(from word: String, toStartOf name: String, upTo limit: Int) -> Int {
+        let word = Array(word), name = Array(name)
+        guard !word.isEmpty else { return 0 }
+        // Optimal string alignment distance, by rows of `word`; the answer is the least of the
+        // last row, as any start of `name` will do.
+        var before = [Int](), above = Array(0...name.count)
+        for i in 1...word.count {
+            var row = [i] + Array(repeating: 0, count: name.count)
+            for j in stride(from: 1, through: name.count, by: 1) {
+                let change = word[i - 1] == name[j - 1] ? 0 : 1
+                row[j] = min(above[j] + 1, row[j - 1] + 1, above[j - 1] + change)
+                if i > 1, j > 1, word[i - 1] == name[j - 2], word[i - 2] == name[j - 1] {
+                    row[j] = min(row[j], before[j - 2] + 1)
+                }
+            }
+            // Every way on only adds: give up once the whole row is past the limit
+            if row.min() ?? 0 > limit { return limit + 1 }
+            (before, above) = (above, row)
+        }
+        return min(above.min() ?? 0, limit + 1)
+    }
 }

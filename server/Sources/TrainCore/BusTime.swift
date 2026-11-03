@@ -116,7 +116,7 @@ actor BusTime {
     init(key: String, perClientPerDay: Int = Limits().busTimePerIPPerDay, perDay: Int = Limits().busTimePerDay,
          fetch: Fetch? = nil) {
         self.key = key
-        perClient = DailyLimiter(limit: perClientPerDay)
+        perClient = DailyLimiter(limit: perClientPerDay, byAddress: true)
         everyone = DailyLimiter(limit: perDay)
         self.fetch = fetch ?? Web.fetch
     }
@@ -182,6 +182,17 @@ actor BusTime {
         return arrivals.filter { ($0.expected ?? $0.aimed ?? now) > now.addingTimeInterval(-60) }
     }
 
+    /// `arrivals(at:lineRef:client:now:)` on every line, as a result, for `nearbyPlaces`' task
+    /// group. A typed-throws `do`/`catch` in the group's child task instead comes out of a
+    /// release build with every stop's buses gone (Swift 6.4), so the catch is made here.
+    private func everyLine(at id: String, client: String, now: Date) async -> Result<[Arrival], Failure> {
+        do throws(Failure) {
+            return .success(try await arrivals(at: id, lineRef: nil, client: client, now: now))
+        } catch {
+            return .failure(error)
+        }
+    }
+
     /// Meters a stop may be from the one across from it, its other way.
     static let pairRange: Double = 200
 
@@ -227,23 +238,25 @@ actor BusTime {
         // Every stop's buses asked of Bus Time together
         let read = await withTaskGroup(of: (String, Result<[Arrival], Failure>).self) { group in
             for id in picked.flatMap({ $0.map(\.stop.id) }) {
-                group.addTask {
-                    do throws(Failure) {
-                        return (id, .success(try await self.arrivals(at: id, lineRef: nil, client: client, now: now)))
-                    } catch {
-                        return (id, .failure(error))
-                    }
-                }
+                group.addTask { (id, await self.everyLine(at: id, client: client, now: now)) }
             }
             var read: [String: Result<[Arrival], Failure>] = [:]
             for await (id, arrivals) in group { read[id] = arrivals }
             return read
         }
+        // One stop Bus Time fails on (a timeout, the limit reached partway) leaves the others' buses;
+        // only if every one failed is there nothing to show
+        let failures = read.values.compactMap { result -> Failure? in
+            if case .failure(let failure) = result { return failure }
+            return nil
+        }
+        if !read.isEmpty, failures.count == read.count, let first = failures.first { throw first }
         var places: [[Way]] = []
         for place in picked {
             var ways: [Way] = []
             for pick in place {
-                ways.append(Way(stop: pick.stop, meters: pick.meters, arrivals: try read[pick.stop.id]?.get() ?? []))
+                let arrivals = (try? read[pick.stop.id]?.get()) ?? []
+                ways.append(Way(stop: pick.stop, meters: pick.meters, arrivals: arrivals))
             }
             places.append(ways)
         }

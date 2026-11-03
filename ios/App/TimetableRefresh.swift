@@ -5,7 +5,7 @@ extension TimetableStore {
     /// As in project.yml's BGTaskSchedulerPermittedIdentifiers.
     static let refreshTaskID = "dev.dctp.leeway.timetable"
 
-    private static let log = Logger(subsystem: "dev.dctp.leeway", category: "Timetable")
+    private static let log = AppLog(category: "Timetable")
 
     /// The background refresh: a new timetable, and another refresh a day on.
     static func backgroundRefresh() async {
@@ -22,7 +22,7 @@ extension TimetableStore {
         do {
             try BGTaskScheduler.shared.submit(request)
         } catch {
-            log.notice("Couldn't schedule a timetable refresh: \(error.localizedDescription, privacy: .public)")
+            log.notice("Couldn't schedule a timetable refresh: \(error.localizedDescription)")
         }
     }
 }

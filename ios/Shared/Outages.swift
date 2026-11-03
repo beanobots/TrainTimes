@@ -46,16 +46,19 @@ enum EquipmentDirectory {
         try JSONDecoder().decode([String: Machine].self, from: Data(contentsOf: url))
     }
 
+    /// `all` by complex: asked of from views as they redraw, not every machine looked through
+    /// each time.
+    private static let byComplex: [String: [Machine]] = Dictionary(grouping: all.values, by: \.complex)
+
     static func hasEquipment(atComplex complex: String) -> Bool {
-        all.values.contains { $0.complex == complex }
+        byComplex[complex] != nil
     }
 
     /// Whether any equipment serves, or might serve, one of a station's `platforms`, as in
     /// `Outage.serves(anyOf:)`.
     static func hasEquipment(serving platforms: [Platform]) -> Bool {
         guard let complex = platforms.first?.complex else { return false }
-        return all.values.contains { machine in
-            guard machine.complex == complex else { return false }
+        return (byComplex[complex] ?? []).contains { machine in
             guard let stops = machine.stops, !stops.isEmpty else { return true }
             return platforms.contains { stops.contains($0.id) }
         }
@@ -64,7 +67,7 @@ enum EquipmentDirectory {
 
 enum OutagesFeed {
     /// Current and planned elevator and escalator outages (about 40 KB).
-    static let url = URL(string: "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fnyct_ene.json")!
+    static let url = URL(string: TrainService.mtaFeeds + "nyct%2Fnyct_ene.json")!
 
     /// Outages at a station complex, current first. Unreadable rows are skipped.
     static func outages(atComplex complex: String, in data: Data, equipment: [String: EquipmentDirectory.Machine] = EquipmentDirectory.all) throws -> [Outage] {

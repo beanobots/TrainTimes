@@ -9,6 +9,20 @@ enum TimerText {
     }
 }
 
+/// A train's countdown just past 0:00: "At Station" for `seconds` after it's due, then on to the
+/// next train. Trains only: a bus's countdown stays at 0:00.
+enum AtStation {
+    static let seconds: TimeInterval = 15
+    static let label = "At Station"
+    /// Where there's no room for `label`: the compact Dynamic Island.
+    static let shortLabel = "At Stn"
+
+    /// Whether a train due at `due` is at the station at `now`.
+    static func covers(_ due: Date, at now: Date) -> Bool {
+        due <= now && now < due.addingTimeInterval(seconds)
+    }
+}
+
 /// Minutes until a train or leave time, shared by the widgets, app and Siri: rounded down, so
 /// the last minute and after are "Now".
 struct MinutesToGo: Equatable {

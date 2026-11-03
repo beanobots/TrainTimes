@@ -107,14 +107,15 @@ struct StationStep: View {
     /// Alphabetical, or in stopping order when filtered by a line.
     private var matches: [Station] {
         let query = StationSearch(search)
-        let stations = StationDirectory.all.filter { station in
-            let onLine = filter.map { station.serves(label: $0) } ?? true
-            return onLine && query.matches(station)
-        }
+        let onLine = StationDirectory.all.filter { station in filter.map { station.serves(label: $0) } ?? true }
+        let stations = query.filter(onLine)
         return filter.map { StationDirectory.inLineOrder(stations, label: $0) } ?? stations
     }
 
     var body: some View {
+        // Each worked out once a redraw, not again for each place it's used: every station
+        // searched, or measured from you, on each key typed
+        let matches = matches
         List {
             Section {
                 // All lines: three rows of eight
@@ -139,7 +140,7 @@ struct StationStep: View {
             }
 
             if search.isEmpty {
-                nearbySection
+                nearbySection(nearby)
             }
 
             Section {
@@ -166,7 +167,7 @@ struct StationStep: View {
     /// A location prompt, then the closest stations or why there are none. Hidden once
     /// location is refused.
     @ViewBuilder
-    private var nearbySection: some View {
+    private func nearbySection(_ nearby: [Nearby.Result]) -> some View {
         if location.status == .notDetermined {
             Section {
                 Button {
@@ -615,7 +616,8 @@ struct DirectionStep: View {
     /// same height while they're fetched.
     @ViewBuilder private func nextTrains(_ direction: Direction, now: Date) -> some View {
         let marks = settings.settings.timeMarks(withoutColor: withoutColor)
-        if let found = trains[direction] {
+        // Fetched once, so those gone since are left out as it redraws
+        if let found = trains[direction]?.filter({ $0.time > now }) {
             if let next = found.first {
                 let wait = MinutesToGo(until: next.time, from: now)
                 VStack(alignment: .leading, spacing: 0) {

@@ -298,16 +298,3 @@ struct TransferMapLayout {
         return "on its way to \(headed.name)"
     }
 }
-
-extension String {
-    /// A station's name before any second name: "Atlantic Av" for Atlantic Av-Barclays Ctr.
-    /// A hyphen after a single word or number isn't a split, so Hoyt-Schermerhorn Sts stays whole.
-    var mainStationName: String {
-        var rest = self[...]
-        while let hyphen = rest.firstIndex(of: "-") {
-            if self[..<hyphen].contains(" ") { return String(self[..<hyphen]) }
-            rest = self[index(after: hyphen)...]
-        }
-        return self
-    }
-}

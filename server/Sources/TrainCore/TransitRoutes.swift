@@ -20,6 +20,9 @@ struct TransitRoute: Codable, Equatable, Sendable {
         /// Seconds from boarding to getting off, by Google's timetable: for timing what comes
         /// after a bus, as Bus Time only says when it's due where you board.
         var seconds: Int? = nil
+        /// When it leaves where it's boarded by Google's timetable, in seconds since 1970: for
+        /// timing a trip with a bus, which the app's timetable doesn't have.
+        var leaves: Int? = nil
     }
 
     enum Mode: String, Codable, Sendable {
@@ -56,7 +59,7 @@ actor TransitRoutes {
 
     init(key: String, perClientPerDay: Int, perDay: Int, fetch: Fetch? = nil) {
         self.key = key
-        perClient = DailyLimiter(limit: perClientPerDay)
+        perClient = DailyLimiter(limit: perClientPerDay, byAddress: true)
         everyone = DailyLimiter(limit: perDay)
         self.fetch = fetch ?? Web.fetch
     }
@@ -107,7 +110,10 @@ actor TransitRoutes {
     }
 
     /// Each route's subway rides from Google's response, and with `bus` its bus rides; routes
-    /// with none are left out. Nil if it isn't Google's response at all.
+    /// with none are left out, and so are those with a ride the app can't show (the LIRR, a
+    /// ferry, a bus without `bus`), which would leave a gap in the trip. The Staten Island
+    /// Railway, whichever kind of train Google calls it, is a subway ride. Nil if it isn't
+    /// Google's response at all.
     static func routes(in data: Data, bus: Bool = false) -> [TransitRoute]? {
         struct Response: Decodable {
             var routes: [Route]?
@@ -143,26 +149,36 @@ actor TransitRoutes {
             return TransitRoute.Stop(name: stop.name ?? "", latitude: point.latitude, longitude: point.longitude)
         }
         return (response.routes ?? []).compactMap { route in
-            let legs = (route.legs ?? []).flatMap { $0.steps ?? [] }.compactMap { step -> TransitRoute.Leg? in
-                let type = step.transitDetails?.transitLine?.vehicle?.type
-                let mode: TransitRoute.Mode
-                switch type {
-                case "SUBWAY", "METRO_RAIL": mode = .subway
-                case "BUS" where bus: mode = .bus
-                default: return nil
-                }
-                guard let details = step.transitDetails,
-                      let line = details.transitLine?.nameShort ?? details.transitLine?.name,
+            // Walks between the rides have no details
+            let rides = (route.legs ?? []).flatMap { $0.steps ?? [] }.compactMap(\.transitDetails)
+            var legs: [TransitRoute.Leg] = []
+            for details in rides {
+                guard let line = details.transitLine?.nameShort ?? details.transitLine?.name,
+                      let mode = mode(of: details.transitLine?.vehicle?.type, line: line, bus: bus),
                       let from = stop(details.stopDetails?.departureStop),
                       let to = stop(details.stopDetails?.arrivalStop) else { return nil }
                 let time = { (text: String?) in text.flatMap(Web.date) }
-                let seconds = time(details.stopDetails?.departureTime).flatMap { leaves in
+                let leaves = time(details.stopDetails?.departureTime)
+                let seconds = leaves.flatMap { leaves in
                     time(details.stopDetails?.arrivalTime).map { Int($0.timeIntervalSince(leaves)) }
                 }.flatMap { $0 >= 0 ? $0 : nil }
-                return TransitRoute.Leg(line: line, from: from, to: to, headsign: details.headsign,
-                                        stops: details.stopCount, mode: mode, seconds: seconds)
+                legs.append(TransitRoute.Leg(line: line, from: from, to: to, headsign: details.headsign,
+                                             stops: details.stopCount, mode: mode, seconds: seconds,
+                                             leaves: leaves.map { Int($0.timeIntervalSince1970) }))
             }
             return legs.isEmpty ? nil : TransitRoute(legs: legs)
+        }
+    }
+
+    /// A ride's mode by Google's kind of vehicle: nil for one the app can't show. The Staten
+    /// Island Railway ("SIR") is the app's SI, a subway line, whatever Google calls its trains.
+    private static func mode(of vehicle: String?, line: String, bus: Bool) -> TransitRoute.Mode? {
+        switch vehicle {
+        case "SUBWAY", "METRO_RAIL": return .subway
+        case "BUS": return bus ? .bus : nil
+        case "RAIL", "HEAVY_RAIL", "COMMUTER_TRAIN":
+            return ["SIR", "STATEN ISLAND RAILWAY"].contains(line.uppercased()) ? .subway : nil
+        default: return nil
         }
     }
 

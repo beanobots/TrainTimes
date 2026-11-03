@@ -4,7 +4,7 @@ import WidgetKit
 /// A trip with a bus on Transit Directions (`SharedBusTrip`, from New Trip), as Next train and
 /// Transfers draw a train: the bus's badge where a line's bullet goes, and how many stops away the
 /// bus is under its countdown. A bus alone as medium Next train, with when it comes and the next
-/// two; with a train before or after it, as medium Transfers, with the change.
+/// two; with a train before or after it, or a second bus, as medium Transfers, with the change.
 struct BusBoardEntry {
     var trip: BusTrip
     /// The next buses where the bus is boarded, soonest first.
@@ -18,6 +18,8 @@ struct BusBoardEntry {
     /// For a bus shown both ways (Nearby's Both): the other way, and its next buses.
     var otherWay: BusRide? = nil
     var otherBuses: [BusArrival] = []
+    /// For a trip by two buses: the second's next buses where it's boarded.
+    var onwardBuses: [BusArrival] = []
 
     /// How long Transit Directions draws ahead, and reloads after at most.
     static let ahead: TimeInterval = 20 * 60
@@ -28,6 +30,7 @@ struct BusBoardEntry {
     static func fetch(_ trip: BusTrip, otherWay: BusRide? = nil, now: Date) async -> BusBoardEntry {
         async let stopTimes = BusTimes.arrivals(line: trip.bus.line, at: trip.bus.from, now: now)
         async let otherTimes = otherWay.asyncMap { await BusTimes.arrivals(line: $0.line, at: $0.from, now: now) }
+        async let onwardTimes = trip.onward.asyncMap { await BusTimes.arrivals(line: $0.line, at: $0.from, now: now) }
         var trains: [Arrival] = []
         var trainTimes: [String: Date] = [:]
         var trainFailed = false
@@ -44,9 +47,12 @@ struct BusBoardEntry {
         }
         let buses = await stopTimes
         let other = await otherTimes
-        let problem = buses == nil ? "Couldn't reach Bus Time" : trainFailed ? "Couldn't reach the MTA" : nil
+        let onward = await onwardTimes
+        let problem = buses == nil || onward == .some(nil) ? "Couldn't reach Bus Time"
+            : trainFailed ? "Couldn't reach the MTA" : nil
         return BusBoardEntry(trip: trip, buses: buses?.arrivals ?? [], trains: trains, trainTimes: trainTimes,
-                             problem: problem, otherWay: otherWay, otherBuses: other??.arrivals ?? [])
+                             problem: problem, otherWay: otherWay, otherBuses: other??.arrivals ?? [],
+                             onwardBuses: onward??.arrivals ?? [])
     }
 
     /// When the board changes after `now`, sorted: each time what it counts down to goes, and
@@ -72,6 +78,11 @@ struct BusBoardEntry {
                 let reaches = time.addingTimeInterval(trip.bus.duration + walk)
                 if let train = trains.first(where: { $0.leaves >= reaches }) {
                     shown.change = (train.leaves.timeIntervalSince(reaches), trainTimes[train.trip])
+                }
+            } else if let onward = trip.onward {
+                let reaches = time.addingTimeInterval(trip.bus.duration + walk)
+                if let next = onwardBuses.first(where: { ($0.time ?? .distantPast) >= reaches }), let leaves = next.time {
+                    shown.change = (leaves.timeIntervalSince(reaches), leaves.addingTimeInterval(onward.duration))
                 }
             }
         } else {
@@ -205,7 +216,7 @@ struct BusBoardView: View {
                             }
                         }
                         Spacer(minLength: 0)
-                        if trip.train == nil {
+                        if trip.train == nil && trip.onward == nil {
                             leaves(countdown.time)
                         } else {
                             change
@@ -235,7 +246,7 @@ struct BusBoardView: View {
                 LineBullets(routes: train.selection.routes, size: 24)
             }
             Group {
-                if trip.train == nil {
+                if trip.train == nil && trip.onward == nil {
                     Text("\(trip.bus.from.name) \(Text(trip.bus.headsign ?? "").font(.footnote).foregroundStyle(Color.boardGray))")
                 } else {
                     Text("\(trip.startName) \(Text("→").foregroundStyle(Color.boardGray)) \(trip.endName)")
@@ -287,6 +298,9 @@ struct BusBoardView: View {
                 if trip.busFirst, let train = trip.train {
                     LineBullets(routes: train.selection.routes, size: 26)
                     Text((train.selection.station?.name ?? "").mainStationName.replacingOccurrences(of: " Av", with: ""))
+                } else if let onward = trip.onward {
+                    BusBadge(line: onward.line, size: 26)
+                    Text(onward.from.name)
                 } else {
                     BusBadge(line: trip.bus.line, size: 26)
                     Text(trip.bus.from.name)
@@ -296,7 +310,7 @@ struct BusBoardView: View {
             .foregroundStyle(Color.boardText)
             let walk = "\(max(1, Int((trip.walk / 60).rounded()))) min walk"
             Text(shown.change.map { "\(MinutesToGo(until: date.addingTimeInterval($0.wait), from: date).label) · \(walk)" }
-                 ?? (trip.busFirst ? "No train predicted" : "No bus predicted"))
+                 ?? (trip.busFirst && trip.train != nil ? "No train predicted" : "No bus predicted"))
                 .font(.footnote)
                 .foregroundStyle(Color.boardGray)
                 .monospacedDigit()

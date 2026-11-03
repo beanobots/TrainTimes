@@ -109,9 +109,12 @@ import Testing
         }
         let arrivals = try TrainService.arrivals(at: stops, own: [fresh], others: [stale], now: now)
         #expect(arrivals.map(\.trip) == ["R1"])
-        // Three minutes earlier, it was still up to date
-        let both = try TrainService.arrivals(at: stops, own: [fresh], others: [stale], now: time(-3))
+        // Three minutes earlier, with the R's feed as it was then, it was still up to date
+        let freshThen = GTFSFeed.feed(made: -3, [GTFSFeed.trip("R1", stops: [FeedStop("R34N", at: 3), FeedStop("G08N", arrival: 40)])])
+        let both = try TrainService.arrivals(at: stops, own: [freshThen], others: [stale], now: time(-3))
         #expect(Set(both.map(\.trip)) == ["R1", "D1"])
+        // But not on a phone three minutes slow, by a feed made since: it's four minutes behind it
+        #expect(try TrainService.arrivals(at: stops, own: [fresh], others: [stale], now: time(-3)).map(\.trip) == ["R1"])
     }
 
     @Test func fromAFeed() throws {

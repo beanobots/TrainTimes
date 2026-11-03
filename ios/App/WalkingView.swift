@@ -32,25 +32,65 @@ struct WalkingView: View {
     @State private var topHeight: CGFloat = 0
     @State private var bottomHeight: CGFloat = 0
     @State private var insets = EdgeInsets()
+    /// The whole map's height, under the cards too, for where you go on it.
+    @State private var mapHeight: CGFloat = 0
     /// Where the train you're on is, while you're on it (`WalkSession.ride`).
     @State private var trainPlace: RideTracker.Place?
+    /// Where you're drawn and followed while walking: eased toward `youOnMap` a tick at a time,
+    /// carried on along the way at your pace between fixes (`glide()`), not jumping to each.
+    @State private var shownSpot: CLLocationCoordinate2D?
+    /// Metres along the way left you've likely walked since the last fix, for `drawnPath`.
+    @State private var ahead: Double = 0
+    /// The walk's crossings over streets ahead (`Walk.crossStreets`), for their signs: worked
+    /// out once for each walk, not on every tick of the map.
+    @State private var crossStreets: [[Walk.Point]] = []
+    /// Metres up the map is now, however it got there, for whether the street signs show.
+    @State private var mapDistance = Self.startDistance
+    /// Open on screen: the map's loops and the compass run only then. A walk carries on in the
+    /// background for its location and Lock Screen, but there's no map to see.
+    @Environment(\.scenePhase) private var scenePhase
+    private var isOnScreen: Bool { scenePhase == .active }
+    /// Been in the background since last on screen, so the map snaps back onto you.
+    @State private var wasInBackground = false
 
     /// Seconds between moving the train along.
     private static let trainTick: Double = 3
     /// Metres up the map is while following the train: a few stations either side.
     private static let rideDistance: Double = 4_000
-    /// Metres up the map is as the walk starts: a block or two around you.
+    /// Metres up the map is as the walk starts: the block you're on and a couple ahead.
     private static let startDistance: Double = 450
-    /// Degrees the map's tipped back while walking, as a sat nav: the street ahead, not overhead.
-    private static let walkPitch: Double = 55
-    /// How far ahead of you the map's centre is while walking, as a share of its distance up,
-    /// so you're low on the screen with the way ahead above you, but clear of the bottom card.
-    private static let walkLead: Double = 0.1
+    /// Metres up the map is, at most, for the cross streets' signs: zoomed out past it, the
+    /// blocks too small for them, they'd crowd the way.
+    private static let signsWithin: Double = 700
+    /// Degrees the map's tipped back while walking: none, looking straight down, so no
+    /// building, Midtown's towers included, stands in front of the way.
+    private static let walkPitch: Double = 0
+    /// Where you are between the cards while walking, as a share of the room between them up
+    /// from the bottom card: low, with the way ahead above you.
+    private static let walkLow: Double = 0.25
+    /// Metres down the whole map's height, per metre the map's up, looking straight down: as
+    /// MapKit draws it (measured, 215 m down the screen 400 m up).
+    private static let metresDownPerUp: Double = 0.54
     /// Metres along the way left to look for which way it runs: past GPS's wobble, short of the
     /// next corner, so the map turns as you turn it, not before.
     private static let routeAhead: Double = 8
     /// Seconds between turning and moving the map while following.
     private static let followTick: Double = 0.25
+    /// Metres you may be guessed on past the last fix: the walk's fixes come every 5 m
+    /// (`WalkFollower`), so no further without one.
+    private static let guessAhead: Double = 5
+    /// Seconds held at `guessAhead` for the next fix before taking it you've stopped, as at a
+    /// light, and easing back to the last.
+    private static let guessHold: Double = 2
+    /// Metres a second under which GPS's speed is taken as standing still.
+    private static let stillSpeed: Double = 0.3
+    /// Metres a second at most for the guess: a brisk walk or jog, not GPS's odd leap.
+    private static let fastestWalk: Double = 3
+    /// The share of the gap to where you're guessed to be closed each tick: corrections from a
+    /// new fix taken in over a second or so, rather than jumped.
+    private static let easing: Double = 0.5
+    /// Metres off where you're shown past which it's a jump, not eased: a re-route, a new walk.
+    private static let snapBeyond: Double = 30
     /// Seconds to ease back onto you after a pinch.
     private static let settle: Double = 0.4
     /// The ride's line, as wide as the trip map's zoomed out, with a casing as its.
@@ -68,13 +108,14 @@ struct WalkingView: View {
             .safeAreaPadding(.top, insets.top + topHeight + 8)
             .safeAreaPadding(.bottom, insets.bottom + bottomHeight + 8)
             .ignoresSafeArea()
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { mapHeight = $0 }
             .overlay(alignment: .top) {
                 topCard
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { topHeight = $0 }
             }
             .overlay(alignment: .bottom) {
-                // Countdowns tick over
-                TimelineView(.periodic(from: .now, by: 15)) { context in
+                // Countdowns tick over, often enough for a train's moment at the station
+                TimelineView(.periodic(from: .now, by: 5)) { context in
                     bottomCard(now: context.date)
                 }
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { bottomHeight = $0 }
@@ -112,9 +153,9 @@ struct WalkingView: View {
                     trainCar
                         .accessibilityLabel("Your train, \(trainPlace.description)")
                 }
-            } else if !isRiding, let location = session.location {
+            } else if !isRiding, let here = shownSpot ?? youOnMap {
                 // You walking, as the train's shown on the ride, facing the way the compass says
-                Annotation("", coordinate: location.coordinate, anchor: .center) {
+                Annotation("", coordinate: here, anchor: .center) {
                     walker
                         .accessibilityLabel("You")
                 }
@@ -124,29 +165,63 @@ struct WalkingView: View {
             }
             if session.walk != nil {
                 // What's left of it, from where you are
-                let left = session.pathLeft.map(\.coordinate)
+                let left = drawnPath.map(\.coordinate)
                 MapPolyline(coordinates: left)
                     .stroke(Self.casing, style: StrokeStyle(lineWidth: Self.walkWidth + 4, lineCap: .round, lineJoin: .round))
                 MapPolyline(coordinates: left)
                     .stroke(Color.accentColor, style: StrokeStyle(lineWidth: Self.walkWidth, lineCap: .round, lineJoin: .round))
+                // Marks down its middle, so it reads as a way to go at street level
+                MapPolyline(coordinates: left)
+                    .stroke(.white.opacity(0.85), style: StrokeStyle(lineWidth: 2, lineCap: .round, dash: [3, 9]))
+                // Where it crosses a street, once on the sidewalk: barred like the crosswalk
+                ForEach(Array((session.walk?.crossings ?? []).enumerated()), id: \.offset) { _, crossing in
+                    MapPolyline(coordinates: crossing.map(\.coordinate))
+                        .stroke(.white, style: StrokeStyle(lineWidth: Self.walkWidth - 2, lineCap: .butt, dash: [2, 2.5]))
+                }
+                // Faintly over the buildings too, so the way round a corner shows through them
+                MapPolyline(coordinates: left)
+                    .stroke(Color.accentColor.opacity(0.3), style: StrokeStyle(lineWidth: Self.walkWidth, lineCap: .round, lineJoin: .round))
+                    .mapOverlayLevel(level: .aboveLabels)
+            }
+            // The next turn, as a sign standing at its corner
+            if isWalking, let turn = nextTurn {
+                Annotation("", coordinate: turn.coordinate, anchor: .bottom) {
+                    TurnSign(icon: turn.step.turn.systemImage, label: turn.street)
+                }
+            }
+            // The streets still to cross, each named on a green sign at its near curb, as the
+            // city's own are; only zoomed in close enough to have room for them
+            if isWalking, mapDistance <= Self.signsWithin {
+                ForEach(crossingsAhead, id: \.middle) { crossing in
+                    Annotation("", coordinate: crossing.curb.coordinate, anchor: .bottom) {
+                        StreetSign(name: crossing.name, light: crossing.light)
+                    }
+                }
             }
             if session.stage == .toTrain || session.stage == .atStation, let boarding = session.walks?.boarding {
-                Annotation("", coordinate: boarding.location.coordinate) {
-                    entrance(boarding, label: "Entrance")
+                Annotation("", coordinate: boarding.location.coordinate, anchor: session.stage == .toTrain ? .bottom : .center) {
+                    if session.stage == .toTrain {
+                        // Standing over the stairs as you walk up to them, with the side they're for
+                        TurnSign(label: boarding.sideName.isEmpty ? nil : boarding.sideName) {
+                            Self.entrance(boarding, label: "Entrance")
+                        }
+                    } else {
+                        Self.entrance(boarding, label: "Entrance")
+                    }
                 }
             }
             if session.stage == .fromTrain || session.stage == .arrived {
                 // The way out of the station, unless walking all the way
                 if let leaving = session.walks?.leaving {
                     Annotation("", coordinate: leaving.location.coordinate) {
-                        entrance(leaving, label: "Exit")
+                        Self.entrance(leaving, label: "Exit")
                     }
                 }
                 Marker(session.endName, coordinate: session.end.coordinate)
             }
         }
-        // Buildings standing up, as it's tipped back while walking
-        .mapStyle(.standard(elevation: .realistic))
+        // Flat, looked straight down on: 3D buildings and trees stood in front of the way
+        .mapStyle(.standard(elevation: .flat, pointsOfInterest: .excludingAll))
         // Its own buttons, not MapKit's: its compass only turns it north
         .mapControls {}
         .overlay(alignment: .topTrailing) {
@@ -160,33 +235,84 @@ struct WalkingView: View {
             .padding(.top, 8)
         }
         .mapScope(mapScope)
-        .onAppear { compass.start() }
+        // The crossed streets' names, as the walk has them or the geocoder gives them: those
+        // across the way, not the one you're on. Each as it comes, and none from a walk since replaced
+        .task(id: session.walk?.crossings) {
+            // Those of crossings still in the walk kept, so a re-route doesn't blank every sign
+            // while they're found again
+            let crossed = (session.walk?.crossings ?? []) + (session.walk?.steps.compactMap(\.crossing) ?? [])
+            let middles = Set(crossed.compactMap(CrossStreets.middle(of:)))
+            session.crossNames = session.crossNames.filter { middles.contains($0.key) }
+            crossStreets = session.walk?.crossStreets ?? []
+            // The crossings that are steps of their own, or after a turn, first, for their
+            // cards: the geocoder's asked one at a time, and only so many
+            guard let walk = session.walk else { return }
+            var crossings = walk.steps.compactMap(\.crossing) + crossStreets
+            // A walk the app routed knows its streets: only those it doesn't to ask
+            if let streets = walk.streets, let all = walk.crossings {
+                var known = Set<[Walk.Point]>()
+                for (crossing, street) in zip(all, streets) where !street.isEmpty {
+                    guard let middle = CrossStreets.middle(of: crossing) else { continue }
+                    session.crossNames[middle] = street
+                    known.insert(crossing)
+                }
+                crossings.removeAll(where: known.contains)
+            }
+            guard !crossings.isEmpty else { return }
+            for await (middle, name) in CrossStreets.shared.names(for: crossings) {
+                guard !Task.isCancelled else { break }
+                session.crossNames[middle] = name
+            }
+        }
+        .onAppear {
+            compass.start()
+            startOver()
+        }
         .onDisappear { compass.stop() }
+        .onChange(of: scenePhase) { _, phase in
+            switch phase {
+            case .background:
+                wasInBackground = true
+                compass.stop()
+            case .active where wasInBackground:
+                wasInBackground = false
+                compass.start()
+                // Caught up at once, not eased across the blocks walked meanwhile
+                if following { startOver() }
+            default:
+                break
+            }
+        }
         // Following you: turned a little at a time, so a phone glanced at as you walk doesn't
-        // swing the map about
-        .task {
+        // swing the map about. Not four times a second with the screen off
+        .task(id: isOnScreen) {
+            guard isOnScreen else { return }
             while !Task.isCancelled {
                 // Walking a route, the way it runs, so the street you're on is up the screen
                 // and its turns are left and right on it; the compass otherwise
                 if let heading = routeHeading ?? compass.heading {
-                    shownHeading = shownHeading.map {
+                    let next = shownHeading.map {
                         MapHeading.smoothed($0, toward: heading, over: Self.followTick, turning: &turning)
                     } ?? heading
+                    // Held still, the same: not the whole screen redrawn for it
+                    if next != shownHeading { shownHeading = next }
                 }
                 // Any fix, however old: standing still, none come. Off the train there's none
                 // until the next (`WalkSession.location`), not the station you got on at
-                if following, !gesturing, !isRiding, let location = session.location {
-                    follow(location.coordinate, distance: walkDistance, over: Self.followTick)
+                if !isRiding { glide() } else if shownSpot != nil { shownSpot = nil }
+                if following, !gesturing, !isRiding, let here = shownSpot ?? youOnMap {
+                    follow(here, distance: walkDistance, over: Self.followTick)
                 }
                 try? await Task.sleep(for: .seconds(Self.followTick))
             }
         }
         // The train moved along every few seconds, the map following it unless moved by hand
-        .task(id: session.ride.map(ObjectIdentifier.init)) {
+        .task(id: TrainLoop(ride: session.ride.map(ObjectIdentifier.init), onScreen: isOnScreen)) {
             guard let ride = session.ride else {
                 trainPlace = nil
                 return
             }
+            guard isOnScreen else { return }
             while !Task.isCancelled {
                 if let place = ride.place() {
                     withAnimation(.linear(duration: Self.trainTick)) { trainPlace = place }
@@ -203,8 +329,9 @@ struct WalkingView: View {
         // it stops until the location or compass button
         .onMapCameraChange(frequency: .onEnd) { context in
             gesturing = false
+            mapDistance = context.camera.distance
             guard camera.positionedByUser else { return }
-            let on = isRiding ? trainPlace?.coordinate : session.location?.coordinate
+            let on = isRiding ? trainPlace?.coordinate : shownSpot ?? youOnMap
             guard let on else {
                 following = false
                 return
@@ -212,7 +339,7 @@ struct WalkingView: View {
             // Against where following would put the centre, ahead of you while walking
             let shown = context.camera.centerCoordinate
             let wanted = center(on: on, distance: context.camera.distance)
-            let across = context.region.span.latitudeDelta * 111_000
+            let across = context.region.span.latitudeDelta * Earth.metresPerDegree
             if CLLocation(latitude: shown.latitude, longitude: shown.longitude)
                 .distance(from: CLLocation(latitude: wanted.latitude, longitude: wanted.longitude)) < across * 0.2 {
                 if isRiding { rideZoom = context.camera.distance } else { walkDistance = context.camera.distance }
@@ -235,18 +362,117 @@ struct WalkingView: View {
 
     private var isRiding: Bool { session.stage == .riding || session.stage == .ridingOn }
 
+    /// Walking a route, to the train or from it: the map turned the way you go, you low on it.
+    private var isWalking: Bool { session.stage == .toTrain || session.stage == .fromTrain }
+
+    /// Where you're shown and followed: walking a route, your place along it while GPS puts you
+    /// near enough (it drifts off by tall buildings), so the camera behind you stays over the
+    /// street rather than in the block beside it, where 3D buildings would hide the way; where
+    /// GPS puts you otherwise, or once you've gone another way.
+    private var youOnMap: CLLocationCoordinate2D? {
+        guard let location = session.location else { return nil }
+        if isWalking, let progress = session.progress, progress.offPath <= WalkSession.offRoute,
+           let onPath = session.pathLeft.first {
+            return onPath.coordinate
+        }
+        return location.coordinate
+    }
+
+    /// Whether you're drawn on the walk's path, as `youOnMap` puts you while near enough to it.
+    private var isOnPath: Bool {
+        guard isWalking, let progress = session.progress else { return false }
+        return progress.offPath <= WalkSession.offRoute && !session.pathLeft.isEmpty
+    }
+
+    /// What's left of the way from where you're guessed to be: the way left from the last fix,
+    /// less what you've likely walked since (`ahead`).
+    private var drawnPath: [Walk.Point] {
+        isOnPath ? Self.path(session.pathLeft, from: ahead) : session.pathLeft
+    }
+
+    /// Moves where you're shown on a tick: along the way at GPS's speed since the last fix, up to
+    /// `guessAhead`, then eased toward that, so you glide between fixes rather than jump to each.
+    private func glide() {
+        guard let fix = youOnMap else {
+            shownSpot = nil
+            ahead = 0
+            return
+        }
+        var target = fix
+        if isOnPath, let location = session.location {
+            let speed = location.speed >= Self.stillSpeed ? min(location.speed, Self.fastestWalk) : 0
+            let guessed = speed * max(0, Date.now.timeIntervalSince(location.timestamp))
+            // Held at the limit a moment for the next fix, then back to the last: stopped
+            let next = guessed <= Self.guessAhead ? guessed
+                : guessed <= Self.guessAhead + speed * Self.guessHold ? Self.guessAhead : 0
+            if next != ahead { ahead = next }
+            target = drawnPath.first?.coordinate ?? fix
+        } else if ahead != 0 {
+            ahead = 0
+        }
+        guard let shown = shownSpot,
+              CLLocation(latitude: shown.latitude, longitude: shown.longitude)
+                .distance(from: CLLocation(latitude: target.latitude, longitude: target.longitude)) < Self.snapBeyond
+        else {
+            shownSpot = target
+            return
+        }
+        let eased = CLLocationCoordinate2D(latitude: shown.latitude + (target.latitude - shown.latitude) * Self.easing,
+                                           longitude: shown.longitude + (target.longitude - shown.longitude) * Self.easing)
+        guard abs(eased.latitude - shown.latitude) > 1e-7 || abs(eased.longitude - shown.longitude) > 1e-7 else { return }
+        withAnimation(.linear(duration: Self.followTick)) { shownSpot = eased }
+    }
+
+    /// `path` from `metres` along it: the point there, then the rest. Its last point if shorter.
+    private static func path(_ path: [Walk.Point], from metres: Double) -> [Walk.Point] {
+        guard metres > 0 else { return path }
+        var left = metres
+        for index in path.indices.dropLast() {
+            let from = path[index], to = path[index + 1]
+            let piece = from.metres(to: to)
+            if piece > left {
+                let along = left / piece
+                let start = Walk.Point(lat: from.lat + (to.lat - from.lat) * along, lon: from.lon + (to.lon - from.lon) * along)
+                return [start] + path[(index + 1)...]
+            }
+            left -= piece
+        }
+        return path.last.map { [$0] } ?? []
+    }
+
+    /// The named cross streets not yet crossed: those whose far side is still on the way left.
+    /// Not the street you're on, or have just turned off (`Walk.crossStreets`).
+    private var crossingsAhead: [(middle: Walk.Point, curb: Walk.Point, name: String, light: Walk.Light?)] {
+        guard let walk = session.walk, !session.crossNames.isEmpty else { return [] }
+        let left = Set(session.pathLeft)
+        return crossStreets.compactMap { crossing in
+            guard let curb = crossing.first, let far = crossing.last, left.contains(far),
+                  let middle = CrossStreets.middle(of: crossing), let name = session.crossNames[middle] else { return nil }
+            return (middle, curb, name, walk.light(at: crossing))
+        }
+    }
+
+    /// The next step that's a turn, or a crossing, where its instruction's done, and the street
+    /// it's onto. Not the way down or up, or arriving: those have their own marks.
+    private var nextTurn: (step: Walk.Step, coordinate: CLLocationCoordinate2D, street: String?)? {
+        guard let step = session.nextStep, let end = step.points.last else { return nil }
+        switch step.turn {
+        case .stairsDown, .stairsUp, .elevatorDown, .elevatorUp, .arrive, .straight: return nil
+        case .cross: return (step, end.coordinate, nil)
+        default: return (step, end.coordinate, Walk.street(in: step.instruction))
+        }
+    }
+
     /// Degrees from north the way left to walk runs from where you are, while walking it.
     private var routeHeading: Double? {
         guard session.stage == .toTrain || session.stage == .fromTrain else { return nil }
-        let path = session.pathLeft.map { CLLocation(latitude: $0.lat, longitude: $0.lon) }
+        // Read four times a second: points as they are, not every one made a `CLLocation`
+        let path = drawnPath
         guard let start = path.first else { return nil }
         // The first point far enough along to say which way, or the end if it's nearer
-        guard let ahead = path.dropFirst().first(where: { $0.distance(from: start) >= Self.routeAhead })
-                ?? path.last, ahead.distance(from: start) > 1 else { return nil }
-        let from = start.coordinate, to = ahead.coordinate
-        let north = to.latitude - from.latitude
-        let east = (to.longitude - from.longitude) * cos(from.latitude * .pi / 180)
-        return (atan2(east, north) * 180 / .pi + 360).truncatingRemainder(dividingBy: 360)
+        guard let ahead = path.dropFirst().first(where: { $0.metres(to: start) >= Self.routeAhead })
+                ?? path.last, ahead.metres(to: start) > 1 else { return nil }
+        return start.heading(to: ahead)
     }
 
     /// Which way up the map is, as `turn` has it.
@@ -259,7 +485,7 @@ struct WalkingView: View {
     }
 
     /// The map on `coordinate`, `distance` up, turned to `heading`; animated over `seconds`
-    /// unless it's barely moved. Walking, it's tipped back with you low on it; riding, overhead.
+    /// unless it's barely moved. Walking, with you low on it; riding, on the train.
     private func follow(_ coordinate: CLLocationCoordinate2D, distance: Double, over seconds: Double) {
         let center = center(on: coordinate, distance: distance)
         let next = MapCamera(centerCoordinate: center, distance: distance, heading: heading,
@@ -269,19 +495,37 @@ struct WalkingView: View {
             .distance(from: CLLocation(latitude: center.latitude, longitude: center.longitude)) < 0.5,
            abs(now.heading - next.heading) < 0.5, abs(now.distance - distance) < 1,
            abs(now.pitch - next.pitch) < 0.5 { return }
-        withAnimation(.linear(duration: seconds)) { camera = .camera(next) }
+        if seconds > 0 {
+            withAnimation(.linear(duration: seconds)) { camera = .camera(next) }
+        } else {
+            camera = .camera(next)
+        }
+    }
+
+    /// Straight onto you as it opens, where the walk starts until GPS says: not MapKit's own
+    /// following, flat and far out, swooping down onto you as the first fix comes in.
+    private func startOver() {
+        guard isWalking, let here = youOnMap ?? session.pathLeft.first?.coordinate else { return }
+        ahead = 0
+        shownSpot = here
+        if let along = routeHeading { shownHeading = along }
+        follow(here, distance: walkDistance, over: 0)
     }
 
     /// Where the map's centre goes to follow `coordinate`: ahead of it the way the map's turned
     /// while walking a route, so it's low on the screen with the way ahead; on it otherwise (on
     /// the train, or at the station, whose taller card would cover you low on the screen).
     private func center(on coordinate: CLLocationCoordinate2D, distance: Double) -> CLLocationCoordinate2D {
-        guard session.stage == .toTrain || session.stage == .fromTrain else { return coordinate }
-        let meters = distance * Self.walkLead
+        guard session.stage == .toTrain || session.stage == .fromTrain, mapHeight > 0 else { return coordinate }
+        // The map centres in the room between the cards; you go `walkLow` up from its bottom,
+        // this many points below its middle, in metres at the map's scale
+        let room = mapHeight - (insets.top + topHeight + 8) - (insets.bottom + bottomHeight + 8)
+        let below = max(0, room * (0.5 - Self.walkLow))
+        let meters = Double(below) * distance * Self.metresDownPerUp / Double(mapHeight)
         let angle = heading * .pi / 180
         return CLLocationCoordinate2D(
-            latitude: coordinate.latitude + meters * cos(angle) / 111_000,
-            longitude: coordinate.longitude + meters * sin(angle) / (111_000 * cos(coordinate.latitude * .pi / 180)))
+            latitude: coordinate.latitude + meters * cos(angle) / Earth.metresPerDegree,
+            longitude: coordinate.longitude + meters * sin(angle) / (Earth.metresPerDegree * cos(coordinate.latitude * .pi / 180)))
     }
 
     /// The compass button: your heading, north up, NY North, round again. Following you (or the
@@ -366,7 +610,7 @@ struct WalkingView: View {
     }
 
     /// An entrance as a stair in its line's colour.
-    private func entrance(_ way: StationWays.Way, label: String) -> some View {
+    static func entrance(_ way: StationWays.Way, label: String) -> some View {
         Image(systemName: way.entrance.isElevator ? "arrow.up.arrow.down" : "stairs")
             .font(.system(size: 11, weight: .bold))
             .foregroundStyle(LineStyle.of(way.route).textColor)
@@ -389,7 +633,10 @@ struct WalkingView: View {
                 let later = session.laterSteps.first
                 TurnCard(icon: step.turn.systemImage,
                          distance: up ? "Now" : Walk.distance(session.progress?.toTurn ?? step.meters),
-                         instruction: step.instruction,
+                         instruction: session.instruction(of: step),
+                         isCrossing: step.turn == .cross,
+                         light: step.light,
+                         lightNote: session.lightNote,
                          then: session.thenStep ?? step.detail,
                          thenDistance: later.flatMap { $0.meters > 0 ? Walk.distance($0.meters) : nil })
             }
@@ -498,7 +745,11 @@ struct WalkingView: View {
         return HStack(spacing: 12) {
             LineBullet(route: session.currentRoute, size: 34)
             VStack(alignment: .leading, spacing: 2) {
-                if let next {
+                if let here = session.trainAtStation(now: now) {
+                    // As the Lock Screen has it, just due
+                    Text("\(LineStyle.of(here.route).label) \(AtStation.label.lowercased())").font(.headline)
+                    if let next, next.trip != here.trip { spare(for: next, now: now) }
+                } else if let next {
                     // To its arrival, rounded down, as the Lock Screen and the boards count it
                     let minutes = MinutesToGo(until: next.time, from: now)
                     Text(minutes.isNow ? "\(LineStyle.of(next.route).label) now"
@@ -611,28 +862,172 @@ struct WalkingView: View {
     }
 }
 
+/// What restarts the walking map's train loop: the ride, and whether it's on screen.
+private struct TrainLoop: Equatable {
+    var ride: ObjectIdentifier?
+    var onScreen: Bool
+}
+
+/// A sign on a pole, standing on the map where something is: the next turn ("↰ 4th Ave"), or
+/// the stairs with the side they're for. Its foot is the bottom of the view.
+private struct TurnSign<Mark: View>: View {
+    var label: String?
+    @ViewBuilder var mark: Mark
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                mark
+                if let label {
+                    Text(label).font(.subheadline.weight(.semibold)).lineLimit(1)
+                }
+            }
+            .padding(.leading, 6).padding(.trailing, label == nil ? 6 : 12).padding(.vertical, 6)
+            .glassEffect(.regular, in: Capsule())
+            Rectangle()
+                .fill(.secondary)
+                .frame(width: 2, height: 34)
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
+extension TurnSign where Mark == TurnArrow {
+    /// A turn's: its arrow, and the street.
+    init(icon: String, label: String?) {
+        self.label = label
+        mark = TurnArrow(icon: icon)
+    }
+}
+
+/// A street crossed, named on a pole at the curb as New York's signs are: white on green, with
+/// a white rule inside the edge. Its foot is the bottom of the view.
+private struct StreetSign: View {
+    let name: String
+    /// What's at the crossing: a warning tag under the sign where it's wide with no light,
+    /// nothing otherwise.
+    var light: Walk.Light? = nil
+
+    /// The city's street-sign green.
+    private static let green = Color(red: 0, green: 0.42, blue: 0.25)
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text(name)
+                .font(.system(size: 15, weight: .bold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .padding(.horizontal, 10).padding(.vertical, 3)
+                .background(Self.green, in: RoundedRectangle(cornerRadius: 3))
+                .overlay(RoundedRectangle(cornerRadius: 3).inset(by: 1.5).stroke(.white, lineWidth: 1.5))
+                .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
+            if let light, light == .unsignalledWide {
+                HStack(spacing: 4) {
+                    WalkLight(light: light, size: 16, onYellow: true)
+                    Text(light.tag).font(.caption2.weight(.bold)).lineLimit(1).fixedSize()
+                }
+                .padding(.leading, 3).padding(.trailing, 7).padding(.vertical, 3)
+                .background(Color.yellow, in: Capsule())
+                .foregroundStyle(Color.black)
+                .shadow(color: .black.opacity(0.2), radius: 2, y: 1)
+                .padding(.top, 3)
+            }
+            Rectangle()
+                .fill(.secondary)
+                .frame(width: 2, height: 24)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(light == .unsignalledWide ? "Cross \(name), \(light?.note ?? "")" : "Cross \(name)")
+    }
+}
+
+/// A crossing's light, as the walk signal on its pole: the lit figure, white on black; where
+/// there's none, a warning, yellow where the street's wide.
+private struct WalkLight: View {
+    let light: Walk.Light
+    var size: CGFloat = 20
+    /// On a yellow tag already: the warning plain black.
+    var onYellow = false
+
+    var body: some View {
+        Group {
+            if light.hasSignal {
+                Image(systemName: "figure.walk")
+                    .foregroundStyle(.white)
+            } else if onYellow {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.black)
+            } else {
+                // Where it's wide, black on yellow, as a road's warning signs
+                let wide = light == .unsignalledWide
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(wide ? AnyShapeStyle(Color.black) : AnyShapeStyle(.background),
+                                     wide ? AnyShapeStyle(Color.yellow) : AnyShapeStyle(.secondary))
+            }
+        }
+        .font(.system(size: size * 0.62, weight: .bold))
+        .frame(width: size, height: size)
+        .background {
+            if light.hasSignal { RoundedRectangle(cornerRadius: size * 0.22).fill(.black) }
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+/// A turn's arrow in the tint, for its sign.
+private struct TurnArrow: View {
+    let icon: String
+
+    var body: some View {
+        Image(systemName: icon)
+            .font(.headline.weight(.heavy))
+            .foregroundStyle(.tint)
+            .frame(width: 24, height: 24)
+            .accessibilityHidden(true)
+    }
+}
+
 /// The next turn, big, over the top of the map.
 private struct TurnCard: View {
     let icon: String
     let distance: String
     let instruction: String
+    /// A crossing's own step (`Walk.Turn.cross`).
+    var isCrossing = false
+    /// A crossing's light, and its warning under the instruction where there's none
+    /// (`WalkSession.lightNote`); nothing shown at a light.
+    var light: Walk.Light? = nil
+    var lightNote: String? = nil
     let then: String?
     var thenDistance: String? = nil
+
+    /// A crossing step over a wide street with no light: its tile yellow, as a warning.
+    private var warns: Bool { isCrossing && light == .unsignalledWide }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 14) {
                 Image(systemName: icon)
                     .font(.system(size: 38, weight: .bold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(warns ? .black : .white)
                     .frame(width: 64, height: 64)
-                    .background(.tint, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .background(warns ? AnyShapeStyle(Color.yellow) : AnyShapeStyle(.tint),
+                                in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(distance).font(.title.weight(.bold)).monospacedDigit()
                     Text(instruction).font(.title3.weight(.semibold)).lineLimit(3)
                 }
                 Spacer(minLength: 0)
+            }
+            if let light, let lightNote {
+                HStack(spacing: 8) {
+                    WalkLight(light: light, size: 22)
+                    Text(lightNote)
+                        .font(.subheadline.weight(.medium))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             if let then {
                 Divider()
@@ -775,4 +1170,48 @@ private func previewSession(_ stage: WalkSession.Stage, fasterFrom other: String
 
 #Preview("A faster trip") {
     if let session = previewSession(.toTrain, fasterFrom: "D25") { WalkingView(session: session) {} }
+}
+
+#Preview("Signs on the map") {
+    // The turn's and the stairs', as they stand on the map walking (map tiles don't draw here)
+    let selection = Selection(stationID: "R33", routes: ["R"], direction: .north)
+    VStack(spacing: 40) {
+        TurnSign(icon: "arrow.turn.up.left", label: "4th Ave")
+        TurnSign(icon: "arrow.turn.up.right", label: nil)
+        if let way = StationWays.boarding(selection, from: CLLocation(latitude: 40.6725, longitude: -73.9840)) {
+            TurnSign(label: way.sideName) {
+                WalkingView.entrance(way, label: "Entrance")
+            }
+        }
+    }
+    .padding(40)
+    .background(Color(white: 0.9))
+}
+
+#Preview("Crossings") {
+    // A crossing's own step, at a light and at none on a wide street; a turn with one after
+    // it; and the street signs' tags
+    ScrollView {
+        VStack(spacing: 16) {
+            TurnCard(icon: Walk.Turn.cross.systemImage, distance: "40 m", instruction: "Cross 4th Ave", isCrossing: true,
+                     light: .leading, lightNote: nil,
+                     then: "Then take a left onto 9th St", thenDistance: "120 m")
+            TurnCard(icon: Walk.Turn.cross.systemImage, distance: "60 m", instruction: "Cross Queens Blvd", isCrossing: true,
+                     light: .unsignalledWide, lightNote: Walk.Light.unsignalledWide.note, then: nil)
+            TurnCard(icon: Walk.Turn.left.systemImage, distance: "90 m", instruction: "Take a left onto 37th Rd",
+                     light: .unsignalledWide, lightNote: "Then cross 75th St · \(Walk.Light.unsignalledWide.note ?? "")",
+                     then: "Then take a right onto 77th St", thenDistance: "150 m")
+            HStack(alignment: .bottom, spacing: 8) {
+                StreetSign(name: "4th Ave", light: .leading)
+                StreetSign(name: "Broadway", light: .exclusive)
+                StreetSign(name: "9th St", light: .signal)
+            }
+            HStack(alignment: .bottom, spacing: 8) {
+                StreetSign(name: "Prospect Pl", light: .unsignalled)
+                StreetSign(name: "Queens Blvd", light: .unsignalledWide)
+            }
+        }
+        .padding(.vertical, 20)
+    }
+    .background(Color(white: 0.9))
 }

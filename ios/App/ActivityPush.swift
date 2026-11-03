@@ -16,7 +16,7 @@ enum ActivityPush {
     /// The background refresh, also in Info.plist's BGTaskSchedulerPermittedIdentifiers.
     nonisolated static let refreshTaskID = "dev.dctp.leeway.refresh"
 
-    private static let log = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Leeway", category: "ActivityPush")
+    private static let log = AppLog(category: "ActivityPush")
 
     /// What's known of one countdown's registration, by `Activity.id`.
     struct Record: Codable {
@@ -106,6 +106,9 @@ enum ActivityPush {
     /// deletes that failed. `force` ignores the backoff, for the background refresh.
     static func retry(force: Bool = false) async {
         for token in pendingDeletes {
+            // Already taken by another retry running at the same time (the background refresh
+            // starts three), so it isn't sent again; one that fails is queued again by `unregister`
+            guard pendingDeletes.contains(token) else { continue }
             pendingDeletes.removeAll { $0 == token }
             await unregister(token)
         }
@@ -142,7 +145,7 @@ enum ActivityPush {
         do {
             try BGTaskScheduler.shared.submit(request)
         } catch {
-            log.notice("Couldn't schedule a background refresh: \(error.localizedDescription, privacy: .public)")
+            log.notice("Couldn't schedule a background refresh: \(error.localizedDescription)")
         }
     }
 
@@ -157,6 +160,19 @@ enum ActivityPush {
         await register(activity, token: token)
         // Only after the new token's registered, so pushes don't stop in between
         if let old, old != token { await unregister(old) }
+    }
+
+    /// Whether the push server has `id`'s countdown (its last registration succeeded), so it
+    /// moves it on as its train's due (`TrainActivityController.content`).
+    static func isServerBacked(_ id: String) -> Bool {
+        records[id]?.serverBacked == true
+    }
+
+    /// The countdown posted again if whether the server has it changed, for its stale date; not
+    /// waited for, as this may run while the controller's busy.
+    private static func backingChanged(_ id: String, from was: Bool) {
+        guard isServerBacked(id) != was else { return }
+        Task { await TrainActivityController.restale(id) }
     }
 
     private static func register(_ activity: Activity<TrainActivityAttributes>, token: String) async {
@@ -188,14 +204,18 @@ enum ActivityPush {
                 return
             }
             guard records[id]?.token == token else { return }
+            let was = isServerBacked(id)
+            defer { backingChanged(id, from: was) }
             records[id]?.serverBacked = true
             records[id]?.widgetToken = widgetToken
             records[id]?.alertKinds = alertKinds
             records[id]?.failures = 0
             records[id]?.retryAfter = nil
-            log.info("Registered countdown \(prefix, privacy: .public)… (\(PushServer.environment, privacy: .public))")
+            log.info("Registered countdown \(prefix)… (\(PushServer.environment))")
         } catch {
             guard records[id]?.token == token else { return }
+            let was = isServerBacked(id)
+            defer { backingChanged(id, from: was) }
             let failures = (records[id]?.failures ?? 0) + 1
             records[id]?.serverBacked = false
             records[id]?.failures = failures
@@ -207,7 +227,7 @@ enum ActivityPush {
                     loggedUnsupported = true
                 }
             } else {
-                log.notice("Couldn't register countdown \(prefix, privacy: .public)…: \(String(describing: error), privacy: .public)")
+                log.notice("Couldn't register countdown \(prefix)…: \(String(describing: error))")
             }
             scheduleRefreshIfNeeded()
         }
@@ -228,13 +248,13 @@ enum ActivityPush {
         let prefix = String(token.prefix(8))
         do {
             try await PushServer.shared.unregister(token: token)
-            log.info("Unregistered countdown \(prefix, privacy: .public)…")
+            log.info("Unregistered countdown \(prefix)…")
         } catch PushServer.Failure.unavailable {
             // Tell it later; meanwhile it ends the countdown after 30 minutes anyway
             if !pendingDeletes.contains(token) { pendingDeletes = Array((pendingDeletes + [token]).suffix(20)) }
         } catch {
             // Refused (another key's), or no server here: nothing to retry
-            log.notice("Couldn't unregister countdown \(prefix, privacy: .public)…: \(String(describing: error), privacy: .public)")
+            log.notice("Couldn't unregister countdown \(prefix)…: \(String(describing: error))")
         }
     }
 }

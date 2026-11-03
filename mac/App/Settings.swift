@@ -105,9 +105,6 @@ extension Setting {
             Setting("RATE_LIMIT_PER_MINUTE", "Requests per minute", .integer(1...100_000, default: 30)),
             Setting("FEED_RATE_LIMIT_PER_MINUTE", "Feed requests per minute", .integer(1...100_000, default: 240),
                     hint: "The app's and widgets' reads of MTA feeds, apart from the limit above."),
-            Setting("MAX_CHALLENGES", "Challenges outstanding", .integer(1...10_000_000, default: 10_000),
-                    hint: "In all."),
-            Setting("MAX_CHALLENGES_PER_IP", "Challenges per address", .integer(1...100_000, default: 10)),
             Setting("MAX_KEYS_PER_IP_PER_DAY", "Keys per address per day", .integer(1...100_000, default: 10)),
         ]),
     ]

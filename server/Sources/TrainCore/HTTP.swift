@@ -21,6 +21,8 @@ struct AppContext: RequestContext, RemoteAddressRequestContext {
     /// A registration is a few hundred bytes; an attestation about 7 KB in base64.
     static let bodyLimit = 4 * 1024
     static let attestBodyLimit = 16 * 1024
+    /// A crash report from MetricKit with the app's recent log (ios/App/Diagnostics.swift).
+    static let diagnosticsBodyLimit = 512 * 1024
     /// For a body read without a limit of its own: every route gives one.
     var maxUploadSize: Int { Self.bodyLimit }
 }
@@ -90,6 +92,9 @@ struct HTTPServices: Sendable {
     var limiter: RateLimiter
     var feedLimiter: RateLimiter
     var keyCreation: DailyLimiter
+    /// Reports from each attest key a day.
+    var diagnosticsPerKey: DailyLimiter
+    var diagnostics: DiagnosticStore
     var refusals: RefusalLog
     var auth: AuthMode
     var attest: AppAttest
@@ -103,18 +108,21 @@ struct HTTPServices: Sendable {
 
     init(store: Store, auth: AuthMode, appID: String, limits: Limits, roots: [Certificate]? = nil,
          feeds: FeedRelay = FeedRelay(interval: 20), timetable: TimetableCopy = TimetableCopy(),
-         routes: TransitRoutes? = nil, buses: BusTime? = nil) {
+         routes: TransitRoutes? = nil, buses: BusTime? = nil,
+         diagnostics: DiagnosticStore? = nil) {
         self.store = store
+        self.diagnostics = diagnostics ?? DiagnosticStore(maxReports: limits.maxDiagnostics)
+        diagnosticsPerKey = DailyLimiter(limit: limits.diagnosticsPerKeyPerDay)
         self.routes = routes
         self.buses = buses
         self.auth = auth
         self.limits = limits
         self.feeds = feeds
         self.timetable = timetable
-        challenges = ChallengeStore(limit: limits.maxChallenges, perClient: limits.challengesPerIP)
+        challenges = ChallengeStore()
         limiter = RateLimiter(perMinute: limits.requestsPerMinute, burst: limits.requestBurst)
         feedLimiter = RateLimiter(perMinute: limits.feedRequestsPerMinute, burst: limits.feedRequestBurst)
-        keyCreation = DailyLimiter(limit: limits.keysPerIPPerDay)
+        keyCreation = DailyLimiter(limit: limits.keysPerIPPerDay, byAddress: true)
         refusals = RefusalLog()
         let environments: Set<AttestEnvironment>
         if case .attest(let allowed) = auth { environments = allowed } else { environments = [] }
@@ -192,7 +200,7 @@ enum HTTPRoutes {
                 }
                 // Not in the past, which Google refuses, nor over a week on
                 let now = Date.now
-                let asked = query.get("at").flatMap { Double($0) }.map { Date(timeIntervalSince1970: $0) } ?? now
+                let asked = query.get("at").flatMap { Double($0) }.flatMap { $0.isFinite ? $0 : nil }.map { Date(timeIntervalSince1970: $0) } ?? now
                 let departure = min(max(asked, now), now.addingTimeInterval(7 * 86400))
                 let bus = query.get("bus") == "1"
                 switch await routes.routes(from: from, to: to, departure: departure, client: context.clientIP, bus: bus) {
@@ -261,17 +269,8 @@ enum HTTPRoutes {
 
         if case .attest = services.auth {
             router.get("/attest/challenge") { _, context -> Response in
-                let challenge: String
-                switch await services.challenges.issue(for: context.clientIP) {
-                case .challenge(let issued):
-                    challenge = issued
-                case .clientFull(let retryAfter):
-                    await log("challenges: \(services.limits.challengesPerIP) outstanding", context, services)
-                    return Response(status: .tooManyRequests, headers: [.retryAfter: String(retryAfter)])
-                case .full:
-                    await services.refusals.error("challenges: \(services.limits.maxChallenges) outstanding, refusing more")
-                    throw HTTPError(.serviceUnavailable)
-                }
+                // Kept nowhere (`ChallengeStore`): only the rate limit applies
+                let challenge = services.challenges.issue()
                 let json = #"{"challenge":"\#(challenge)","expiresIn":\#(Int(ChallengeStore.lifetime))}"#
                 return Response(status: .ok, headers: [.contentType: "application/json", .cacheControl: "no-store"],
                                 body: .init(byteBuffer: ByteBuffer(string: json)))
@@ -285,11 +284,12 @@ enum HTTPRoutes {
                       let attestation = Data(base64Encoded: attest.attestation) else {
                     throw HTTPError(.badRequest)
                 }
-                guard await services.challenges.consume(attest.challenge) else {
+                guard services.challenges.isValid(attest.challenge) else {
                     return await refuse("attest: challenge unknown or expired", context, services)
                 }
-                // Only keys made count, so attestations that fail don't use up the address's day
-                guard await services.keyCreation.allows(context.clientIP) else {
+                // Only keys made count, so attestations that fail don't use up the address's day:
+                // taken now, so attestations at once can't all get the last, and given back if not made
+                guard await services.keyCreation.take(context.clientIP) else {
                     await log("attest: no more keys today", context, services)
                     return Response(status: .tooManyRequests,
                                     headers: [.retryAfter: String(DailyLimiter.secondsUntilReset(now: .now))])
@@ -299,12 +299,23 @@ enum HTTPRoutes {
                     key = try await services.attest.verifyAttestation(
                         Array(attestation), keyID: attest.keyID, challenge: Array(attest.challenge.utf8), now: .now)
                 } catch {
+                    await services.keyCreation.release(context.clientIP)
                     return await refuse("attest: \(error)", context, services)
                 }
-                guard try await services.store.addKey(key) else {
+                // Only now noted as used, so what's kept takes a real phone's attestation
+                guard await services.challenges.useOnce(attest.challenge) else {
+                    await services.keyCreation.release(context.clientIP)
+                    return await refuse("attest: challenge already used", context, services)
+                }
+                let added: Bool
+                do { added = try await services.store.addKey(key) } catch {
+                    await services.keyCreation.release(context.clientIP)
+                    throw error
+                }
+                guard added else {
+                    await services.keyCreation.release(context.clientIP)
                     throw HTTPError(.conflict)
                 }
-                await services.keyCreation.record(context.clientIP)
                 Log.info("attest: new key \(Redact.id(key.id)) (\(key.environment.rawValue)) from \(Redact.id(context.clientIP))")
                 return Response(status: .noContent)
             }
@@ -382,6 +393,38 @@ enum HTTPRoutes {
                             body: .init(byteBuffer: ByteBuffer(bytes: json)))
         }
 
+        // A crash or hang report from a phone sharing diagnostics, signed like a registration, at
+        // most so many a key a day; kept as a file (`DiagnosticStore`), with nothing of who sent it
+        router.post("/diagnostics") { request, context -> Response in
+            var request = request
+            // Not half a megabyte read for anyone: only from a key this server has attested,
+            // which needs a real phone; the signature over the body is checked after
+            guard try await mayBeSigned(request, services) else {
+                await log("diagnostics: no known key", context, services)
+                return Response(status: .unauthorized)
+            }
+            let body = try await request.collectBody(upTo: AppContext.diagnosticsBodyLimit)
+            guard let owner = try await authenticate(request, body: body, context: context, services) else {
+                return Response(status: .unauthorized)
+            }
+            guard let kind = DiagnosticStore.kind(of: body.readableBytesView) else { throw HTTPError(.badRequest) }
+            guard await services.diagnosticsPerKey.take(owner) else {
+                await log("diagnostics: no more reports today for key \(Redact.id(owner))", context, services)
+                return Response(status: .tooManyRequests,
+                                headers: [.retryAfter: String(DailyLimiter.secondsUntilReset(now: .now))])
+            }
+            let name: String
+            do {
+                name = try await services.diagnostics.save(Array(body.readableBytesView), kind: kind)
+            } catch {
+                await services.diagnosticsPerKey.release(owner)
+                Log.error("diagnostics: couldn't save a \(kind) report: \(error)")
+                throw HTTPError(.internalServerError)
+            }
+            Log.info("diagnostics: saved \(name) (\(body.readableBytes) bytes) from key \(Redact.id(owner))")
+            return Response(status: .noContent)
+        }
+
         router.delete("/activities/:token") { request, context -> Response in
             guard let owner = try await authenticate(request, body: ByteBuffer(), context: context, services) else {
                 return Response(status: .unauthorized)
@@ -402,8 +445,22 @@ enum HTTPRoutes {
         return router
     }
 
+    /// Before a big body's read: whether `request` could pass `authenticate`, by its headers
+    /// alone, without using up its challenge. With App Attest, its key is one the server has,
+    /// in an environment allowed.
+    static func mayBeSigned(_ request: Request, _ services: HTTPServices) async throws -> Bool {
+        switch services.auth {
+        case .secret(let secret):
+            return BearerAuth(secret: secret).isAuthorized(request.headers[.authorization])
+        case .attest:
+            guard let keyIDBytes = request.headers[.attestKey].flatMap(AppAttest.keyIDBytes),
+                  let key = try await services.store.key(id: Data(keyIDBytes).base64EncodedString()) else { return false }
+            return services.attest.environments.contains(key.environment)
+        }
+    }
+
     /// The owner the request proves it's from, or nil (answered with 401).
-    /// With App Attest, the challenge is used up whether or not the rest checks out.
+    /// With App Attest, the challenge must be this server's and in date (`ChallengeStore`).
     static func authenticate(_ request: Request, body: ByteBuffer, context: AppContext,
                              _ services: HTTPServices) async throws -> String? {
         switch services.auth {
@@ -421,7 +478,9 @@ enum HTTPRoutes {
                 await log("auth: missing or malformed X-Attest headers", context, services)
                 return nil
             }
-            guard await services.challenges.consume(challenge) else {
+            // In date and this server's; not used up, as the assertion's counter stops it being
+            // sent again (`advanceCounter`)
+            guard services.challenges.isValid(challenge) else {
                 await log("auth: challenge unknown or expired", context, services)
                 return nil
             }

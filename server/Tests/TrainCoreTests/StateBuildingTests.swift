@@ -225,6 +225,52 @@ import Testing
         #expect(ActivityState.staleDate(for: countdown) == minutes(4))
     }
 
+    /// With no next train nothing moves it on, so its one redraw comes once it's been at the
+    /// station, saying it's due, not "At Station" for good.
+    @Test func withoutANextTrainStaleOnceItsBeenAtTheStation() {
+        let countdown = state(train: 4, following: [])
+        #expect(countdown.staleDate == minutes(4).addingTimeInterval(AtStation.seconds))
+        #expect(!AtStation.covers(countdown.train, at: countdown.staleDate.addingTimeInterval(0.5)))
+    }
+
+    /// The push server moves on those it has; the rest only move on as they redraw, so not
+    /// until they've been at the station.
+    @Test func withoutThePushServerStaleOnceItsBeenAtTheStation() {
+        let countdown = state(train: 4, following: [8])
+        #expect(countdown.staleDate(pushedOn: true) == minutes(4))
+        #expect(countdown.staleDate == countdown.staleDate(pushedOn: true))
+        let alone = countdown.staleDate(pushedOn: false)
+        #expect(alone == minutes(4).addingTimeInterval(AtStation.seconds))
+        // As it redraws then, on to the next
+        #expect(countdown.movedOn(at: alone.addingTimeInterval(0.5), holding: AtStation.seconds).train == minutes(8))
+    }
+
+    @Test func aTrainDueTheSameSecondIsOneOfTheFollowing() throws {
+        let trains = [arrival(2, trip: "r", route: "R"), arrival(2, trip: "n", route: "N"), arrival(6, trip: "r2")]
+        let state = try #require(ContentState(for: prospect, trains: trains, notice: nil, now: now, following: nil, after: nil))
+        #expect(state.trip == "r")
+        #expect(state.following == [minutes(2), minutes(6)])
+        #expect(state.followingRoutes == ["N", "R"])
+    }
+
+    @Test func aTrainMovedOnToIsKeptWhileItsAtTheStation() throws {
+        // Moved on to the train due at 2 (its trip not known), then refreshed 5 s after it's due
+        let trains = [arrival(2, trip: "x"), arrival(6, trip: "y")]
+        let held = now.addingTimeInterval(2 * 60 + 5)
+        let state = try #require(ContentState(for: prospect, trains: trains, notice: nil, now: held,
+                                              following: "", after: minutes(2)))
+        #expect(state.train == minutes(2))
+        // Not once it's been there
+        let gone = try #require(ContentState(for: prospect, trains: trains, notice: nil,
+                                             now: minutes(2).addingTimeInterval(AtStation.seconds + 1),
+                                             following: "", after: minutes(2)))
+        #expect(gone.train == minutes(6))
+        // Nor, before it's due, a train already at the station
+        let early = try #require(ContentState(for: prospect, trains: [arrival(-0.1, trip: "z")] + trains, notice: nil,
+                                              now: now, following: "", after: minutes(2)))
+        #expect(early.train == minutes(2))
+    }
+
     @Test func movesOnByItselfToTheNextFollowingTrain() {
         let countdown = state(train: 2, following: [6, 9])
         #expect(countdown.movedOn(at: now) == countdown)
@@ -236,5 +282,29 @@ import Testing
         #expect(moved.followingRoutes == ["R"])
         // With none still to come, it stays as it is
         #expect(countdown.movedOn(at: minutes(10)) == countdown)
+    }
+
+    @Test func holdsTheTrainAtTheStationBeforeMovingOn() {
+        let countdown = state(train: 2, following: [6, 9])
+        let due = minutes(2)
+        #expect(AtStation.covers(due, at: due.addingTimeInterval(10)))
+        #expect(!AtStation.covers(due, at: due.addingTimeInterval(AtStation.seconds)))
+        #expect(countdown.movedOn(at: due.addingTimeInterval(10), holding: AtStation.seconds) == countdown)
+        #expect(countdown.movedOn(at: due.addingTimeInterval(AtStation.seconds), holding: AtStation.seconds).train
+            == minutes(6))
+    }
+
+    @Test func aRefreshKeepsTheTrainWhileItsAtTheStation() throws {
+        var selection = prospect
+        selection.walkMinutes = 5
+        let started = try #require(ContentState(for: selection, board: fixtureBoard(), settings: all, now: now,
+                                                following: nil, after: nil))
+        #expect(started.trip == "b")
+        let atStation = started.refreshed(for: selection, board: fixtureBoard(), settings: all,
+                                          now: minutes(6).addingTimeInterval(10))
+        #expect(atStation.trip == "b")
+        let gone = started.refreshed(for: selection, board: fixtureBoard(), settings: all,
+                                     now: minutes(6).addingTimeInterval(AtStation.seconds))
+        #expect(gone.trip == "c")
     }
 }

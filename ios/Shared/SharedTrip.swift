@@ -133,12 +133,7 @@ extension SharedStore {
     /// hour from now; nil ends both.
     static func saveSharedTrip(_ trip: SharedTrip?) {
         removeSharedBusTrip()
-        guard let tripFile else { return }
-        guard let trip, let data = try? JSONEncoder().encode(trip) else {
-            try? FileManager.default.removeItem(at: tripFile)
-            return
-        }
-        try? data.write(to: tripFile, options: .atomic)
+        write(trip, to: tripFile)
     }
 }
 
@@ -190,12 +185,8 @@ extension SharedStore {
     /// Saves the walk's stage (nil for none: walking to a train, at a change, or ended), and
     /// redraws Transit Directions with it.
     static func saveWalkStage(_ stage: WalkStage?) {
-        guard let walkStageFile else { return }
-        if let stage, let data = try? JSONEncoder().encode(stage) {
-            try? data.write(to: walkStageFile, options: .atomic)
-        } else {
-            try? FileManager.default.removeItem(at: walkStageFile)
-        }
+        guard walkStageFile != nil else { return }
+        write(stage, to: walkStageFile)
         WidgetCenter.shared.reloadTimelines(ofKind: WidgetKind.directions)
     }
 }

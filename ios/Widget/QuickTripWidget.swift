@@ -374,6 +374,9 @@ struct DirectionsProvider: TimelineProvider {
         }
         if let expires = quickTrip.planningExpires {
             entries.append(entry(expires, quickTrip.shown(at: expires), nil))
+            // Again once timed out, for the buttons' own timeline: Favorite Stop's saved board
+            // and the reloads every `homeRedraw` that keep it fresh
+            return Timeline(entries: entries, policy: .after(expires))
         }
         return Timeline(entries: entries, policy: .never)
     }

@@ -19,7 +19,10 @@ targets:
     platform: iOS
     sources:
       - App
-      - Shared
+      # MapLayout.swift is the server's alone now, for its tests: nothing in the app draws it
+      - path: Shared
+        excludes:
+          - MapLayout.swift
       # The Widgets tab draws the Next train and Transfers widgets as on the Home Screen
       - Widget/LeewayWidget.swift
       - Widget/NextTrainBoard.swift
@@ -61,6 +64,8 @@ targets:
           - location
         # Stations near you, in the Nearby tab and on the Nearby widget; walks to and from trains
         NSLocationWhenInUseUsageDescription: Your location shows the stations near you and their next trains, in the app and on the Nearby widget, and the turns on your walk to and from the train.
+        # New Trip's search finds your contacts' addresses by name
+        NSContactsUsageDescription: Your contacts' addresses come up when you search for someone in New Trip, for a trip to or from them.
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
@@ -86,7 +91,14 @@ targets:
     platform: iOS
     sources:
       - Widget
-      - Shared
+      # The walking router is the app's: walks are routed there, not in widgets
+      - path: Shared
+        excludes:
+          - WalkGraph.swift
+          - WalkRouter.swift
+          - WalkAssembly.swift
+          - StreetNames.swift
+          - MapLayout.swift
     info:
       path: Widget/Info.plist
       properties:
@@ -121,7 +133,14 @@ targets:
     # Share/Linked: Xcode can't host previews in a share extension, so its files' previews would
     # all fail if it saw them in this target
     sources:
-      - Share
+      - path: Share
+        # The walking router is the app's alone
+        excludes:
+          - Linked/Shared/WalkGraph.swift
+          - Linked/Shared/WalkRouter.swift
+          - Linked/Shared/WalkAssembly.swift
+          - Linked/Shared/StreetNames.swift
+          - Linked/Shared/MapLayout.swift
     info:
       path: Share/Info.plist
       properties:

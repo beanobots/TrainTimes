@@ -11,6 +11,8 @@ struct AppTabs: View {
     @State private var tab = AppTab.live
     /// Set by the Nearby widget's "allow location" link, for the Nearby tab to act on.
     @State private var allowingLocation = false
+    /// Counts taps on the Nearby tab, picked or already showing, for it to come back to you.
+    @State private var nearbyTaps = 0
     /// New Trip's picked trip, for its Show on Widget.
     @State private var tripShowing = TripShowing()
     /// A station tapped in Spotlight, set by `OpenStationIntent`.
@@ -20,19 +22,24 @@ struct AppTabs: View {
     /// New Trip's Go: the walk under way, over everything.
     @State private var walk = ActiveWalk.shared
     /// First-run setup's been through or skipped, or wasn't needed: set up before it came.
-    @AppStorage("firstRunDone") private var firstRunDone = false
+    @AppStorage(Self.firstRunDoneKey) private var firstRunDone = false
+    /// Where `firstRunDone` is kept, for Settings' setup again too.
+    static let firstRunDoneKey = "firstRunDone"
     @State private var settingUp = false
     /// A visitor's stay is over: whether to clear their hotel and sights.
     @State private var stayOver = false
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
-        TabView(selection: $tab) {
+        TabView(selection: Binding(get: { tab }, set: { picked in
+            if picked == .live { nearbyTaps += 1 }
+            tab = picked
+        })) {
+            Tab("Nearby", systemImage: "location.fill", value: AppTab.live) {
+                LiveView(allowingLocation: $allowingLocation, recenterRequests: nearbyTaps)
+            }
             Tab("New Trip", systemImage: "point.topleft.down.to.point.bottomright.curvepath.fill", value: AppTab.newTrip) {
                 NewTripView(showing: tripShowing)
-            }
-            Tab("Nearby", systemImage: "location.fill", value: AppTab.live) {
-                LiveView(allowingLocation: $allowingLocation)
             }
             Tab("Widgets", systemImage: "app", value: AppTab.widgets) {
                 WidgetsView()
@@ -49,12 +56,11 @@ struct AppTabs: View {
                 settingUp = false
             }
         }
-        // Settings' Run Setup Again clears it: show setup again, the saved places (and a visit's
-        // hotel and sights) forgotten for it to set afresh
+        // Settings' Run Setup Again clears it: show setup again, which forgets the saved places
+        // (and a visit's hotel and sights) as it finishes (`FirstRunAnswers.save`), not now, so
+        // the app quit part way through still has them
         .onChange(of: firstRunDone) { _, done in
             guard !done else { return }
-            VisitStay.clear()
-            SavedPlaces.shared.clear()
             settingUp = true
         }
         .alert("Trip Over?", isPresented: $stayOver) {
@@ -113,8 +119,10 @@ struct AppTabs: View {
     }
 
     /// Runs `show` after dismissing any presented sheet (e.g. the train picker), which would
-    /// otherwise block it.
+    /// otherwise block it. Not under a walk or first-run setup, whose covers only End, Done or
+    /// finishing take down: dismissed, they'd leave the walk running with no way to end it.
     private func afterSheets(_ show: @escaping () -> Void) {
+        guard walk.session == nil, !settingUp else { return }
         let root = UIApplication.shared.connectedScenes
             .compactMap { ($0 as? UIWindowScene)?.keyWindow?.rootViewController }
             .first

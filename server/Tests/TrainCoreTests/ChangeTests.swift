@@ -80,6 +80,26 @@ import Testing
         #expect(connections.first?.waitLabel == "<1 min")
     }
 
+    @Test func aTrainAcrossThePlatformIsCaughtBeforeItsDoorsClose() {
+        let r = [train("R", 2, trip: "r1", at: "R34N")]
+        let atChange = [train("R", 10, trip: "r1", at: "R31N")]
+        // Held, but its doors close 10 s after your R gets in: you're not across yet
+        var going = train("D", 9.5, trip: "going", at: "R31N")
+        going.departure = time(10 + 10.0 / 60)
+        let missed = atlantic.connections(for: r, atChange: atChange,
+                                          departures: [going, train("N", 18, trip: "n1", at: "R31N")], selection: prospect)
+        #expect(missed.first?.next?.trip == "n1")
+        // Pulling in as your R does, its doors are open long enough
+        let together = atlantic.connections(for: r, atChange: atChange,
+                                            departures: [train("D", 10, trip: "d1", at: "R31N")], selection: prospect)
+        #expect(together.first?.next?.trip == "d1")
+        // But not one that came and went just before
+        let gone = atlantic.connections(for: r, atChange: atChange,
+                                        departures: [train("D", 9.5, trip: "gone", at: "R31N"),
+                                                     train("N", 18, trip: "n1", at: "R31N")], selection: prospect)
+        #expect(gone.first?.next?.trip == "n1")
+    }
+
     @Test func aTrainHeldOnAnotherPlatformStillTakesTheWalk() {
         // A 2 gets to its platform half a minute before your R, and waits three and a half minutes
         let twoThree = Change(stationID: "R31", routes: ["2", "3"], walkMinutes: 3)
@@ -429,6 +449,18 @@ import Testing
         #expect(atlantic.validated(for: prospect, order: order)?.routes == ["D", "N"])
     }
 
+    @Test func aChangeOnAnotherBranchIsNotOnYourWay() {
+        // An A from Beach 67 St, on the Far Rockaway branch, toward Manhattan
+        let farRockaway = Selection(stationID: "H06", routes: ["A"], direction: .north)
+        #expect(Change(stationID: "H04", routes: ["S"]).isAhead(of: farRockaway))
+        // Beach 90 St is on the Rockaway Park branch, listed before it in lines.json
+        #expect(!Change(stationID: "H12", routes: ["S"]).isAhead(of: farRockaway))
+        // From Lefferts Blvd, Broad Channel is on another branch too
+        let lefferts = Selection(stationID: "A65", routes: ["A"], direction: .north)
+        #expect(!Change(stationID: "H04", routes: ["S"]).isAhead(of: lefferts))
+        #expect(Change(stationID: "A51", routes: ["J"]).isAhead(of: lefferts))
+    }
+
     // MARK: Saving
 
     @Test func aChangeSavedBeforeThereWasAWayGoesYours() throws {
@@ -452,6 +484,16 @@ import Testing
         #expect(throws: DecodingError.self) {
             try JSONDecoder().decode(Change.self, from: Data(#"{"stationID":"L22"}"#.utf8))
         }
+    }
+
+    @Test func aTrainReroutedToTheChangeCallsAtItsPlatforms() {
+        // A D running on the Q's tracks at night, where it doesn't usually stop: timed to the Q's
+        // platform there, its way
+        let d = Selection(stationID: "D15", routes: ["D"], direction: .south)
+        #expect(Change(stationID: "R30", routes: ["Q"]).arrivalStops(for: d) == ["R30S"])
+        // Where its lines do stop, just theirs
+        let r = Selection(stationID: "R20", routes: ["R"], direction: .south)
+        #expect(Change(stationID: "R30", routes: ["Q"]).arrivalStops(for: r) == ["R30S"])
     }
 
     @Test func savesAsItLoads() throws {

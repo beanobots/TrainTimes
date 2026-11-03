@@ -4,8 +4,10 @@ import UIKit
 
 /// The city's walking graph, bundled as walkgraph.sqlite (`tools/make_walk_graph.py`), for
 /// routing walks on the phone, offline (`WalkRouter`). The file's in 2 km tiles: a walk reads
-/// only those round it, and the graph's put together from them. Tiles read lately are kept, and
-/// the last graph and its router, so a walk routed again as you go is quick; all dropped when
+/// only those along it, from its start to its end, and the graph's put together from them;
+/// routed again as you go, only those along what's left. Tiles read lately are kept, and the
+/// last few graphs' routers (a trip's walk to its train and from it are in different places),
+/// so a walk routed again is quick; the least lately used let go, and all dropped when
 /// memory's short.
 actor WalkGraphStore {
     static let shared = WalkGraphStore()
@@ -17,40 +19,75 @@ actor WalkGraphStore {
     /// Tiles' arrays by "x,y", the most lately used last.
     private var tiles: [String: [String: Data]] = [:]
     private var used: [String] = []
-    /// The last graph's router, and the tiles it's of.
-    private var router: (tiles: [String], router: WalkRouter)?
+    /// The last few graphs' routers, by the tiles they're of, the most lately used last.
+    private var routers: [(tiles: [String], router: WalkRouter)] = []
 
     /// Most tiles kept: about 2 MB, a long walk's worth and then some.
     private static let mostTiles = 40
-    /// Metres round a walk's ends to take tiles from, for its way round anything in between.
-    private static let margin = 1_500.0
+    /// Most routers kept: a trip's two walks', and one more.
+    private static let mostRouters = 3
+    /// Metres either side of a walk's line to take tiles from, for its way round anything in
+    /// the way; the second, wider, where there's no route in the first.
+    private static let margins = [1_500.0, 3_000.0]
+    /// Most tiles a walk's graph is made of: past it, it's a walk for Apple Maps, the phone
+    /// spared putting so much together.
+    private static let mostForAWalk = 40
 
     deinit {
         sqlite3_close(database)
     }
 
-    /// The walk from `start` to `end` routed on the graph, by `options`; nil without the file,
-    /// outside the city, or with no route.
-    func walk(from start: Walk.Point, to end: Walk.Point, options: WalkRouter.Options) -> Walk? {
-        guard let router = router(around: [start, end]),
-              let route = router.route(from: start, to: end, options: options) else { return nil }
-        return router.walk(of: route)
+    /// Why a walk couldn't be routed.
+    enum Missed: String, Error {
+        /// No file in the format this reads.
+        case noFile
+        /// Nothing of the graph round the walk: outside the city.
+        case noGraph
+        /// Its ends not near enough the graph, or not joined on it.
+        case noRoute
+        /// So long it'd take too much of the graph to route.
+        case tooFar
     }
 
-    /// Drops all but the file: the tiles, graph and router are made again when next needed.
+    /// The walk from `start` to `end` routed on the graph, by `options`: on the tiles along
+    /// it, then a wider band of them if there's no route in those.
+    func walk(from start: Walk.Point, to end: Walk.Point, options: WalkRouter.Options) -> Result<Walk, Missed> {
+        guard open() != nil else { return .failure(.noFile) }
+        var missed = Missed.noGraph
+        for margin in Self.margins {
+            let along = WalkGraph.tiles(along: start, to: end, metres: margin)
+            guard along.count <= Self.mostForAWalk else {
+                // Wider's only more
+                if missed == .noGraph { missed = .tooFar }
+                break
+            }
+            guard let router = router(on: along) else { continue }
+            if let route = router.route(from: start, to: end, options: options) {
+                return .success(router.walk(of: route))
+            }
+            missed = .noRoute
+        }
+        return .failure(missed)
+    }
+
+    /// Drops all but the file: the tiles, graphs and routers are made again when next needed.
     func drop() {
         tiles = [:]
         used = []
-        router = nil
+        routers = []
     }
 
-    /// The router on the tiles round `points`, the last one again if it's on the same tiles.
-    private func router(around points: [Walk.Point]) -> WalkRouter? {
+    /// The router on `wanted` tiles: one kept, if there's one on the same tiles, or made.
+    private func router(on wanted: [(x: Int, y: Int)]) -> WalkRouter? {
         guard let database = open() else { return nil }
-        let keys = WalkGraph.tiles(around: points, metres: Self.margin).map { "\($0.x),\($0.y)" }
-        if let router, router.tiles == keys { return router.router }
+        let keys = wanted.map { "\($0.x),\($0.y)" }
+        if let index = routers.firstIndex(where: { $0.tiles == keys }) {
+            let kept = routers.remove(at: index)
+            routers.append(kept)
+            return kept.router
+        }
         var arrays: [[String: Data]] = []
-        for (key, (x, y)) in zip(keys, WalkGraph.tiles(around: points, metres: Self.margin)) {
+        for (key, (x, y)) in zip(keys, wanted) {
             if let tile = tiles[key] ?? read(x: x, y: y, from: database) {
                 remember(tile, as: key)
                 arrays.append(tile)
@@ -58,7 +95,8 @@ actor WalkGraphStore {
         }
         guard !arrays.isEmpty, let graph = try? WalkGraph(tiles: arrays, names: names) else { return nil }
         let made = WalkRouter(graph: graph)
-        router = (keys, made)
+        routers.append((keys, made))
+        if routers.count > Self.mostRouters { routers.removeFirst() }
         return made
     }
 
@@ -84,8 +122,11 @@ actor WalkGraphStore {
         while sqlite3_step(statement) == SQLITE_ROW {
             guard let name = sqlite3_column_text(statement, 0) else { continue }
             let count = Int(sqlite3_column_bytes(statement, 1))
-            let bytes = sqlite3_column_blob(statement, 1)
-            tile[String(cString: name)] = count > 0 && bytes != nil ? Data(bytes: bytes!, count: count) : Data()
+            if count > 0, let bytes = sqlite3_column_blob(statement, 1) {
+                tile[String(cString: name)] = Data(bytes: bytes, count: count)
+            } else {
+                tile[String(cString: name)] = Data()
+            }
         }
         return tile.isEmpty ? nil : tile
     }

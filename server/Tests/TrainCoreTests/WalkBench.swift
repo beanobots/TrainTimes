@@ -19,8 +19,8 @@ struct WalkBench {
     struct Bench: Decodable {
         let name: String
         let note: String
-        let from: [Double]
-        let to: [Double]
+        var from: [Double] = []
+        var to: [Double] = []
     }
 
     /// Apple Maps' walk, as kept.
@@ -74,6 +74,8 @@ struct WalkBench {
         let folder = tools.appendingPathComponent("apple")
         let file = folder.appendingPathComponent("\(name).json")
         if let data = try? Data(contentsOf: file) { return try JSONDecoder().decode(AppleWalk.self, from: data) }
+        // The server package builds for older macOS; asking Apple Maps here needs this one
+        guard #available(macOS 26.0, *) else { return nil }
         let request = MKDirections.Request()
         request.source = MKMapItem(location: CLLocation(latitude: start.lat, longitude: start.lon), address: nil)
         request.destination = MKMapItem(location: CLLocation(latitude: end.lat, longitude: end.lon), address: nil)
@@ -165,6 +167,7 @@ struct WalkBench {
                 let block = Int(graph.armBlock[arm])
                 guard graph.class(of: block) != .path else { continue }
                 let signal = Sidewalks.Signal.Kind(rawValue: Int(graph.nodeSignal[node]))
+                if graph.class(of: block) == .arm && graph.nodeLevel[node] != 13 { continue }
                 let color = graph.class(of: block) == .arm && ![8, 13].contains(graph.blockRW[block])
                     ? CGColor(gray: 0, alpha: 1)
                     : signal.contains(.signal) ? CGColor(red: 0.1, green: 0.75, blue: 0.2, alpha: 1)

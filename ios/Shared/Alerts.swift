@@ -147,7 +147,7 @@ struct AlertBrief: Codable, Hashable, Sendable {
 
 enum AlertsFeed {
     /// All subway alerts, current and planned. About 1 MB, but sent gzipped (about 80 KB).
-    static let url = URL(string: "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/camsys%2Fsubway-alerts.json")!
+    static let url = URL(string: TrainService.mtaFeeds + "camsys%2Fsubway-alerts.json")!
 
     /// A feed alert with only what `alerts(for:in:now:)` needs, so one decode serves every
     /// selection.

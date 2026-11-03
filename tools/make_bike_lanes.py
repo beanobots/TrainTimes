@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Builds ios/App/bike_lanes.json, the city's protected bike lanes and paths,
+r"""Builds ios/App/bike_lanes.json, the city's protected bike lanes and paths,
 from NYC DOT's bike route map (NYC Open Data mzxg-pwib, updated yearly), for
 how much of a Citi Bike ride runs on them (BikeLanes.swift).
 

@@ -108,11 +108,21 @@ extension CountdownState {
     /// train under a new trip id, or one without an id whose time moved up a little.
     static let leeway: TimeInterval = 60
 
-    /// Stale when the train is due, so iOS redraws and it moves on (`movedOn(at:)`). On a walk's
-    /// train, when it's due where you get off instead, for what to do then (`WalkState.next`).
-    var staleDate: Date {
+    /// Stale when the train is due, so iOS redraws it saying it's at the station (`AtStation`);
+    /// the app or the push server moves it on after. On a walk's train, when it's due where you
+    /// get off instead, for what to do then (`WalkState.next`).
+    /// With no next train, nothing moves it on (the push server skips those), so its one stale
+    /// redraw would say "At Station" for good: then stale once it's been there, saying it's due.
+    /// As the push server has it (`staleDate(pushedOn:)`), which is what its pushes say.
+    var staleDate: Date { staleDate(pushedOn: true) }
+
+    /// `staleDate`, `pushedOn` saying whether the push server has the countdown, and so pushes
+    /// it on to its next train once its own has been at the station. Without, nothing does (the
+    /// app's asleep), so it's stale only then, moving on by itself as it redraws, rather than
+    /// saying "At Station" until it's next updated. A walk's the app keeps up.
+    func staleDate(pushedOn: Bool) -> Date {
         if let walk, walk.phase == .riding, let getOff = walk.getOff { return getOff }
-        return train
+        return walk == nil && (following.isEmpty || !pushedOn) ? train.addingTimeInterval(AtStation.seconds) : train
     }
 
     /// Whether widgets for its train show the same as with `other`: they take its trains'
@@ -137,15 +147,23 @@ extension CountdownState {
         let reachable = selection.firstReachable(upcoming, now: now)
         let target: Arrival?
         if let trip {
-            // A trip without an id can only be matched by time
-            let same = trip.isEmpty ? nil : upcoming.first { $0.trip == trip }
-            let next = last.flatMap { last in upcoming.first { $0.time >= last.addingTimeInterval(-Self.leeway) } }
+            // A trip without an id can only be matched by time. The same train kept while it's
+            // at the station (`AtStation`), not moved on from as it's due
+            let same = trip.isEmpty ? nil
+                : trains.first { $0.trip == trip && $0.time > now.addingTimeInterval(-AtStation.seconds) }
+            // With the last target due, it may be the one at the station, its trip unknown once
+            // moved on to: kept there too, not dropped for the train after as soon as it's due
+            let holding = last.map { $0 <= now } ?? false
+            let candidates = holding ? trains.filter { $0.time > now.addingTimeInterval(-AtStation.seconds) } : upcoming
+            let next = last.flatMap { last in candidates.first { $0.time >= last.addingTimeInterval(-Self.leeway) } }
             target = same ?? next ?? reachable
         } else {
             target = reachable
         }
         guard let target else { return nil }
-        let following = upcoming.filter { $0.time > target.time }.prefix(2)
+        // Another due the same second (an N and an R, timetable times on the minute) is one of
+        // them, not left out, and so dropped from widgets while it counts down (`CountdownSync`)
+        let following = upcoming.filter { $0.time >= target.time && $0 != target }.prefix(2)
         self.init(
             train: target.time,
             trip: target.trip,
@@ -186,13 +204,15 @@ extension CountdownState {
         return state
     }
 
-    /// Once the train has gone, retargets to the first following train still to come (or returns
-    /// self if none). iOS redraws at `staleDate`, so this moves on without the app, but only once
-    /// until the app updates it. A following train's trip and terminal are unknown; it's live if
-    /// this one was.
-    func movedOn(at now: Date) -> CountdownState {
+    /// Once the train has gone, `holding` seconds after it's due, retargets to the first
+    /// following train still to come then (or returns self if none). The Lock Screen draws it
+    /// held for `AtStation.seconds`, saying so; iOS redraws at `staleDate`, then the app or the
+    /// push server moves it on. A following train's trip and terminal are unknown; it's live if
+    /// this one was. A walk on it moves on at `now` itself.
+    func movedOn(at now: Date, holding: TimeInterval = 0) -> CountdownState {
         var state = self
         state.walk = walk?.movedOn(at: now)
+        let now = now.addingTimeInterval(-holding)
         guard train <= now, let index = following.firstIndex(where: { $0 > now }) else { return state }
         state.train = following[index]
         state.trip = ""

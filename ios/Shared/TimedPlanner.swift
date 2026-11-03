@@ -10,9 +10,17 @@ extension TripPlanner {
         meters * 1.2 / 80 * 60
     }
 
-    /// Changing across the platform; to another platform, or a station joined to it, is
+    /// Whole minutes to walk `meters` (`walkSeconds`), to the nearest; at least 1, as shown
+    /// beside a station, stop or dock.
+    static func walkMinutes(_ meters: Double) -> Int {
+        max(1, Int((walkSeconds(meters) / 60).rounded()))
+    }
+
+    /// Changing across the platform, as the widget counts it (`Change.canCatchAcross`): the
+    /// timetable's times are arrivals, its doors open for `dwellSeconds` from then, so a train due
+    /// from this long after yours can be caught. To another platform, or a station joined to it, is
     /// `Change.defaultWalkMinutes`, or the MTA's time for the walk where longer (`Platform.walks`).
-    private static let acrossSeconds: TimeInterval = 60
+    private static let acrossSeconds = Change.acrossSeconds - Change.dwellSeconds
     /// What a change on foot to another platform counts for in ranking trips, on top of its
     /// time, as maps apps rank them below ones without, and more again for the walk, so stepping
     /// across the platform at DeKalb Av beats walking between platforms at Atlantic Av for the
@@ -47,14 +55,31 @@ extension TripPlanner {
     /// given, are the walk at that end instead: a station biked to or from is the only one there.
     static func plan(from start: CLLocation, to end: CLLocation, at now: Date, timetable: Timetable,
                      walkRange: Double = walkRange, startRange: Double? = nil, endRange: Double? = nil) -> [Trip] {
+        planned(from: start, to: end, at: now, timetable: timetable, walkRange: walkRange,
+                startRange: startRange, endRange: endRange).trips
+    }
+
+    /// `plan(from:to:at:timetable:)`'s trips, and where there are none, why not: no station near
+    /// an end, no train in the timetable, or walking as quick.
+    static func planned(from start: CLLocation, to end: CLLocation, at now: Date, timetable: Timetable,
+                        walkRange: Double = walkRange, startRange: Double? = nil,
+                        endRange: Double? = nil) -> (trips: [Trip], none: NoTrip?) {
         let origins = Nearby.stations(near: start, limit: 8).filter { $0.meters <= startRange ?? walkRange }
         let destinations = Nearby.stations(near: end, limit: 8).filter { $0.meters <= endRange ?? walkRange }
+        if let none = noStations(start: start, startRange: startRange ?? walkRange, startNear: !origins.isEmpty,
+                                 end: end, endRange: endRange ?? walkRange, endNear: !destinations.isEmpty) {
+            return ([], none)
+        }
         let setOff = now.timeIntervalSince(timetable.base)
+        // In step-free mode, on and off only at step-free platforms, and changing across the
+        // platform or between them
+        let stepFree = SharedStore.loadSettings().stepFree
+        let usable = { (stop: String) in !stepFree || isStepFree(stop) }
 
         // The stops near the end, and the trips that call at them
         var ends: [String: (station: Station, walk: TimeInterval)] = [:]
         for destination in destinations {
-            for stop in stops(at: destination.station) {
+            for stop in stops(at: destination.station) where usable(stop) {
                 ends[stop] = (destination.station, walkSeconds(destination.meters))
             }
         }
@@ -65,12 +90,23 @@ extension TripPlanner {
             }
         }
 
+        // And the stations joined to those near the start, walked to through them: Chambers St's J
+        // by Brooklyn Bridge-City Hall
+        var boarding = origins
+        for origin in origins {
+            for joined in StationDirectory.stations(inComplexOf: origin.station)
+            where !boarding.contains(where: { $0.station.id == joined.id }) {
+                let meters = max(origin.meters, start.distance(from: joined.location))
+                if meters <= startRange ?? walkRange { boarding.append(.init(station: joined, meters: meters)) }
+            }
+        }
+
         var journeys: [Journey] = []
         // Where each line from the start gets to soonest, for changing there
         var reached: [String: [String: Journey]] = [:]
-        for origin in origins {
+        for origin in boarding {
             let ready = setOff + walkSeconds(origin.meters)
-            for stop in stops(at: origin.station) {
+            for stop in stops(at: origin.station) where usable(stop) {
                 guard let direction = Direction(ofStop: stop) else { continue }
                 for (pattern, call) in timetable.calls(at: stop) {
                     guard let trip = departure(timetable, pattern: pattern, call: call, after: ready) else { continue }
@@ -97,9 +133,13 @@ extension TripPlanner {
         }
 
         // Then one change, to a train that calls near the end
-        let startLines = Dictionary(uniqueKeysWithValues: origins.map { origin in
-            (origin.station.id, Set(StationDirectory.stations(inComplexOf: origin.station).flatMap(\.routes)))
-        })
+        // When you could be at each stop near the start, walking there
+        var boardable: [String: TimeInterval] = [:]
+        for origin in boarding {
+            for stop in stops(at: origin.station) where usable(stop) {
+                boardable[stop] = min(boardable[stop] ?? .infinity, setOff + walkSeconds(origin.meters))
+            }
+        }
         // Where each line from the start goes the other way: a change whose onward train then
         // calls at one of them rode backwards to meet it (the 1 up from 66 St to 72 St for a 2
         // down through Times Sq), when the 1 down gets there, to change or stay on
@@ -121,18 +161,26 @@ extension TripPlanner {
                     for (pattern, call) in timetable.calls(at: board) {
                         guard let calls = ending[pattern] else { continue }
                         let onward = route(timetable, pattern)
-                        // Not to a line from the start, which could have been taken from there
-                        for (route, ride) in rides where route != onward && ride.origin.complex != station.complex
-                            && startLines[ride.origin.id]?.contains(onward) != true {
+                        for (route, ride) in rides where route != onward && ride.origin.complex != station.complex {
                             // Across the platform: off and on at the same side of it
                             let across = Change.isAcross(off: route, at: at, on: onward, at: board)
+                            guard across || usable(at) && usable(board) else { continue }
                             let change = across ? acrossSeconds
                                 : TimeInterval(Change.walkMinutes(from: at, to: board, else: Change.defaultWalkMinutes) * 60)
                             guard let trip = departure(timetable, pattern: pattern, call: call, after: ride.arrives + change)
                             else { continue }
                             let behind = otherWay(of: ride)
                             let onwardCalls = timetable.patterns[pattern].calls
-                            for (endCall, stop) in calls where endCall > call {
+                            // Not to a train you could walk to near the start and board in time: at
+                            // the change (49 St's N to Times Sq-42 St for the Q there), before it, or
+                            // further on (the A to Fulton St for a J that then calls at Chambers St)
+                            let walkable = onwardCalls.indices.first { index in
+                                let onwardCall = onwardCalls[index]
+                                return boardable[timetable.stops[Int(onwardCall.stop)]].map { ready in
+                                    ready <= trip + TimeInterval(onwardCall.arrives) + TimeInterval(onwardCall.waits)
+                                } ?? false
+                            }
+                            for (endCall, stop) in calls where endCall > call && endCall <= walkable ?? .max {
                                 guard let end = ends[stop], end.station.complex != station.complex else { continue }
                                 // Not back past the start on it
                                 let passes = onwardCalls[(call + 1)...endCall].contains { onwardCall in
@@ -156,12 +204,40 @@ extension TripPlanner {
         // Not changes off a train that goes there itself
         let direct = Set(journeys.filter { $0.change == nil }.map { "\($0.origin.id) \($0.route)" })
         journeys.removeAll { $0.change != nil && direct.contains("\($0.origin.id) \($0.route)") }
-        // Not if walking there is as quick
-        let walking = setOff + walkSeconds(start.distance(from: end))
-        guard let soonest = journeys.map(\.arrives).min(), soonest < walking,
-              let best = journeys.map(\.cost).min() else { return [] }
+        // Not if walking there is as quick, round by a bridge if there's water between
+        let walking = setOff + (WalkReach.meters(from: start, to: end).map(walkSeconds) ?? .infinity)
+        guard let soonest = journeys.map(\.arrives).min(), let best = journeys.map(\.cost).min() else {
+            return ([], .noTrain)
+        }
+        guard soonest < walking else { return ([], .walkingAsQuick) }
         let offered = journeys.filter { $0.cost <= best + slowerBy }.sorted { $0.cost < $1.cost }
-        return Array(trips(from: offered).prefix(maxOptions))
+        let trips = withoutDetours(trips(from: offered, at: now), from: start, to: end, at: now, timetable: timetable)
+        return (Array(trips.prefix(maxOptions)), trips.isEmpty ? .noTrain : nil)
+    }
+
+    /// `trips` without any whose change takes it away from the end (`goesAway(_:)`) where
+    /// another that doesn't gets there no more than `together` later, or, without the timetable
+    /// to time them, where there's another at all. From W 4 St-Wash Sq for 14 St-Union Sq, not
+    /// the D, F or M down to Broadway-Lafayette St for the 6 back up, when the F up to 14 St for
+    /// the L is as soon; but from Ozone Park-Lefferts Blvd for Middle Village, the A to W 4 St-Wash
+    /// Sq for the M, the one way with a single change.
+    static func withoutDetours(_ trips: [Trip], from start: CLLocation, to end: CLLocation, at now: Date = .now,
+                               timetable: Timetable?) -> [Trip] {
+        let away = trips.map(goesAway)
+        guard away.contains(true), away.contains(false) else { return trips }
+        let arrivals = trips.map { trip in
+            timetable.flatMap { timing(of: trip, from: start, to: end, at: now, timetable: $0)?.arrives }
+        }
+        return trips.indices.filter { index in
+            guard away[index] else { return true }
+            return !trips.indices.contains { other in
+                guard !away[other] else { return false }
+                // One the timetable can't time against one it can isn't another way there
+                guard let theirs = arrivals[other] else { return arrivals[index] == nil }
+                return arrivals[index].map { theirs <= $0 + together } ?? true
+            }
+        }
+        .map { trips[$0] }
     }
 
     /// What `trip` from `start` to `end` leaving at `now` is ranked by, as `plan` ranks its own:
@@ -188,9 +264,9 @@ extension TripPlanner {
         guard let origin = trip.selection.station else { return nil }
         let selection = trip.selection
         let ready = now.timeIntervalSince(timetable.base)
-            + walkSeconds(start.distance(from: CLLocation(latitude: origin.lat, longitude: origin.lon)))
+            + walkSeconds(start.distance(from: origin.location))
         let lastStation = trip.change?.destination ?? trip.destination
-        let walkOff = walkSeconds(end.distance(from: CLLocation(latitude: lastStation.lat, longitude: lastStation.lon)))
+        let walkOff = walkSeconds(end.distance(from: lastStation.location))
 
         guard let change = trip.change else {
             let there = soonest(timetable, from: selection.stopIDs, routes: selection.routes, after: ready,
@@ -205,45 +281,48 @@ extension TripPlanner {
         for stop in change.stops {
             guard let off = soonest(timetable, from: selection.stopIDs, routes: selection.routes, after: ready,
                                     to: Set(stop.arrivalStops(for: selection))) else { continue }
-            let boards = stop.departureStops(for: selection)
-            // Across the platform, as `plan` counts it: a line changed to on the platform you're
-            // off at, on the same side of it
-            let across = boards.contains { board in
-                stop.routes.contains { route in
+            // Each platform it boards at by itself: one across from you doesn't make a walk to
+            // another as quick
+            for board in stop.departureStops(for: selection) {
+                // Across the platform, as `plan` counts it: a line changed to on the platform
+                // you're off at, on the same side of it
+                let across = stop.routes.contains { route in
                     StationDirectory.platform(forStop: board)?.routes.contains(route) == true
                         && Change.isAcross(off: off.route, at: off.stop, on: route, at: board)
                 }
-            }
-            // The MTA's time for the walk where it's longer, to every platform it boards at
-            let walking = boards.map { Change.walkMinutes(from: off.stop, to: $0, else: stop.walkMinutes) }.min()
-                ?? stop.walkMinutes
-            let changing = across ? acrossSeconds : TimeInterval(walking * 60)
-            guard let there = soonest(timetable, from: boards, routes: stop.routes, after: off.arrives + changing,
-                                      to: targets) else { continue }
-            let timing = (arrives: there.arrives + walkOff, penalty: across ? 0 : changeCost + walkingChangeCost)
-            if timing.arrives + timing.penalty < best.map({ $0.arrives + $0.penalty }) ?? .infinity {
-                best = timing
+                // The MTA's time for the walk where it's longer
+                let walking = Change.walkMinutes(from: off.stop, to: board, else: stop.walkMinutes)
+                let changing = across ? acrossSeconds : TimeInterval(walking * 60)
+                guard let there = soonest(timetable, from: [board], routes: stop.routes, after: off.arrives + changing,
+                                          to: targets) else { continue }
+                let timing = (arrives: there.arrives + walkOff, penalty: across ? 0 : changeCost + walkingChangeCost)
+                if timing.arrives + timing.penalty < best.map({ $0.arrives + $0.penalty }) ?? .infinity {
+                    best = timing
+                }
             }
         }
         return best
     }
 
     /// `trips` best first by `cost(of:from:to:at:timetable:)`, leaving out those ranked over
-    /// `slowerBy` below the best. Without a timetable, or for trips it can't time, they keep their
-    /// order, after those it can.
+    /// `slowerBy` below the best, and those it can't time: the timetable has none of their trains
+    /// then. Without a timetable, or if it can time none of them (as near its end), they keep
+    /// their order. In step-free mode, each as `stepFree(_:)` takes it, if it can.
     static func ranked(_ trips: [Trip], from start: CLLocation, to end: CLLocation, at now: Date = .now) -> [Trip] {
+        let trips = SharedStore.loadSettings().stepFree ? trips.compactMap(stepFree) : trips
         guard let timetable = TimetableStore.load(now: now) else { return trips }
         let costs = trips.map { cost(of: $0, from: start, to: end, at: now, timetable: timetable) }
         guard let best = costs.compactMap({ $0 }).min() else { return trips }
         return trips.indices
-            .filter { costs[$0].map { $0 <= best + slowerBy } ?? true }
+            .filter { costs[$0].map { $0 <= best + slowerBy } ?? false }
             .sorted { (costs[$0] ?? .infinity, $0) < (costs[$1] ?? .infinity, $1) }
             .map { trips[$0] }
     }
 
     /// `trips` without any that another on the same line, the same way, beats at both ends: it
-    /// walks no more, to and from its stations, and gets there no later, one of them strictly.
-    /// The R from the corner to the station by the end, not also the R from further along with a
+    /// walks no more, to and from its stations, and gets there no later, one of them strictly (or
+    /// it comes first: the 2 or 3 from 96 St, not also the 1, 2 or 3 timed the same). The R from
+    /// the corner to the station by the end, not also the R from further along with a
     /// longer walk off. A direct trip isn't dropped for one with a change. Trips the timetable
     /// can't time, or without one, all stay.
     static func withoutSlowerWalks(_ trips: [Trip], from start: CLLocation, to end: CLLocation,
@@ -254,8 +333,8 @@ extension TripPlanner {
                   let arrives = timing(of: trip, from: start, to: end, at: now, timetable: timetable)?.arrives
             else { return nil }
             let last = trip.change?.destination ?? trip.destination
-            let walk = start.distance(from: CLLocation(latitude: origin.lat, longitude: origin.lon))
-                + end.distance(from: CLLocation(latitude: last.lat, longitude: last.lon))
+            let walk = start.distance(from: origin.location)
+                + end.distance(from: last.location)
             return (arrives, walk)
         }
         func sharesLine(_ a: Trip, _ b: Trip) -> Bool {
@@ -269,8 +348,9 @@ extension TripPlanner {
             return !trips.indices.contains { other in
                 guard other != index, let theirs = measured[other], sharesLine(trips[other], trip),
                       trips[other].change == nil || trip.change != nil else { return false }
+                // On a tie, the first
                 return theirs.walk <= mine.walk && theirs.arrives <= mine.arrives
-                    && (theirs.walk < mine.walk || theirs.arrives < mine.arrives)
+                    && (theirs.walk < mine.walk || theirs.arrives < mine.arrives || other < index)
             }
         }
         .map { trips[$0] }
@@ -301,7 +381,7 @@ extension TripPlanner {
     /// `journeys` (best first) as trips: those from the same station the same way, with the
     /// same change and end, joined while about as soon, then each train's changes to the same
     /// end as one change at each of their stations (`joiningChanges(_:)`), and each way there once.
-    private static func trips(from journeys: [Journey]) -> [Trip] {
+    private static func trips(from journeys: [Journey], at now: Date) -> [Trip] {
         struct Group {
             var first: Journey
             var routes: [String: Direction]
@@ -309,13 +389,19 @@ extension TripPlanner {
         }
         var groups: [Group] = []
         for journey in journeys {
-            let index = groups.firstIndex { group in
+            func isSameWay(_ group: Group) -> Bool {
                 group.first.origin.id == journey.origin.id && group.first.direction == journey.direction
                     && group.first.change?.station.complex == journey.change?.station.complex
                     && group.first.change?.direction == journey.change?.direction
                     && group.first.destination.complex == journey.destination.complex
-                    && journey.cost - group.first.cost <= together
             }
+            let index = groups.firstIndex { isSameWay($0) && journey.cost - $0.first.cost <= together }
+            // A later train of lines already offered that way isn't another way there: not the 2
+            // and 3 from 96 St, then the 1, 2 and 3
+            if index == nil, groups.contains(where: { group in
+                isSameWay(group) && group.routes[journey.route] != nil
+                    && journey.change.map { group.onward[$0.route] != nil } ?? true
+            }) { continue }
             if let index {
                 if groups[index].routes[journey.route] == nil { groups[index].routes[journey.route] = journey.direction }
                 if let change = journey.change, groups[index].onward[change.route] == nil {
@@ -347,13 +433,44 @@ extension TripPlanner {
         // one change at each; then the same train changing to the same lines for another station
         // near the end, or at the same station, just once
         var seen = Set<String>()
-        return joiningChanges(built).filter { trip in
+        return joiningChanges(built, at: now).filter { trip in
             let lines = "\(trip.selection.trainID) to \(trip.change?.allRoutes ?? [])"
             let place = "\(trip.selection.trainID) at \(trip.change?.station?.complex ?? "") for \(trip.destination.complex)"
             guard !seen.contains(lines), !seen.contains(place) else { return false }
             seen.formUnion([lines, place])
             return true
         }
+    }
+
+    /// Whether feed stop `stop` ("R11N") is step-free, the way its trains go
+    /// (`Platform.isStepFree(going:)`); not where that can't be told.
+    static func isStepFree(_ stop: String) -> Bool {
+        StationDirectory.platform(forStop: stop)?.isStepFree(going: Direction(ofStop: stop)) == true
+    }
+
+    /// `change` with just the lines the timetable has a train of leaving each of its stations its
+    /// way within `longestWait` of when `selection`'s first train from `now` gets there: not the B
+    /// at weekends, nor the W late at night. A station where the timetable can't time your train
+    /// stays as it is, as does all of it without a timetable for `now`. Nil if none are left.
+    static func running(_ change: Change, for selection: Selection, at now: Date) -> Change? {
+        guard let timetable = TimetableStore.load(now: now) else { return change }
+        let setOff = now.timeIntervalSince(timetable.base)
+        let stops = change.stops.compactMap { stop -> Change? in
+            guard let off = soonest(timetable, from: selection.stopIDs, routes: selection.routes, after: setOff,
+                                    to: Set(stop.arrivalStops(for: selection))) else { return stop }
+            var stop = stop
+            let boards = stop.departureStops(for: selection)
+            stop.routes = stop.routes.filter { route in
+                boards.contains { board in
+                    timetable.calls(at: board).contains { pattern, call in
+                        call < timetable.patterns[pattern].calls.count - 1 && self.route(timetable, pattern) == route
+                            && departure(timetable, pattern: pattern, call: call, after: off.arrives) != nil
+                    }
+                }
+            }
+            return stop.routes.isEmpty ? nil : stop
+        }
+        return Change(stops: stops)?.validated(for: selection)
     }
 
     /// Feed stop ids at `station`, both ways ("R31N", "R31S").

@@ -8,24 +8,30 @@ import Testing
 @Suite struct WalkGraphTests {
     /// The bundled graph, read once for all the tests.
     static let graph: WalkGraph? = {
-        let file = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .deletingLastPathComponent().appendingPathComponent("ios/App/walkgraph.sqlite")
         guard let database = try? SQLite(path: file.path),
               let format = try? database.query("SELECT value FROM info WHERE key = 'format'").first?.first?.text,
-              format == WalkGraph.format,
-              let rows = try? database.query("SELECT name, data FROM arrays"),
-              let labels = try? database.query("SELECT id, label FROM names") else { return nil }
-        var arrays: [String: Data] = [:]
-        for row in rows {
-            if let name = row[0].text, let data = row[1].blob { arrays[name] = data }
+              format == WalkGraph.format else { return nil }
+        return try? load(from: database, tiles: nil)
+    }()
+
+    static let file = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        .deletingLastPathComponent().appendingPathComponent("ios/App/walkgraph.sqlite")
+
+    /// The graph from the file's `tiles` (x, y), or all of them.
+    static func load(from database: SQLite, tiles: [(x: Int, y: Int)]?) throws -> WalkGraph {
+        var byTile: [String: [String: Data]] = [:]
+        for row in try database.query("SELECT x, y, name, data FROM tiles") {
+            guard let x = row[0].integer, let y = row[1].integer, let name = row[2].text, let data = row[3].blob else { continue }
+            if let tiles, !tiles.contains(where: { $0.x == Int(x) && $0.y == Int(y) }) { continue }
+            byTile["\(x),\(y)", default: [:]][name] = data
         }
         var names: [Int: String] = [:]
-        for row in labels {
+        for row in try database.query("SELECT id, label FROM names") {
             if let id = row[0].integer, let label = row[1].text { names[Int(id)] = label }
         }
-        return try? WalkGraph(arrays: arrays, names: names)
-    }()
+        return try WalkGraph(tiles: Array(byTile.values), names: names)
+    }
 
     func graph() throws -> WalkGraph {
         try #require(Self.graph, "ios/App/walkgraph.sqlite in format \(WalkGraph.format) (tools/make_walk_graph.py)")
@@ -102,15 +108,62 @@ import Testing
         #expect(Double(wrong) < Double(checked) * 0.02, "\(wrong) of \(checked) corners on the wrong side")
     }
 
-    /// Most corners between two streets are on a sidewalk.
+    /// Each side's sidewalk is where the app's own ray casting (`Sidewalks.Edges`) finds it on
+    /// the bundled sidewalks, to within a metre, so walks drawn from the graph keep to the
+    /// sidewalks the app's walks already do.
+    @Test func sidesAreWhereTheAppFindsSidewalks() throws {
+        let graph = try graph()
+        let file = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("ios/App/sidewalks.sqlite")
+        let database = try SQLite(path: file.path)
+        var checked = 0, agreed = 0
+        // Streets across Park Slope and Midtown
+        for box in [(40.660, -73.995, 40.680, -73.975), (40.745, -73.995, 40.765, -73.975)] {
+            let rows = try database.query("""
+                SELECT s.rings FROM sidewalk_boxes b JOIN sidewalks s ON s.id = b.id
+                WHERE b.min_lat <= ? AND b.max_lat >= ? AND b.min_lon <= ? AND b.max_lon >= ?
+                """, [.real(box.2 + 0.001), .real(box.0 - 0.001), .real(box.3 + 0.001), .real(box.1 - 0.001)])
+            let rings = rows.compactMap { $0.first?.blob.flatMap(Sidewalks.rings(from:)) }
+            let plane = Sidewalks.Plane(origin: Walk.Point(lat: box.0, lon: box.1))
+            let edges = Sidewalks.Edges(rings.flatMap { $0.map { $0.map(plane.xy) } })
+            for block in 0..<graph.blockCount where graph.class(of: block) == .walk && graph.length(of: block) > 40 {
+                let line = graph.line(of: block)
+                guard line.count == 2, line.allSatisfy({ $0.lat > box.0 && $0.lat < box.2 && $0.lon > box.1 && $0.lon < box.3 })
+                else { continue }
+                // At its middle, straight out each side
+                let a = plane.xy(line[0]), b = plane.xy(line[1])
+                let middle = (a + b) * 0.5, along = (b - a) * (1 / (b - a).length)
+                let left = Sidewalks.V(x: -along.y, y: along.x)
+                for (isLeft, direction) in [(true, left), (false, left * -1)] {
+                    let baked = graph.offset(of: block, left: isLeft)
+                    guard baked > 0, let found = edges.sidewalk(from: middle, along: direction) else { continue }
+                    checked += 1
+                    if abs((found.middle - middle).length - baked) <= 1 { agreed += 1 }
+                }
+            }
+        }
+        #expect(checked > 500)
+        #expect(Double(agreed) >= Double(checked) * 0.9, "\(agreed) of \(checked) sides within a metre")
+    }
+
+    /// Most corners where two streets' sidewalks meet (walked as the city's, not OSM's) are on
+    /// a sidewalk.
     @Test func cornersAreOnSidewalks() throws {
         let graph = try graph()
         var between = 0, onSidewalk = 0
         for node in 0..<graph.nodeCount {
             for arm in graph.arms(of: node) {
                 let next = graph.next(arm, at: node)
-                guard arm != next, graph.class(of: Int(graph.armBlock[arm])) == .walk,
-                      graph.class(of: Int(graph.armBlock[next])) == .walk else { continue }
+                let block = Int(graph.armBlock[arm]), nextBlock = Int(graph.armBlock[next])
+                guard arm != next, graph.class(of: block) == .walk, graph.class(of: nextBlock) == .walk else { continue }
+                // The two sides meeting here: this arm's right going out, the next one's left.
+                // Only where they're walked as the city's, not on OSM's sidewalks
+                let rightIsLeft = graph.armEnd[arm] == 1, nextLeftIsLeft = graph.armEnd[next] == 0
+                guard !graph.isCovered(block, left: rightIsLeft), !graph.isCovered(nextBlock, left: nextLeftIsLeft),
+                      // and both sides have a sidewalk to meet on
+                      graph.offset(of: block, left: rightIsLeft) > 0, graph.offset(of: nextBlock, left: nextLeftIsLeft) > 0
+                else { continue }
                 between += 1
                 if graph.kind(ofCorner: arm) != .none { onSidewalk += 1 }
             }
@@ -129,7 +182,8 @@ import Testing
             let arm = graph.arm(of: link, end: end)
             let node = graph.node(ofArm: arm)
             #expect(graph.nodeSignal[node] != 0, "4 Av at 9 St's not signalled")
-            #expect(graph.arms(of: node).count == 4)
+            // Its four streets' arms, besides links to OSM's sidewalks
+            #expect(graph.arms(of: node).filter { !graph.flags(of: Int(graph.armBlock[$0])).contains(.connector) }.count == 4)
             #expect(graph.arms(of: node).contains { graph.name(of: Int(graph.armBlock[$0])) == "4 AVE" })
             // The corners beside the link are in the median
             #expect(graph.kind(ofCorner: arm) == .refuge || graph.kind(ofCorner: arm) == .sidewalk)

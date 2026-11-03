@@ -13,12 +13,8 @@ enum TimetableStore {
     /// each morning.
     static let refreshAfter: TimeInterval = 20 * 60 * 60
 
-    private static let session: URLSession = {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 20
-        configuration.waitsForConnectivity = false
-        return URLSession(configuration: configuration)
-    }()
+    /// Seconds to wait for the timetable to download.
+    private static let timeout: TimeInterval = 20
 
     /// The downloaded timetable, if it has trains for `now`. Read once, and again only after a
     /// new one's downloaded.
@@ -48,11 +44,11 @@ enum TimetableStore {
     private static func download() async {
         guard let serverURL = ServerRoutes.baseURL, let file, let tagFile else { return }
         var request = URLRequest(url: serverURL.appendingPathComponent("timetable"),
-                                 cachePolicy: .reloadIgnoringLocalCacheData)
+                                 cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout)
         if modified(file) != nil, let tag = try? String(contentsOf: tagFile, encoding: .utf8) {
             request.setValue(tag, forHTTPHeaderField: "If-None-Match")
         }
-        guard let (data, response) = try? await session.data(for: request),
+        guard let (data, response) = try? await TrainService.serverSession.data(for: request),
               let http = response as? HTTPURLResponse else { return }
         switch http.statusCode {
         case 304:

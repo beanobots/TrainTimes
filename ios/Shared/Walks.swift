@@ -8,10 +8,216 @@ struct Walk: Codable, Hashable, Sendable {
     /// Apple Maps' time for it.
     var seconds: TimeInterval
     var meters: Double
+    /// Where it crosses a street, once put on the sidewalk (`Sidewalks.fit`): each crossing's
+    /// way over. Nil for Apple Maps' walk as it came.
+    var crossings: [[Point]]? = nil
+    /// Each of `crossings`' lights, in the same order. Nil for Apple Maps' walk, or one fitted
+    /// before crossings had them.
+    var lights: [Light]? = nil
+    /// Each of `crossings`' streets, in the same order ("" where not known): known for a walk
+    /// the app routed itself (`WalkRouter`), nil for Apple Maps'.
+    var streets: [String]? = nil
+
+    /// The light at `crossing`, one of `crossings`.
+    func light(at crossing: [Point]) -> Light? {
+        guard let lights, let index = crossings?.firstIndex(of: crossing), lights.indices.contains(index) else { return nil }
+        return lights[index]
+    }
 
     /// Its whole path.
     var points: [Point] {
         steps.flatMap(\.points)
+    }
+
+    /// The street `crossing`, one of `crossings`, is over, where known.
+    func street(at crossing: [Point]) -> String? {
+        guard let streets, let index = crossings?.firstIndex(of: crossing), streets.indices.contains(index),
+              !streets[index].isEmpty else { return nil }
+        return streets[index]
+    }
+
+    /// The crossings over a street across the way you're going, for their street signs: not
+    /// those over the street you're walking along, or have just turned off, round the outside of
+    /// the corner, which go across the way you came to them. That's the way of the last
+    /// `cameBy` metres walked before each, back past any crossing just before it.
+    var crossStreets: [[Point]] {
+        guard let crossings else { return [] }
+        let path = points.reduce(into: [Point]()) { kept, point in
+            if kept.last != point { kept.append(point) }
+        }
+        let over = Set(crossings.flatMap { crossing in zip(crossing, crossing.dropFirst()).map { [$0, $1] } })
+        return crossings.filter { crossing in
+            guard let first = crossing.first, let last = crossing.last, first != last,
+                  var index = path.firstIndex(of: first) else { return true }
+            while index > 0, over.contains([path[index - 1], path[index]]) { index -= 1 }
+            var back = index
+            while back > 0, path[back].metres(to: path[index]) < Self.cameBy { back -= 1 }
+            // At the very start, with no way come by yet
+            guard back < index else { return true }
+            let came = path[back].heading(to: path[index]), goes = first.heading(to: last)
+            let degrees = abs((goes - came + 540).truncatingRemainder(dividingBy: 360) - 180)
+            return degrees <= Self.onAhead
+        }
+    }
+
+    /// Metres walked before a crossing that say which way you came to it.
+    static let cameBy = 10.0
+    /// Degrees a crossing may be off the way you came to it and still be over a street ahead.
+    static let onAhead = 45.0
+
+    /// The crossings Apple Maps' steps don't say: over the street you're on, to its other side,
+    /// as the walk's put on the sidewalk you start on and ends on the end's. Across both the way
+    /// you came to it and the way you go on after (round the outside of a corner, the second
+    /// crossing goes the way the street turned onto does, which its turn says).
+    var sideChanges: [[Point]] {
+        sideChanges(ahead: Set(crossStreets))
+    }
+
+    /// `sideChanges`, with `crossStreets` already worked out.
+    private func sideChanges(ahead: Set<[Point]>) -> [[Point]] {
+        guard let crossings else { return [] }
+        let path = points.reduce(into: [Point]()) { kept, point in
+            if kept.last != point { kept.append(point) }
+        }
+        return crossings.filter { crossing in
+            guard !ahead.contains(crossing), let first = crossing.first, let last = crossing.last, first != last,
+                  let end = path.lastIndex(of: last) else { return false }
+            // The way on from its far side, if there's any to go
+            var on = end
+            while on < path.count - 1, path[on].metres(to: path[end]) < Self.cameBy { on += 1 }
+            guard on > end else { return true }
+            let goes = first.heading(to: last), then = path[end].heading(to: path[on])
+            return abs((then - goes + 540).truncatingRemainder(dividingBy: 360) - 180) > Self.onAhead
+        }
+    }
+
+    /// Each crossing in `sideChanges` a step of its own, "Cross 4th Ave", with its light, put
+    /// before the step it's in: its path the way to the near curb, split off that step's, its
+    /// distance the way there as every step's is the way to what it says. One with no way
+    /// there, at a step's start or straight after its turn, has the way over as its path
+    /// instead, so it's shown as you cross, but no distance: it's done as soon as it's reached,
+    /// not the crossing's length on.
+    mutating func addCrossingSteps() {
+        // Which crossings are which, from the walk as it came, before any step's split
+        let ahead = Set(crossStreets)
+        let changes = sideChanges(ahead: ahead)
+        var from = 0
+        for crossing in changes {
+            guard let curb = crossing.first, let far = crossing.last,
+                  let index = steps.indices.dropFirst(from).first(where: { steps[$0].points.contains(curb) }),
+                  let at = steps[index].points.firstIndex(of: curb) else { continue }
+            var cross = Step(turn: .cross, instruction: "", meters: 0, points: [],
+                             light: light(at: crossing), crossing: crossing)
+            var overAsPath = true
+            /// Where it goes: before step `next`, whose path now starts at `start`.
+            var next = index
+            if at == steps[index].points.count - 1 {
+                // At the end of this step, its turn done first, and any steps with nothing to
+                // walk done there too (a step with no sidewalk is its start, the curb): the next
+                // with a path begins with the way over
+                let over = Set(crossing.dropLast())
+                next = index + 1
+                while next < steps.count, steps[next].points.allSatisfy(over.contains) { next += 1 }
+                guard next < steps.count else { continue }
+                cross.points = crossing
+                while steps[next].points.count > 1, over.contains(steps[next].points[0]) {
+                    steps[next].points.removeFirst()
+                }
+            } else if at > 0 {
+                cross.points = Array(steps[index].points[...at])
+                steps[index].points.removeFirst(at)
+                overAsPath = false
+            } else {
+                // At the start of this step: the way over, at its start
+                guard index > 0, let over = steps[index].points.firstIndex(of: far), over > 0 else { continue }
+                cross.points = Array(steps[index].points[...over])
+                steps[index].points.removeFirst(over)
+            }
+            // The street you're on: the one the step before the crossing turned onto
+            let street = street(at: crossing) ?? (next > 0 ? Self.street(in: steps[next - 1].instruction) : nil)
+            cross.instruction = street.map { "Cross \($0)" } ?? "Cross the street"
+            steps.insert(cross, at: next)
+            for changed in [next, next + 1] {
+                let points = steps[changed].points
+                steps[changed].meters = zip(points, points.dropFirst()).map { $0.metres(to: $1) }.reduce(0, +)
+            }
+            if overAsPath { steps[next].meters = 0 }
+            from = next + 1
+        }
+        // Round the outside of a corner, the street crossed after the turn: on the turn's step,
+        // which ends at its near curb, for its light, where that's known
+        let sides = Set(changes)
+        for crossing in crossings ?? [] where !ahead.contains(crossing) && !sides.contains(crossing) {
+            guard let curb = crossing.first, let light = light(at: crossing),
+                  let index = steps.firstIndex(where: { $0.turn != .cross && $0.crossing == nil && $0.points.last == curb })
+            else { continue }
+            steps[index].light = light
+            steps[index].crossing = crossing
+        }
+    }
+
+    /// The street a step's crossing after its turn is over (`addCrossingSteps`): the one it
+    /// turns off, as the step before turned onto it. Nil if not said, or no such step.
+    func streetTurnedOff(at index: Int) -> String? {
+        steps.indices.contains(index - 1) ? Self.street(in: steps[index - 1].instruction) : nil
+    }
+
+    /// The street an instruction turns onto, or goes on: "4th Ave" from "Take a left onto 4th
+    /// Ave", "Ocean Pkwy" from "Continue on Ocean Pkwy toward Coney Island". Nil where what
+    /// follows isn't a street's name, as "The destination is on your left".
+    static func street(in instruction: String) -> String? {
+        for word in [" onto ", " on "] {
+            guard let range = instruction.range(of: word, options: .backwards) else { continue }
+            var street = instruction[range.upperBound...]
+            // Up to where it says which way along it
+            for after in [" toward ", " towards ", " for ", ","] {
+                if let cut = street.range(of: after) { street = street[..<cut.lowerBound] }
+            }
+            let name = street.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
+            // A name starts with a capital or a number: not "your left", "the right"
+            guard let first = name.first, first.isUppercase || first.isNumber else { return nil }
+            return name
+        }
+        return nil
+    }
+
+    /// Metres of street over a crossing, curb to curb, from which one with no light is wide
+    /// enough to warn of more: an avenue, or two lanes each way. A side street with parking
+    /// both sides is 9 to 12.
+    static let wideCrossing = 15.0
+
+    /// What's at a crossing for someone on foot (`Sidewalks.Signal`).
+    enum Light: String, Codable, Hashable, Sendable {
+        /// Every car stops while people cross (a Barnes Dance).
+        case exclusive
+        /// The walk signal comes on before the cars' green.
+        case leading
+        case signal
+        /// No light.
+        case unsignalled
+        /// No light, and wide (`wideCrossing`).
+        case unsignalledWide
+
+        var hasSignal: Bool { self != .unsignalled && self != .unsignalledWide }
+
+        /// Short, on a street sign's tag: "Walk first".
+        var tag: String {
+            switch self {
+            case .exclusive: "All-way walk"
+            case .leading: "Walk first"
+            case .signal: "At the light"
+            case .unsignalled, .unsignalledWide: "No light"
+            }
+        }
+
+        /// Under a crossing's step, in the app and on the Lock Screen: a warning where it's wide
+        /// with no light; nothing otherwise.
+        var note: String? {
+            switch self {
+            case .exclusive, .leading, .signal, .unsignalled: nil
+            case .unsignalledWide: "No light and wide crossing - watch for cars"
+            }
+        }
     }
 
     struct Step: Codable, Hashable, Sendable {
@@ -21,15 +227,23 @@ struct Walk: Codable, Hashable, Sendable {
         var instruction: String
         /// More for the way down or up: "Manhattan-bound only".
         var detail: String? = nil
-        /// Of its path.
+        /// Of its path, the way to where its instruction's done; none for a crossing whose path
+        /// is the way over (`addCrossingSteps`), done where it starts.
         var meters: Double
         /// Its path, to where its instruction's done; one point for a way down or up, where it is.
         var points: [Point]
+        /// A crossing's (`Turn.cross`), or a turn's with a street to cross straight after it,
+        /// round the outside of the corner: its light, where known.
+        var light: Light? = nil
+        /// The way over that crossing, one of the walk's `crossings`.
+        var crossing: [Point]? = nil
     }
 
     enum Turn: String, Codable, Hashable, Sendable {
         case straight, slightLeft, left, sharpLeft, slightRight, right, sharpRight, uTurn
         case stairsDown, stairsUp, elevatorDown, elevatorUp, arrive
+        /// Over the street you're on, to its other side (`Walk.sideChanges`).
+        case cross
 
         /// This turn, as the path's angles have it, put right by `instruction`'s words where they
         /// say otherwise: "continue straight" where Broadway's angle made it a right, "Take a
@@ -63,6 +277,7 @@ struct Walk: Codable, Hashable, Sendable {
             case .stairsDown, .stairsUp: "stairs"
             case .elevatorDown, .elevatorUp: "arrow.up.arrow.down.square"
             case .arrive: "mappin.and.ellipse"
+            case .cross: "figure.walk"
             }
         }
 
@@ -100,7 +315,7 @@ struct Walk: Codable, Hashable, Sendable {
 
         /// Metres east and north of `origin`, near enough over a walk.
         func offset(from origin: Point) -> (east: Double, north: Double) {
-            ((lon - origin.lon) * 111_320 * cos(origin.lat * .pi / 180), (lat - origin.lat) * 111_320)
+            ((lon - origin.lon) * Earth.metresPerDegree * cos(origin.lat * .pi / 180), (lat - origin.lat) * Earth.metresPerDegree)
         }
 
         func metres(to other: Point) -> Double {
@@ -208,19 +423,23 @@ struct Walk: Codable, Hashable, Sendable {
     }
 
     /// The turn onto a step whose path is `next`, from one whose path was `previous`: by the
-    /// headings of the last bit of one and the first of the other at least 5 m long, as a path's
-    /// ends can be a point or two right on top of each other. Straight on if either's too short.
-    static func turn(from previous: [Point], onto next: [Point]) -> Turn {
+    /// headings of the last bit of one and the first of the other `reach` metres long (5 m: a
+    /// path's ends can be a point or two right on top of each other; more to look past a jog
+    /// at the corner), or as far as it goes where shorter but 5 m or more. Straight on if
+    /// either's under 5 m.
+    static func turn(from previous: [Point], onto next: [Point], reach: Double = 5) -> Turn {
         func heading(_ points: some Sequence<Point>) -> Double? {
             var iterator = points.makeIterator()
             guard let first = iterator.next() else { return nil }
+            let start = CLLocation(latitude: first.lat, longitude: first.lon)
+            var furthest: (metres: Double, point: Point)?
             while let point = iterator.next() {
-                let start = CLLocation(latitude: first.lat, longitude: first.lon)
-                if start.distance(from: CLLocation(latitude: point.lat, longitude: point.lon)) >= 5 {
-                    return first.heading(to: point)
-                }
+                let metres = start.distance(from: CLLocation(latitude: point.lat, longitude: point.lon))
+                if metres >= reach { return first.heading(to: point) }
+                if metres > (furthest?.metres ?? 0) { furthest = (metres, point) }
             }
-            return nil
+            guard let furthest, furthest.metres >= 5 else { return nil }
+            return first.heading(to: furthest.point)
         }
         // Into the turn: the previous path backwards, so its heading turned round
         guard let back = heading(previous.reversed()), let ahead = heading(next) else { return .straight }

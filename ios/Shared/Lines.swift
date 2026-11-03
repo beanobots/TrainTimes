@@ -55,7 +55,7 @@ enum Lines {
         }
         let connected = ["-ace", "-bdfm", "-g", "-jz", "-nqrw"]
         let others = own.contains(where: { connected.contains($0) }) ? connected.filter { !own.contains($0) } : []
-        let url = { (suffix: String) in URL(string: "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs\(suffix)")! }
+        let url = { (suffix: String) in URL(string: TrainService.mtaFeeds + "nyct%2Fgtfs\(suffix)")! }
         return (own.map(url), others.map(url))
     }
 

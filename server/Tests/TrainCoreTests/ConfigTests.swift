@@ -38,8 +38,6 @@ import Testing
         #expect(config.limits.maxRegistrationsPerKey == defaults.maxRegistrationsPerKey)
         #expect(config.limits.requestsPerMinute == defaults.requestsPerMinute)
         #expect(config.limits.requestBurst == defaults.requestsPerMinute)
-        #expect(config.limits.maxChallenges == defaults.maxChallenges)
-        #expect(config.limits.challengesPerIP == defaults.challengesPerIP)
         #expect(config.limits.keysPerIPPerDay == defaults.keysPerIPPerDay)
 
         // An old plist's API_SECRET doesn't turn App Attest off

@@ -42,17 +42,18 @@ private let museumPoint = (40.7813, -73.9740)
 @Suite struct TransitRoutesTests {
     @Test func readsEachRoutesSubwayRidesAndDropsTheRest() throws {
         let routes = try #require(TransitRoutes.routes(in: Data(googleResponse.utf8)))
-        // The third, with no rides, is left out; the bus, from the second
-        #expect(routes.count == 2)
+        // The third, with no rides, is left out; the second, with a bus that wasn't asked for
+        #expect(routes.count == 1)
         #expect(routes[0].legs.map(\.line) == ["R", "B"])
         #expect(routes[0].legs[0].from.name == "Prospect Av")
         #expect(routes[0].legs[0].to == TransitRoute.Stop(name: "DeKalb Av", latitude: 40.690635, longitude: -73.981824))
         #expect(routes[0].legs[0].headsign == "Forest Hills - 71 Av")
         #expect(routes[0].legs[1].stops == 14)
-        // Ten minutes by Google's times; none where it gives none
+        // Ten minutes by Google's times, leaving at its time; none where it gives none
         #expect(routes[0].legs[0].seconds == 600)
+        #expect(routes[0].legs[0].leaves == Int(try #require(Web.date("2026-10-23T15:04:00Z")).timeIntervalSince1970))
         #expect(routes[0].legs[1].seconds == nil)
-        #expect(routes[1].legs.map(\.line) == ["C"])
+        #expect(routes[0].legs[1].leaves == nil)
         // No routes at all is none found; something else isn't Google's answer
         #expect(TransitRoutes.routes(in: Data("{}".utf8)) == [])
         #expect(TransitRoutes.routes(in: Data("nope".utf8)) == nil)
@@ -69,6 +70,32 @@ private let museumPoint = (40.7813, -73.9740)
         let json = String(decoding: try JSONEncoder().encode(routes[1]), as: UTF8.self)
         #expect(json.contains(#""mode":"bus""#))
         #expect(json.contains(#""mode":"subway""#))
+    }
+
+    @Test func dropsRoutesWithARideTheAppCantShowButKeepsTheStatenIslandRailway() throws {
+        let ride = { (line: String, type: String) in
+            """
+            {"transitDetails":{"stopDetails":{
+               "departureStop":{"name":"A","location":{"latLng":{"latitude":40.70,"longitude":-73.80}}},
+               "arrivalStop":{"name":"B","location":{"latLng":{"latitude":40.75,"longitude":-73.99}}}},
+             "transitLine":{"nameShort":"\(line)","vehicle":{"type":"\(type)"}}}}
+            """
+        }
+        let route = { (rides: [String]) in #"{"legs":[{"steps":[{},"# + rides.joined(separator: ",") + "]}]}" }
+        let response = #"{"routes":["# + [
+            route([ride("Port Washington", "COMMUTER_TRAIN"), ride("7", "SUBWAY")]),
+            route([ride("B63", "BUS"), ride("NYC Ferry", "FERRY")]),
+            route([ride("SIR", "HEAVY_RAIL"), ride("S78", "BUS")]),
+            route([ride("A", "SUBWAY"), ride("Q", "TRAM")]),
+            route([ride("E", "SUBWAY")]),
+        ].joined(separator: ",") + "]}"
+        // The LIRR, a ferry or a tram would leave a gap between the rides kept
+        let routes = try #require(TransitRoutes.routes(in: Data(response.utf8), bus: true))
+        #expect(routes.map { $0.legs.map(\.line) } == [["SIR", "S78"], ["E"]])
+        #expect(routes[0].legs.map(\.mode) == [.subway, .bus])
+        // Without buses, the bus ride is one the app can't show
+        let subway = try #require(TransitRoutes.routes(in: Data(response.utf8)))
+        #expect(subway.map { $0.legs.map(\.line) } == [["E"]])
     }
 
     @Test func withBusAsksForSubwayAndBus() throws {
@@ -102,7 +129,7 @@ private let museumPoint = (40.7813, -73.9740)
         let now = Date(timeIntervalSince1970: 1_793_000_000)
         let ask = { (client: String) in await routes.routes(from: prospectPoint, to: museumPoint, departure: now, client: client, now: now) }
         guard case .routes(let found) = await ask("a") else { Issue.record("expected routes"); return }
-        #expect(found.count == 2)
+        #expect(found.count == 1)
         #expect(await ask("a") != .limited(retryAfter: DailyLimiter.secondsUntilReset(now: now)))
         // a's two used
         #expect(await ask("a") == .limited(retryAfter: DailyLimiter.secondsUntilReset(now: now)))

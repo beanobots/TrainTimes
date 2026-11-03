@@ -24,16 +24,17 @@ enum WalkReach {
     struct From {
         let location: CLLocation
         let land: Land
-        /// Meters to each of `ends`, to its far side, and on, by the bridges.
+        /// Meters from `location` to each of `ends`, over as many bridges as it takes; infinity
+        /// where there's no way.
         private let toEnds: [Double]
 
         init(_ location: CLLocation) {
             self.location = location
             land = WalkReach.land(at: location.coordinate)
             let land = land
-            let near = ends.map { $0.land == land ? location.distance(from: $0.location) : .infinity }
-            toEnds = ends.indices.map { end in
-                ends.indices.reduce(.infinity) { best, start in min(best, near[start] + between[start][end]) }
+            let near = WalkReach.ends.map { $0.land == land ? location.distance(from: $0.location) : .infinity }
+            toEnds = WalkReach.ends.indices.map { end in
+                WalkReach.ends.indices.reduce(.infinity) { best, start in min(best, near[start] + WalkReach.between[start][end]) }
             }
         }
 
@@ -42,6 +43,7 @@ enum WalkReach {
         func meters(to place: CLLocation, on land: Land? = nil) -> Double? {
             let land = land ?? WalkReach.land(at: place.coordinate)
             if land == self.land { return location.distance(from: place) }
+            let ends = WalkReach.ends
             let meters = ends.indices.reduce(Double.infinity) { best, end in
                 ends[end].land == land ? min(best, toEnds[end] + ends[end].location.distance(from: place)) : best
             }
@@ -50,7 +52,7 @@ enum WalkReach {
 
         /// To `station`, as `meters(to:)`.
         func meters(to station: Station) -> Double? {
-            meters(to: station.location, on: stationLands[station.id])
+            meters(to: station.location, on: WalkReach.stationLands[station.id])
         }
     }
 
@@ -230,4 +232,54 @@ enum WalkReach {
     /// Each station's land, worked out once.
     private static let stationLands: [String: Land] = Dictionary(
         StationDirectory.all.map { ($0.id, land(at: $0.coordinate)) }, uniquingKeysWith: { first, _ in first })
+}
+
+extension TripPlanner {
+    /// Why a plan found no subway trip, as it decided, for No Trip Found to say.
+    enum NoTrip: Equatable, Sendable {
+        enum Ends: Sendable { case start, end, both }
+
+        /// No station within the walk of an end, or of either.
+        case noStation(at: Ends)
+        /// Stations near as the crow flies, but only across the water, with no bridge in the walk.
+        case water(at: Ends)
+        /// Trains there, but walking gets there as soon.
+        case walkingAsQuick
+        /// Stations at both ends, but no train between them with a change at most (in the
+        /// timetable's next `longestWait`, where timed), or none left in step-free mode.
+        case noTrain
+
+        /// What No Trip Found says, with the walk to and from the stations (`walk`, as "15 min")
+        /// and whether Walk is on; nil for `noTrain`, which it says itself.
+        func message(walk: String, walkOn: Bool) -> String? {
+            switch self {
+            case .noStation(let ends):
+                let which = ends == .both ? "either end" : ends == .start ? "the start" : "the end"
+                return "There's no station within a \(walk) walk of \(which)."
+            case .water(let ends):
+                let which = ends == .both ? "both ends" : ends == .start ? "the start" : "the end"
+                return "There's water between \(which) and the subway, and no bridge over it within a \(walk) walk."
+            case .walkingAsQuick:
+                return walkOn ? "Walking there is as quick as the subway."
+                              : "Walking there is as quick as the subway. Turn on Walk to see the walk."
+            case .noTrain:
+                return nil
+            }
+        }
+    }
+
+    /// Why there's no trip for want of stations, nil if both ends have some: no station within
+    /// `startRange` of `start` (`startNear` false) or `endRange` of `end`, or only across the
+    /// water where one's that near as the crow flies.
+    static func noStations(start: CLLocation, startRange: Double, startNear: Bool,
+                           end: CLLocation, endRange: Double, endNear: Bool) -> NoTrip? {
+        guard !startNear || !endNear else { return nil }
+        let ends: NoTrip.Ends = !startNear && !endNear ? .both : !startNear ? .start : .end
+        // Near as the crow flies, but not on foot
+        let asTheCrowFlies = { (place: CLLocation, range: Double) in
+            Nearby.nearest(to: place).map { $0.meters <= range } ?? false
+        }
+        let water = (startNear || asTheCrowFlies(start, startRange)) && (endNear || asTheCrowFlies(end, endRange))
+        return water ? .water(at: ends) : .noStation(at: ends)
+    }
 }

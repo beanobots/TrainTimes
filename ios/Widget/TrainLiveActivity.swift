@@ -98,7 +98,7 @@ struct TrainLiveActivity: Widget {
                     }
                     .foregroundStyle([.fromTrain, .riding, .off].contains(walk.phase) ? .white : statusColor(context))
                 } else {
-                    countdown(context)
+                    countdown(context, short: true)
                         .monospacedDigit()
                         .multilineTextAlignment(.trailing)
                         .frame(maxWidth: 52)
@@ -164,7 +164,7 @@ private struct CountdownBanner: View {
                 // its 30 minutes are up (the app or push server then ends it)
                 Text(context.attributes.ends.map { $0 <= .now } ?? false
                      ? "This countdown has ended."
-                     : context.isStale && shownState(context).train <= .now
+                     : context.isStale && shownState(context).train <= .now && !isAtStation(context)
                      ? "This train is due. Tap refresh for new times."
                      : "Updated \(Spoken.clock(shownState(context).updated))")
                     .font(.caption)
@@ -334,7 +334,9 @@ private func walkNoteColor(_ walk: WalkState) -> Color {
 
 /// `walkCountdown` sized to its digits by a hidden placeholder, so it can sit beside a bullet.
 private func sizedWalkCountdown(_ context: ActivityViewContext<TrainActivityAttributes>, walk: WalkState) -> some View {
-    return Text(TimerText.placeholder(seconds: (walkTarget(context, walk: walk) ?? .now).timeIntervalSinceNow))
+    let placeholder = walksToTrain(walk) && isAtStation(context) ? AtStation.shortLabel
+        : TimerText.placeholder(seconds: (walkTarget(context, walk: walk) ?? .now).timeIntervalSinceNow)
+    return Text(placeholder)
         .hidden()
         .overlay(alignment: .trailing) {
             walkCountdown(context, walk: walk).multilineTextAlignment(.trailing)
@@ -344,10 +346,16 @@ private func sizedWalkCountdown(_ context: ActivityViewContext<TrainActivityAttr
 
 /// The compact island's countdown: to the train, to getting off on it, or to getting there.
 private func walkCountdown(_ context: ActivityViewContext<TrainActivityAttributes>, walk: WalkState) -> Text {
+    if walksToTrain(walk), isAtStation(context) { return Text(AtStation.shortLabel) }
     guard let target = walkTarget(context, walk: walk), target > .now else {
         return Text(walk.phase == .fromTrain || walk.phase == .off ? "Now" : "Due")
     }
     return Text(timerInterval: Date.now...target, countsDown: true)
+}
+
+/// Whether the walk's countdown is to a train to catch, not getting off or getting there.
+private func walksToTrain(_ walk: WalkState) -> Bool {
+    walk.phase == .toTrain || walk.phase == .atStation || walk.phase == .changing
 }
 
 /// What the compact island counts down to: the train to catch, getting off the one you're on,
@@ -365,9 +373,15 @@ extension Color {
     static let walkBlue = Color(red: 0.0, green: 0.48, blue: 1.0)
 }
 
-/// The state to draw, moved on to the next train once the current one has gone.
+/// The state to draw, moved on to the next train once the current one has gone: held at the
+/// station a while first (`AtStation`).
 private func shownState(_ context: ActivityViewContext<TrainActivityAttributes>) -> TrainActivityAttributes.ContentState {
-    context.state.movedOn(at: .now)
+    context.state.movedOn(at: .now, holding: AtStation.seconds)
+}
+
+/// Whether the counted-down train is due and still at the station.
+private func isAtStation(_ context: ActivityViewContext<TrainActivityAttributes>) -> Bool {
+    AtStation.covers(shownState(context).train, at: .now)
 }
 
 /// ↻ and a lit walk button (stops the countdown).
@@ -379,9 +393,11 @@ private func buttons(_ context: ActivityViewContext<TrainActivityAttributes>) ->
     .environment(\.colorScheme, .dark)
 }
 
-/// Live countdown to the train, stopping at 0:00.
-private func countdown(_ context: ActivityViewContext<TrainActivityAttributes>) -> Text {
+/// Live countdown to the train, stopping at 0:00; "At Station" once it's due, until it moves on
+/// (`short` where there's no room for it).
+private func countdown(_ context: ActivityViewContext<TrainActivityAttributes>, short: Bool = false) -> Text {
     let state = shownState(context)
+    if isAtStation(context) { return Text(short ? AtStation.shortLabel : AtStation.label) }
     return Text(timerInterval: min(state.updated, state.train)...state.train, countsDown: true)
 }
 
@@ -390,7 +406,7 @@ private func countdown(_ context: ActivityViewContext<TrainActivityAttributes>) 
 private func markedCountdown(_ context: ActivityViewContext<TrainActivityAttributes>, markSize: CGFloat, size: CGFloat) -> some View {
     HStack(spacing: 4) {
         statusMark(context, size: markSize)
-        Text(TimerText.placeholder(seconds: shownState(context).train.timeIntervalSinceNow))
+        Text(isAtStation(context) ? AtStation.label : TimerText.placeholder(seconds: shownState(context).train.timeIntervalSinceNow))
             .hidden()
             .overlay(alignment: .trailing) {
                 countdown(context).multilineTextAlignment(.trailing)

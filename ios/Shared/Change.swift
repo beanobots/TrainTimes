@@ -320,9 +320,15 @@ struct Change: Codable, Hashable, Sendable {
     }
 
     /// Feed stop ids where `selection`'s train calls here, e.g. "R31N". Each line uses its own N/S
-    /// (`Selection.direction(of:)`): from Marcy Av toward Manhattan, J "M18S" and M "M18N".
+    /// (`Selection.direction(of:)`): from Marcy Av toward Manhattan, J "M18S" and M "M18N". A
+    /// train rerouted here, where none of its lines stop, calls at any platform, its way: a D
+    /// running on the Q's tracks at DeKalb Av, "R30S".
     func arrivalStops(for selection: Selection) -> [String] {
-        arrivalPlatforms(for: selection).flatMap { platform in
+        let platforms = arrivalPlatforms(for: selection)
+        guard !platforms.isEmpty else {
+            return station?.platforms.map { $0.id + selection.direction.rawValue } ?? []
+        }
+        return platforms.flatMap { platform in
             let ways = selection.routes.filter(platform.routes.contains).map { selection.direction(of: $0) }
             return [selection.direction, selection.direction.opposite]
                 .filter { $0 == selection.direction || ways.contains($0) }
@@ -426,11 +432,34 @@ struct Change: Codable, Hashable, Sendable {
         return platform.side(of: route, going: arriving) == platform.side(of: onward, going: leaving)
     }
 
+    /// Across the platform, from your train's arrival to being at the other's doors: off, and
+    /// across.
+    static let acrossSeconds: TimeInterval = 30
+    /// How long a train stands at a platform with its doors open, at least: the feed's and the
+    /// timetable's times are mostly its arrival, the departure the same or not given.
+    static let dwellSeconds: TimeInterval = 30
+
+    /// Whether `departure` can be caught across the platform off `arrival`: you're at its doors
+    /// (`acrossSeconds`) before they close, at its departure, or `dwellSeconds` after it arrives
+    /// if that's later. A D pulling in half a minute after your R, yes; one held at the platform
+    /// whose doors close as you get there, no. The planner counts the same (`TripPlanner`).
+    static func canCatchAcross(_ departure: Arrival, off arrival: Arrival) -> Bool {
+        let doorsClose = max(departure.leaves, departure.time.addingTimeInterval(dwellSeconds))
+        return doorsClose >= arrival.time.addingTimeInterval(acrossSeconds)
+    }
+
     /// Walk time from `arrival` to `departure`; zero across the platform, and the MTA's time for
     /// the walk where it's longer (`walkMinutes(from:to:else:)`).
     func walk(from arrival: Arrival, to departure: Arrival) -> TimeInterval {
         isAcross(from: arrival, to: departure) ? 0
             : TimeInterval(Self.walkMinutes(from: arrival.stop, to: departure.stop, else: walkMinutes) * 60)
+    }
+
+    /// Whether `departure` can be caught off `arrival`: across the platform (`canCatchAcross`),
+    /// or leaving once you've walked to it.
+    func canCatch(_ departure: Arrival, off arrival: Arrival) -> Bool {
+        isAcross(from: arrival, to: departure) ? Self.canCatchAcross(departure, off: arrival)
+            : departure.leaves >= arrival.time.addingTimeInterval(walk(from: arrival, to: departure))
     }
 
     /// Minutes to walk from feed stop (or platform) `arrival` to `departure`: `minutes`, or the
@@ -444,7 +473,7 @@ struct Change: Codable, Hashable, Sendable {
     /// `validatedStop(for:order:)` at each of `stops`, dropping those that aren't valid; nil if
     /// none are. An older save's `smartTransfer` has its stations written out as `alternatives`.
     func validated(for selection: Selection,
-                   order: (String) -> [String]? = StationDirectory.stops(onLine:)) -> Change? {
+                   order: ((String) -> [String]?)? = nil) -> Change? {
         let stops = smartTransfer && alternatives.isEmpty
             ? legacySmartChanges(for: selection).map(\.change).map { change in
                 var change = change
@@ -470,7 +499,7 @@ struct Change: Codable, Hashable, Sendable {
     /// `direction` whose lines only leave the other way (the G at Court Sq for a Flushing-bound 7)
     /// is switched to that way.
     private func validatedStop(for selection: Selection,
-                               order: (String) -> [String]? = StationDirectory.stops(onLine:)) -> Change? {
+                               order: ((String) -> [String]?)? = nil) -> Change? {
         guard let station, station.id != selection.station?.id, isAhead(of: selection, order: order) else { return nil }
         var change = self
         change.stationID = station.id
@@ -486,24 +515,40 @@ struct Change: Codable, Hashable, Sendable {
         return change.routes.isEmpty ? nil : change
     }
 
-    /// Whether `selection`'s train reaches here after its own station. `order` gives each line's
-    /// stops north to south, keyed by bullet label (from lines.json). Unknown order (e.g. a
-    /// rerouted train) counts as ahead. A trip's N/S is constant, so each line is checked by its
-    /// own direction (`Selection.direction(of:)`): an M toward Middle Village is S at Marcy Av
-    /// even though the J's S there goes the other way.
-    func isAhead(of selection: Selection, order: (String) -> [String]? = StationDirectory.stops(onLine:)) -> Bool {
+    /// Whether `selection`'s train reaches here after its own station, along each of its lines'
+    /// branches north to south (`StationDirectory.branches(of:)`), so a station on another of
+    /// them (the A's Rockaway Park stops, for an A from Lefferts Blvd) isn't ahead. `order`, if
+    /// given, is each line's stops as one list instead, keyed by bullet label (from lines.json).
+    /// Unknown order (e.g. a rerouted train) counts as ahead. A trip's N/S is constant, so each
+    /// line is checked by its own direction (`Selection.direction(of:)`): an M toward Middle
+    /// Village is S at Marcy Av even though the J's S there goes the other way.
+    func isAhead(of selection: Selection, order: ((String) -> [String]?)? = nil) -> Bool {
         guard let station, let origin = selection.station else { return true }
         var known = false
         for route in selection.routes {
-            guard let stops = order(LineStyle.of(route).label) else { continue }
-            let position = Dictionary(stops.enumerated().map { ($0.element, $0.offset) }, uniquingKeysWith: min)
+            let label = LineStyle.of(route).label
+            let branches = order == nil ? StationDirectory.branches(of: route) : []
+            let lines = !branches.isEmpty ? branches
+                : (order ?? StationDirectory.stops(onLine:))(label).map { [$0] } ?? []
             // A station comes where the first of the train's platforms there does
-            let place = { (station: Station) in
-                station.platforms(serving: selection.routes).compactMap { position[$0.id] }.min()
+            let places = lines.map { stops in
+                let position = Dictionary(stops.enumerated().map { ($0.element, $0.offset) }, uniquingKeysWith: min)
+                return { (station: Station) in
+                    station.platforms(serving: selection.routes).compactMap { position[$0.id] }.min()
+                }
             }
-            guard let here = place(station), let start = place(origin) else { continue }
-            if selection.direction(of: route) == .north ? here < start : here > start { return true }
-            known = true
+            var together = false
+            for place in places {
+                guard let here = place(station), let start = place(origin) else { continue }
+                if selection.direction(of: route) == .north ? here < start : here > start { return true }
+                together = true
+            }
+            // Both on the line, but never on one branch together: not one the train reaches
+            if !together, !branches.isEmpty, places.contains(where: { $0(station) != nil }),
+               places.contains(where: { $0(origin) != nil }) {
+                together = true
+            }
+            known = known || together
         }
         return !known
     }
@@ -628,8 +673,7 @@ struct Change: Codable, Hashable, Sendable {
                 return Connection(first: train, arrival: arrival, next: arrival, stationID: stationID)
             }
             let next = departures.first { departure in
-                departure.trip != train.trip
-                    && departure.leaves >= arrival.time.addingTimeInterval(walk(from: arrival, to: departure))
+                departure.trip != train.trip && canCatch(departure, off: arrival)
             }
             return Connection(first: train, arrival: arrival, next: next,
                               walk: next.map { walk(from: arrival, to: $0) } ?? 0, stationID: stationID)

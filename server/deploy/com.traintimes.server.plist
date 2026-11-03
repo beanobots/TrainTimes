@@ -70,10 +70,6 @@
         <!-- RATE_LIMIT_BURST, left out, is the same as this -->
         <key>RATE_LIMIT_PER_MINUTE</key>
         <string>30</string>
-        <key>MAX_CHALLENGES</key>
-        <string>10000</string>
-        <key>MAX_CHALLENGES_PER_IP</key>
-        <string>10</string>
         <key>MAX_KEYS_PER_IP_PER_DAY</key>
         <string>10</string>
         <!-- Google's Routes API key, for GET /routes (directions shared to the

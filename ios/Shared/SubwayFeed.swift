@@ -80,17 +80,28 @@ enum SubwayFeed {
     /// has all stopped) goes stale only this much later.
     static let clockAllowance: TimeInterval = 7 * 60
 
-    /// Whether a feed made at `made` has stopped updating: over `staleAfter` older than `newest`
-    /// (capped at `now`), or over `staleAfter + clockAllowance` older than `now`.
+    /// Whether a feed made at `made` has stopped updating: over `staleAfter` older than `newest`,
+    /// or over `staleAfter + clockAllowance` older than `now`. A `newest` ahead of `now` is a
+    /// device clock that's slow, and kept, so a frozen feed isn't let go on as long as it's slow;
+    /// one more than `clockAllowance` ahead is a feed stamped wrong, and `now` is used instead.
     static func isStale(made: Date, newest: Date?, now: Date) -> Bool {
-        let newest = min(newest ?? now, now)
+        let newest = newest.map { $0 > now.addingTimeInterval(clockAllowance) ? now : $0 } ?? now
         return newest.timeIntervalSince(made) > staleAfter
             || now.timeIntervalSince(made) > staleAfter + clockAllowance
     }
 
+    /// How far past the middle of a batch's timestamps the newest is still taken as it is.
+    static let aheadOfOthers: TimeInterval = 60
+
     /// The newest of `feeds`' timestamps, to measure the others' age by; nil if none has one.
+    /// Not the device clock, which on a slow phone would let a frozen feed go on for as long as
+    /// it's slow; but no further ahead of the batch's middle one than `aheadOfOthers`, so one
+    /// feed stamped in the future can't make the rest look stopped.
     static func newest(_ feeds: [Data]) -> Date? {
-        feeds.compactMap { made($0) }.max()
+        let times = feeds.compactMap { made($0) }.sorted()
+        guard let newest = times.last else { return nil }
+        guard times.count >= 3 else { return newest }
+        return min(newest, times[times.count / 2].addingTimeInterval(aheadOfOthers))
     }
 
     /// The feed's header timestamp; nil if missing or unreadable.

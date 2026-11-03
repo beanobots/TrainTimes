@@ -59,8 +59,11 @@ public enum ServerMain {
         let buses = config.busTimeKey.map { key in
             BusTime(key: key, perClientPerDay: config.limits.busTimePerIPPerDay, perDay: config.limits.busTimePerDay)
         }
+        // Crash and hang reports from phones sharing diagnostics
+        let diagnostics = try DiagnosticStore(directory: config.dataDirectory, maxReports: config.limits.maxDiagnostics)
         let services = HTTPServices(store: store, auth: config.auth, appID: config.appID, limits: config.limits,
-                                    feeds: feeds, timetable: timetable, routes: routes, buses: buses)
+                                    feeds: feeds, timetable: timetable, routes: routes, buses: buses,
+                                    diagnostics: diagnostics)
 
         let authDescription: String
         switch config.auth {
@@ -72,10 +75,12 @@ public enum ServerMain {
 
         var logger = Logger(label: "TrainTimesServer")
         logger.logLevel = .warning
-        var background: [any Service] = [poller, maker]
+        var background: [any Service] = [poller, maker, DiagnosticPruner(store: diagnostics)]
         if let logFile = config.logFile { background.append(LogReopener(path: logFile)) }
         let app = Application(
             router: HTTPRoutes.router(services),
+            // A connection that sits there sending nothing is closed, not held open for good
+            server: .http1(configuration: .init(idleTimeout: .seconds(30))),
             configuration: configuration(for: config),
             services: background,
             onServerRunning: { channel in

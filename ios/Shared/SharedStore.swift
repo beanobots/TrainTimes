@@ -33,8 +33,7 @@ enum SharedStore {
 
     /// The saved selection, unvalidated.
     private static func savedSelection() -> Selection? {
-        guard let file, let data = try? Data(contentsOf: file) else { return nil }
-        return (try? JSONDecoder().decode(Selection.self, from: data))?.droppingSavedWalk
+        read(Selection.self, from: file)?.droppingSavedWalk
     }
 
     @discardableResult
@@ -75,33 +74,21 @@ enum SharedStore {
     }
 
     static func loadPostedCountdown() -> PostedCountdown? {
-        guard let postedCountdownFile, let data = try? Data(contentsOf: postedCountdownFile) else { return nil }
-        return try? JSONDecoder().decode(PostedCountdown.self, from: data)
+        read(PostedCountdown.self, from: postedCountdownFile)
     }
 
     /// Pass nil when no countdown is running.
     static func savePostedCountdown(_ posted: PostedCountdown?) {
-        guard let postedCountdownFile else { return }
-        if let posted, let data = try? JSONEncoder().encode(posted) {
-            try? data.write(to: postedCountdownFile, options: .atomic)
-        } else {
-            try? FileManager.default.removeItem(at: postedCountdownFile)
-        }
+        write(posted, to: postedCountdownFile)
     }
 
     static func loadCountdown() -> Countdown? {
-        guard let countdownFile, let data = try? Data(contentsOf: countdownFile) else { return nil }
-        return try? JSONDecoder().decode(Countdown.self, from: data)
+        read(Countdown.self, from: countdownFile)
     }
 
     /// Pass nil when no countdown is running.
     static func saveCountdown(_ countdown: Countdown?) {
-        guard let countdownFile else { return }
-        if let countdown, let data = try? JSONEncoder().encode(countdown) {
-            try? data.write(to: countdownFile, options: .atomic)
-        } else {
-            try? FileManager.default.removeItem(at: countdownFile)
-        }
+        write(countdown, to: countdownFile)
     }
 
     /// Deletes obsolete files: refreshed.json and toggled.json, replaced by taps.json; map.json
@@ -126,6 +113,16 @@ enum SharedStore {
         return try? JSONDecoder().decode(type, from: data)
     }
 
+    /// Saves `value` to `file`, or with nil, removes it.
+    static func write<Value: Encodable>(_ value: Value?, to file: URL?) {
+        guard let file else { return }
+        if let value, let data = try? JSONEncoder().encode(value) {
+            try? data.write(to: file, options: .atomic)
+        } else if value == nil {
+            try? FileManager.default.removeItem(at: file)
+        }
+    }
+
     /// A read-modify-write of `file`, atomically across processes (`changing`): `body` changes it
     /// as saved, or `empty` if there's none or it's unreadable, and it's saved again.
     static func change<Value: Codable>(_ file: URL?, empty: Value, _ body: (inout Value) -> Void) {
@@ -133,9 +130,7 @@ enum SharedStore {
         changing(file) {
             var value = read(Value.self, from: file) ?? empty
             body(&value)
-            if let data = try? JSONEncoder().encode(value) {
-                try? data.write(to: file, options: .atomic)
-            }
+            write(value, to: file)
         }
     }
 
@@ -169,16 +164,12 @@ enum SharedStore {
         changing(tapsFile) {
             var taps = savedTaps().filter { $0.value.latest.map { now.timeIntervalSince($0) < 60 * 60 } ?? false }
             taps[widgetID, default: Taps()][keyPath: tap] = now
-            if let data = try? JSONEncoder().encode(taps) {
-                try? data.write(to: tapsFile, options: .atomic)
-            }
+            write(taps, to: tapsFile)
         }
     }
 
     private static func savedTaps() -> [String: Taps] {
-        guard let tapsFile, let data = try? Data(contentsOf: tapsFile),
-              let taps = try? JSONDecoder().decode([String: Taps].self, from: data) else { return [:] }
-        return taps
+        read([String: Taps].self, from: tapsFile) ?? [:]
     }
 
     /// A train's last-fetched times and alert (by a widget or the countdown), so a redraw soon
@@ -311,8 +302,7 @@ enum SharedStore {
     }
 
     static func savePlace(_ place: Place) {
-        guard let placeFile, let data = try? JSONEncoder().encode(place) else { return }
-        try? data.write(to: placeFile, options: .atomic)
+        write(place, to: placeFile)
     }
 
     /// Where you were when either Nearby widget last found you (`NearbyLocator`, which saves it).
@@ -322,6 +312,11 @@ enum SharedStore {
         /// In meters.
         var accuracy: Double
         var taken: Date
+    }
+
+    /// Saves where a Nearby widget just found you, for the other and the share sheet.
+    static func saveNearbyFix(_ fix: NearbyFix) {
+        write(fix, to: nearbyFixFile)
     }
 
     /// The last nearby fix, if taken within `life` before `date`.
@@ -371,8 +366,7 @@ enum SharedStore {
     }
 
     static func saveSettings(_ settings: AppSettings) {
-        guard let settingsFile, let data = try? JSONEncoder().encode(settings) else { return }
-        try? data.write(to: settingsFile, options: .atomic)
+        write(settings, to: settingsFile)
     }
 
     /// The app's widgets, validated. If none are saved, the app's selection becomes the first and
@@ -409,8 +403,7 @@ enum SharedStore {
     }
 
     static func saveWidgets(_ saved: SavedWidgets) {
-        guard let widgetsFile, let data = try? JSONEncoder().encode(saved) else { return }
-        try? data.write(to: widgetsFile, options: .atomic)
+        write(saved, to: widgetsFile)
     }
 }
 

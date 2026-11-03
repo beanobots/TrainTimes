@@ -60,7 +60,7 @@ struct SpotlightStationQuery: EntityStringQuery {
     /// Station and borough search, as in the app's picker, e.g. "86 st brooklyn".
     func entities(matching string: String) async throws -> [SpotlightStation] {
         let search = StationSearch(string)
-        return StationDirectory.all.filter(search.matches).prefix(60).map { SpotlightStation(id: $0.id) }
+        return search.filter(StationDirectory.all).prefix(60).map { SpotlightStation(id: $0.id) }
     }
 
     /// The default train's station.

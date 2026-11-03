@@ -16,8 +16,11 @@ actor RateLimiter {
         self.maxTracked = maxTracked
     }
 
-    /// Takes a token for `client`, or says it has none left.
+    /// Takes a token for `client`, or says it has none left. An IPv4 address gets
+    /// `ClientIP.ipv4Share` times as many, being shared.
     func allow(_ client: String, now: Date = .now) -> Bool {
+        let share = ClientIP.share(of: client)
+        let burst = self.burst * share, rate = self.rate * share
         var bucket = buckets[client] ?? (burst, now)
         bucket.tokens = min(burst, bucket.tokens + max(0, now.timeIntervalSince(bucket.updated)) * rate)
         bucket.updated = now
@@ -36,7 +39,10 @@ actor RateLimiter {
     /// Forgets the buckets that have refilled, which are as good as new; if
     /// that isn't enough (a flood of addresses), all of them.
     private func prune(now: Date) {
-        buckets = buckets.filter { $0.value.tokens + now.timeIntervalSince($0.value.updated) * rate < burst }
+        buckets = buckets.filter { client, bucket in
+            let share = ClientIP.share(of: client)
+            return bucket.tokens + now.timeIntervalSince(bucket.updated) * rate * share < burst * share
+        }
         if buckets.count >= maxTracked { buckets.removeAll() }
     }
 }
@@ -46,18 +52,23 @@ actor RateLimiter {
 actor DailyLimiter {
     private let limit: Int
     private let maxTracked: Int
+    /// Clients are addresses (`ClientIP`), an IPv4 one getting `ClientIP.ipv4Share` times
+    /// the limit; not for keys, or everyone's.
+    private let byAddress: Bool
     private var day: Int = -1
     private var counts: [String: Int] = [:]
 
-    init(limit: Int, maxTracked: Int = 200_000) {
+    init(limit: Int, maxTracked: Int = 200_000, byAddress: Bool = false) {
         self.limit = limit
         self.maxTracked = maxTracked
+        self.byAddress = byAddress
     }
 
     /// Whether `client` is under the limit today. A client with none yet is
     /// refused too once `maxTracked` others have some (a flood of addresses).
     func allows(_ client: String, now: Date = .now) -> Bool {
         startDay(now)
+        let limit = byAddress ? self.limit * Int(ClientIP.share(of: client)) : self.limit
         if let count = counts[client] { return count < limit }
         return limit > 0 && counts.count < maxTracked
     }
@@ -74,6 +85,15 @@ actor DailyLimiter {
         guard allows(client, now: now) else { return false }
         record(client, now: now)
         return true
+    }
+
+    /// Gives back one `take` counted for `client` today, for a request that then failed.
+    func release(_ client: String, now: Date = .now) {
+        startDay(now)
+        guard let count = counts[client], count > 0 else { return }
+        // None left: no longer tracked, so failed requests from many addresses can't fill
+        // `maxTracked` and refuse every new client till midnight
+        counts[client] = count == 1 ? nil : count - 1
     }
 
     var tracked: Int { counts.count }
@@ -93,92 +113,100 @@ actor DailyLimiter {
     }
 }
 
-/// Single-use challenges for App Attest, kept in memory for 5 minutes.
+/// App Attest challenges the server needn't keep: 16 random bytes and when it expires, with a
+/// keyed hash of both (HMAC-SHA256 under a key made at start), so only this server's, still in
+/// date, pass. As nothing's kept for one issued, no flood of asks from however many addresses
+/// can fill anything and refuse everyone else.
+///
+/// A signed request's challenge needn't be used once: its assertion's counter only goes up, so
+/// it can't be sent again. An attestation has no counter, so its challenge is used once
+/// (`useOnce`), noted only once the attestation checks out, which takes a real phone, so what's
+/// noted stays small. A restart makes a new key: challenges from before are refused, and the
+/// app asks for another.
 actor ChallengeStore {
     static let lifetime: TimeInterval = 5 * 60
+    private static let randomBytes = 16, expiryBytes = 8, macBytes = 16
+    static let byteCount = randomBytes + expiryBytes + macBytes
 
-    enum Issued: Equatable {
-        case challenge(String)
-        /// The client has `perClient` outstanding; the first of them expires in this many seconds.
-        case clientFull(retryAfter: Int)
-        /// `limit` are outstanding in all.
-        case full
+    private let key: SymmetricKey
+    /// Attestations' challenges used, with when they expire, until they do.
+    private var used: [Data: Date] = [:]
+
+    init(key: SymmetricKey = SymmetricKey(size: .bits256)) {
+        self.key = key
     }
 
-    private let limit: Int
-    private let perClient: Int
-    private var expiries: [String: (client: String, expires: Date)] = [:]
-    /// When each client's outstanding challenges expire.
-    private var clients: [String: [Date]] = [:]
-    /// In the order issued, so the expired ones come off the front.
-    private var queue: [(challenge: String, expires: Date)] = []
-    private var head = 0
-
-    init(limit: Int, perClient: Int) {
-        self.limit = limit
-        self.perClient = perClient
-    }
-
-    /// A new challenge for `client`, unless it already has `perClient`
-    /// outstanding or `limit` are outstanding in all.
-    func issue(for client: String, now: Date = .now) -> Issued {
-        purge(now: now)
-        if let mine = clients[client], mine.count >= perClient, let first = mine.min() {
-            return .clientFull(retryAfter: max(1, Int(first.timeIntervalSince(now).rounded(.up))))
-        }
-        guard expiries.count < limit else { return .full }
+    /// A new challenge, good for `lifetime`, base64url without padding (54 characters).
+    nonisolated func issue(now: Date = .now) -> String {
         var generator = SystemRandomNumberGenerator()
-        let bytes = (0..<32).map { _ in UInt8.random(in: .min ... .max, using: &generator) }
-        let challenge = Data(bytes).base64EncodedString()
+        var body = Data((0..<Self.randomBytes).map { _ in UInt8.random(in: .min ... .max, using: &generator) })
+        let expires = UInt64(now.addingTimeInterval(Self.lifetime).timeIntervalSince1970.rounded(.up))
+        body.append(contentsOf: withUnsafeBytes(of: expires.bigEndian) { Array($0) })
+        body.append(contentsOf: HMAC<SHA256>.authenticationCode(for: body, using: key).prefix(Self.macBytes))
+        return body.base64EncodedString()
             .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
-        let expires = now.addingTimeInterval(Self.lifetime)
-        expiries[challenge] = (client, expires)
-        clients[client, default: []].append(expires)
-        queue.append((challenge, expires))
-        return .challenge(challenge)
     }
 
-    /// Whether `challenge` was issued, hasn't expired and hasn't been used;
-    /// either way, it can't be used again.
-    func consume(_ challenge: String, now: Date = .now) -> Bool {
-        guard let entry = expiries.removeValue(forKey: challenge) else { return false }
-        release(entry)
-        return entry.expires > now
+    /// Whether `challenge` is one this server issued (its hash checks out) that hasn't expired.
+    nonisolated func isValid(_ challenge: String, now: Date = .now) -> Bool {
+        expiry(of: challenge).map { $0 > now } ?? false
     }
 
-    var outstanding: Int { expiries.count }
-
-    /// How many clients have challenges outstanding.
-    var clientCount: Int { clients.count }
-
-    /// How many challenges are queued, used ones included.
-    var queued: Int { queue.count - head }
-
-    private func release(_ entry: (client: String, expires: Date)) {
-        guard var mine = clients[entry.client], let index = mine.firstIndex(of: entry.expires) else { return }
-        mine.remove(at: index)
-        clients[entry.client] = mine.isEmpty ? nil : mine
+    /// For an attestation that's checked out: whether `challenge` is valid (`isValid`) and
+    /// hasn't been used for one before; either way, it can't be again.
+    func useOnce(_ challenge: String, now: Date = .now) -> Bool {
+        guard let expires = expiry(of: challenge), expires > now, let bytes = Self.bytes(of: challenge) else { return false }
+        used = used.filter { $0.value > now }
+        guard used[bytes] == nil else { return false }
+        used[bytes] = expires
+        return true
     }
 
-    private func purge(now: Date) {
-        while head < queue.count, queue[head].expires <= now {
-            if let entry = expiries.removeValue(forKey: queue[head].challenge) { release(entry) }
-            head += 1
-        }
-        // Used challenges stay queued until they'd have expired: once they're
-        // most of it, only the outstanding ones are kept
-        if queue.count - head > 2 * max(expiries.count, 1024) {
-            queue = queue[head...].filter { expiries[$0.challenge] != nil }
-            head = 0
-        } else if head > 1024, head * 2 > queue.count {
-            queue.removeFirst(head)
-            head = 0
-        }
+    /// How many attestations' challenges are kept, still in date.
+    var usedCount: Int { used.count }
+
+    /// When `challenge` expires, if this server issued it.
+    private nonisolated func expiry(of challenge: String) -> Date? {
+        guard let bytes = Self.bytes(of: challenge) else { return nil }
+        let body = bytes.prefix(Self.randomBytes + Self.expiryBytes)
+        let mac = [UInt8](bytes.suffix(Self.macBytes))
+        let expected = [UInt8](HMAC<SHA256>.authenticationCode(for: body, using: key).prefix(Self.macBytes))
+        // Compared in constant time, so its bytes can't be guessed one at a time
+        var differ: UInt8 = 0
+        for (a, b) in zip(mac, expected) { differ |= a ^ b }
+        guard mac.count == expected.count, differ == 0 else { return nil }
+        let seconds = body.suffix(Self.expiryBytes).reduce(UInt64(0)) { $0 << 8 | UInt64($1) }
+        return Date(timeIntervalSince1970: TimeInterval(seconds))
+    }
+
+    /// The bytes of a challenge as issued, or nil if it isn't the right length or encoding.
+    private static func bytes(of challenge: String) -> Data? {
+        guard challenge.utf8.count <= 128 else { return nil }
+        var base64 = challenge.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        base64 += String(repeating: "=", count: (4 - base64.count % 4) % 4)
+        guard let data = Data(base64Encoded: base64), data.count == byteCount else { return nil }
+        return data
     }
 }
 
 enum ClientIP {
+    /// How many times a /64's limits an IPv4 address gets: a phone on IPv6 has a /64 to
+    /// itself, where an office's, a café's or a carrier's NAT puts many behind one IPv4 address.
+    static let ipv4Share = 10
+
+    /// `ipv4Share` for an IPv4 address (as `key(_:)` gives it), else 1.
+    static func share(of client: String) -> Double {
+        isIPv4(client) ? Double(ipv4Share) : 1
+    }
+
+    /// Whether `client` is an IPv4 address other than loopback (cloudflared itself, as
+    /// without its CF-Connecting-IP), which isn't shared.
+    static func isIPv4(_ client: String) -> Bool {
+        !client.isEmpty && client.utf8.allSatisfy { (UInt8(ascii: "0")...UInt8(ascii: "9")).contains($0) || $0 == UInt8(ascii: ".") }
+            && client.contains(".") && !client.hasPrefix("127.")
+    }
+
     /// The client, as the limits count it: cloudflared's `CF-Connecting-IP`
     /// when the request came from cloudflared on this machine, otherwise the
     /// peer's own address, either as `key(_:)` gives it.

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Builds sidewalks.sqlite, every sidewalk in the city, for the server to put
-walks on the sidewalk rather than down the middle of the street, where Apple
-Maps' walking directions run (`Sidewalks.swift` on the server reads it).
+"""Builds ios/App/sidewalks.sqlite, every sidewalk in the city, bundled with
+the app to put walks on the sidewalk rather than down the middle of the
+street, where Apple Maps' walking directions run (`Sidewalks.fit`, read by
+`SidewalkStore.swift`).
 
 From NYC's Planimetric Database: Sidewalk (data.cityofnewyork.us, 52n9-sdep),
 drawn from aerial photos: each block's sidewalk as a polygon, its outer ring
@@ -9,8 +10,11 @@ the curb and any hole in it the building line.
 
     curl -o sidewalk.geojson \\
         'https://data.cityofnewyork.us/resource/52n9-sdep.geojson?$limit=60000'
-    python3 tools/make_sidewalks.py sidewalk.geojson sidewalks.sqlite
-    sudo install -o traintimes -g wheel -m 600 sidewalks.sqlite /usr/local/traintimes/data/
+    python3 tools/make_sidewalks.py sidewalk.geojson ios/App/sidewalks.sqlite
+
+The city updates it every year or two (its `data_updated_at`); about 9 MB.
+This starts the file afresh: run `make_signals.py` after it to put the signals
+back, or walks have no lights at their crossings.
 
 Each ring is simplified to within `TOLERANCE` and kept as a blob of varints:
 how many rings, then for each how many points and their latitude and

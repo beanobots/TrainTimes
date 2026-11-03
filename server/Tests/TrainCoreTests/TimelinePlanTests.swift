@@ -10,6 +10,11 @@ import Testing
         now.addingTimeInterval(minutes * 60)
     }
 
+    /// When a train due at `minutes` has been at the station (`AtStation`).
+    func gone(_ minutes: Double) -> Date {
+        time(minutes).addingTimeInterval(AtStation.seconds)
+    }
+
     /// A train with its stops and where the feed says it is.
     func mapped(_ minutes: Double, trip: String) -> Arrival {
         var train = arrival(minutes, trip: trip)
@@ -30,9 +35,9 @@ import Testing
     @Test func anEntryAsEachTrainsTimeToLeavePasses() {
         let trains = [arrival(2, trip: "a"), arrival(6, trip: "b"), arrival(9, trip: "c")]
         #expect(TimelinePlan.dates(after: now, toCatch: trains, selection: prospect, everyMinute: false)
-            == [time(2), time(6), time(9)])
+            == [time(2), gone(2), time(6), gone(6), time(9), gone(9)])
 
-        // With a walk, its leave times; and every entry's first train is still one to catch
+        // With a walk, its leave times, not at the station; and every entry's first train is still one to catch
         var walking = prospect
         walking.walkMinutes = 3
         let dates = TimelinePlan.dates(after: now, toCatch: trains, selection: walking, everyMinute: false)
@@ -49,7 +54,7 @@ import Testing
         held.departure = time(4)
         let trains = [held, arrival(6, trip: "b")]
         #expect(TimelinePlan.dates(after: now, toCatch: trains, selection: prospect, everyMinute: false)
-            == [time(2), time(4), time(6)])
+            == [time(2), gone(2), time(4), time(6), gone(6)])
         #expect(TimelinePlan.runsOut(trains, selection: prospect) == time(6))
         #expect(TimelinePlan.runsOut([held], selection: prospect) == time(4))
         #expect(TimelinePlan.runsOut([], selection: prospect) == nil)
@@ -57,17 +62,18 @@ import Testing
 
     @Test func mapsGetAnEntryAMinuteForAnHourAtMost() {
         let soon = [arrival(2, trip: "a"), arrival(5.5, trip: "b")]
+        // On b's minute while it's "then 5 min", "then 4 min"; once it's the next, every minute
         #expect(TimelinePlan.dates(after: now, toCatch: soon, selection: prospect, everyMinute: true)
-            == [time(1), time(2), time(3), time(4), time(5), time(5.5)])
+            == [time(0.5), time(1.5), time(2), gone(2), time(3), time(4), time(5), time(5.5), gone(5.5)])
 
         // Ten trains get entries of their own, the last of them 90 minutes off; the minutes stop at an hour
         let many = (1...15).map { arrival(Double($0 * 9), trip: "t\($0)") }
         let dates = TimelinePlan.dates(after: now, toCatch: many, selection: prospect, everyMinute: true)
         #expect(dates.first == time(1))
-        #expect(dates.last == time(90))
+        #expect(dates.last == gone(90))
         #expect(!dates.contains(time(99)))
-        #expect(dates.filter { $0 > time(59) && $0 < time(90) } == [time(63), time(72), time(81)])
-        #expect(dates.count == 59 + 4)
+        #expect(dates.filter { $0 > time(59) && $0 < time(90) } == [63, 72, 81].flatMap { [time($0), gone($0)] })
+        #expect(dates.count == 59 + 4 + 10)
         #expect(TimelinePlan.runsOut(many, selection: prospect) == time(90))
     }
 

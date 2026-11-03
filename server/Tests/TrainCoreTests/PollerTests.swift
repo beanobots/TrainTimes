@@ -137,11 +137,11 @@ func testRegistration(token: String = sampleToken, owner: String = "key", starte
         let poller = poller(store, pusher)
         await poller.pass(at: now)
         // b, then c (an N) and d
-        #expect(await poller.nextDue(after: now) == now.addingTimeInterval(6 * 60))
+        #expect(await poller.nextDue(after: now) == now.addingTimeInterval(6 * 60 + AtStation.seconds))
         #expect(await poller.pushDue(at: now.addingTimeInterval(5 * 60)).updates == 0)
         #expect(pusher.pushes.count == 1)
 
-        let stats = await poller.pushDue(at: now.addingTimeInterval(6 * 60))
+        let stats = await poller.pushDue(at: now.addingTimeInterval(6 * 60 + AtStation.seconds))
         #expect(stats.updates == 1)
         #expect(pusher.pushes.count == 2)
         let moved = try #require(pusher.pushes.last)
@@ -153,8 +153,8 @@ func testRegistration(token: String = sampleToken, owner: String = "key", starte
         #expect(moved.staleDate == moved.state.train)
         #expect(await store.registration(for: sampleToken)?.lastState == moved.state)
         // Then d, and after that nothing to move on to until the next pass
-        #expect(await poller.nextDue(after: now.addingTimeInterval(6 * 60)) == now.addingTimeInterval(9 * 60))
-        await poller.pushDue(at: now.addingTimeInterval(9 * 60))
+        #expect(await poller.nextDue(after: now.addingTimeInterval(6 * 60)) == now.addingTimeInterval(9 * 60 + AtStation.seconds))
+        await poller.pushDue(at: now.addingTimeInterval(9 * 60 + AtStation.seconds))
         #expect(pusher.pushes.last?.state.train == now.addingTimeInterval(15 * 60))
         #expect(await poller.nextDue(after: now.addingTimeInterval(9 * 60)) == nil)
     }
@@ -172,13 +172,13 @@ func testRegistration(token: String = sampleToken, owner: String = "key", starte
         #expect(pusher.pushes.last?.state.following == [9, 15].map { now.addingTimeInterval($0 * 60) })
         #expect(await store.registration(for: sampleToken)?.later.map(\.trip) == ["e", "f", "g"])
 
-        await poller.pushDue(at: now.addingTimeInterval(6 * 60))
+        await poller.pushDue(at: now.addingTimeInterval(6 * 60 + AtStation.seconds))
         var moved = try #require(pusher.pushes.last?.state)
         #expect(moved.train == now.addingTimeInterval(9 * 60))
         #expect(moved.following == [15, 20].map { now.addingTimeInterval($0 * 60) })
         #expect(moved.followingRoutes == ["R", "W"])
         // Due again before the next pass: still two after it
-        await poller.pushDue(at: now.addingTimeInterval(9 * 60))
+        await poller.pushDue(at: now.addingTimeInterval(9 * 60 + AtStation.seconds))
         moved = try #require(pusher.pushes.last?.state)
         #expect(moved.train == now.addingTimeInterval(15 * 60))
         #expect(moved.following == [20, 24].map { now.addingTimeInterval($0 * 60) })
@@ -212,7 +212,7 @@ func testRegistration(token: String = sampleToken, owner: String = "key", starte
         #expect(pusher.widgetReloads.count == 1)
 
         // Moving on to the next train between passes: they show that too
-        await poller.pushDue(at: now.addingTimeInterval(6 * 60))
+        await poller.pushDue(at: now.addingTimeInterval(6 * 60 + AtStation.seconds))
         #expect(pusher.widgetReloads.count == 2)
     }
 
@@ -250,7 +250,7 @@ func testRegistration(token: String = sampleToken, owner: String = "key", starte
         #expect(registration.widgetToken == nil)
         #expect(registration.lastState != nil)
 
-        await poller.pushDue(at: now.addingTimeInterval(6 * 60))
+        await poller.pushDue(at: now.addingTimeInterval(6 * 60 + AtStation.seconds))
         #expect(pusher.pushes.count == 2)
         #expect(pusher.widgetReloads.count == 1)
     }
@@ -274,7 +274,7 @@ func testRegistration(token: String = sampleToken, owner: String = "key", starte
         let poller = poller(store, pusher)
         await poller.pass(at: now)
         #expect(await poller.nextDue(after: now) == nil)
-        #expect(await poller.pushDue(at: now.addingTimeInterval(6 * 60)).updates == 0)
+        #expect(await poller.pushDue(at: now.addingTimeInterval(6 * 60 + AtStation.seconds)).updates == 0)
         #expect(pusher.pushes.count == 1)
     }
 
@@ -607,7 +607,7 @@ func testRegistration(token: String = sampleToken, owner: String = "key", starte
         #expect(await store.count == 1)
     }
 
-    @Test(.timeLimit(.minutes(1))) func wakesBetweenPassesToPushADueTrain() async throws {
+    @Test(.timeLimit(.minutes(1))) func wakesBetweenPassesToPushATrainOnceItsBeenAtTheStation() async throws {
         let store = try Store(directory: nil)
         let started = Date.now
         var registration = testRegistration(started: started)
@@ -627,7 +627,7 @@ func testRegistration(token: String = sampleToken, owner: String = "key", starte
         try await run.value
         #expect(pusher.pushes.count == 1)
         #expect(pusher.pushes.first?.state.train == started.addingTimeInterval(60))
-        #expect(pusher.pushes.first?.timestamp == last.train)
+        #expect(pusher.pushes.first?.timestamp == last.train.addingTimeInterval(AtStation.seconds))
     }
 
     @Test(.timeLimit(.minutes(1))) func stopsWaitingWhenShutDownGracefully() async throws {

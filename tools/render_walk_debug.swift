@@ -1,6 +1,9 @@
-// Draws `make_walk_graph.py debug`'s GeoJSON as PNGs, to look over how the walking
-// graph reads a place: streets dark grey, paths green, highways and ramps red,
-// OSM paths purple, parks pale green, junctions as dots (orange off grade).
+// Draws `make_walk_graph.py debug` and `graph-debug` GeoJSON as PNGs, to look over how
+// the walking graph reads a place: streets dark grey, paths green, highways and ramps
+// red, OSM paths purple, parks pale green, junctions as dots (orange off grade). Built
+// graphs add each street's sidewalk lines (blue; orange dashed at the curb where there's
+// no sidewalk), median links (thick blue), corners (green on a sidewalk, red off one,
+// blue in a median, grey on a path) and signals (yellow rings).
 //
 //     swift tools/render_walk_debug.swift debug_dir out_dir
 import AppKit
@@ -61,6 +64,17 @@ for file in (try FileManager.default.contentsOfDirectory(at: input, includingPro
         ("walk", CGColor(gray: 0.3, alpha: 1), 3, []),
         ("path", CGColor(red: 0.1, green: 0.6, blue: 0.2, alpha: 1), 3, []),
         ("arm", CGColor(red: 0.85, green: 0.15, blue: 0.1, alpha: 0.9), 3, []),
+        ("median", CGColor(red: 0.1, green: 0.35, blue: 0.9, alpha: 1), 5, []),
+        ("side", CGColor(red: 0.2, green: 0.5, blue: 1, alpha: 0.8), 1.5, []),
+        ("side-none", CGColor(red: 1, green: 0.5, blue: 0, alpha: 0.9), 1.5, [4, 3]),
+        // OpenStreetMap's sidewalks and crosswalks over the city's streets (thin grey)
+        ("cscl-walk", CGColor(gray: 0.55, alpha: 0.8), 1, []),
+        ("cscl-arm", CGColor(red: 0.9, green: 0.4, blue: 0.4, alpha: 0.7), 1, []),
+        ("cscl-path", CGColor(red: 0.3, green: 0.7, blue: 0.3, alpha: 0.7), 1, []),
+        ("osm-sidewalk", CGColor(red: 0.15, green: 0.4, blue: 0.95, alpha: 0.9), 3, []),
+        ("osm-island", CGColor(red: 0.5, green: 0.2, blue: 0.8, alpha: 0.9), 3, []),
+        ("osm-crossing", CGColor(red: 0.95, green: 0.2, blue: 0.1, alpha: 1), 4, []),
+        ("osm-crossing-signal", CGColor(red: 0.05, green: 0.7, blue: 0.2, alpha: 1), 4, []),
     ]
     for (name, color, lineWidth, dash) in styles {
         for f in features where kind(f) == name {
@@ -76,6 +90,25 @@ for file in (try FileManager.default.contentsOfDirectory(at: input, includingPro
                              : CGColor(red: 1, green: 0.55, blue: 0, alpha: 1))
         let at = point(c)
         context.fillEllipse(in: CGRect(x: at.x - r, y: at.y - r, width: r * 2, height: r * 2))
+    }
+    // Corners and signals
+    let marks: [String: (CGColor, CGFloat)] = [
+        "corner-sidewalk": (CGColor(red: 0.1, green: 0.7, blue: 0.2, alpha: 1), 3.5),
+        "corner-none": (CGColor(red: 0.95, green: 0.1, blue: 0.1, alpha: 1), 4.5),
+        "corner-refuge": (CGColor(red: 0.1, green: 0.3, blue: 1, alpha: 1), 4.5),
+        "corner-path": (CGColor(gray: 0.55, alpha: 1), 2.5),
+    ]
+    for f in features {
+        guard let c = coordinates(f) as? [Double] else { continue }
+        let at = point(c)
+        if let (color, r) = marks[kind(f)] {
+            context.setFillColor(color)
+            context.fillEllipse(in: CGRect(x: at.x - r, y: at.y - r, width: r * 2, height: r * 2))
+        } else if kind(f) == "signal" {
+            context.setStrokeColor(CGColor(red: 0.95, green: 0.75, blue: 0, alpha: 1))
+            context.setLineWidth(2.5)
+            context.strokeEllipse(in: CGRect(x: at.x - 9, y: at.y - 9, width: 18, height: 18))
+        }
     }
     // Each street's name once, at the middle of its longest block here
     let graphics = NSGraphicsContext(cgContext: context, flipped: false)

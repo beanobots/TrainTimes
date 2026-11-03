@@ -17,7 +17,7 @@ all are signals too:
     curl -A leeway-tools -o osm_signals.json https://overpass-api.de/api/interpreter \\
         --data-urlencode 'data=[out:json][timeout:150];(
             node["highway"="traffic_signals"](40.49,-74.27,40.92,-73.68);
-            node["crossing"="traffic_signals"](40.49,-74.27,40.92,-73.68););out skel;'
+            node["crossing"="traffic_signals"](40.49,-74.27,40.92,-73.68););out;'
     for id in xc4v-ntf4 8kuj-2n3u de3m-c5p4; do
         curl -o $id.json "https://data.cityofnewyork.us/resource/$id.json?\\$limit=50000"
     done
@@ -38,15 +38,26 @@ from datetime import datetime, timezone
 from make_sidewalks import varint, zigzag
 
 SIGNAL, LEADING, EXCLUSIVE = 1, 2, 4  # as `Sidewalks.Signal.Kind` has them
+# OSM's signals that stop no one for people on foot: a fire house's, flashing amber or red,
+# metering cars onto a highway
+NOT_FOR_WALKING = {"emergency", "blinker", "ramp_meter"}
 MERGE = 5.0  # meters
 SOURCE = ("OpenStreetMap traffic signals (ODbL); NYC DOT Leading Pedestrian Interval, "
           "Exclusive Pedestrian and Accessible Pedestrian Signals")
 
 
 def osm(path):
-    """(latitude, longitude) of each OSM node in Overpass' JSON."""
+    """(latitude, longitude) of each OSM signal in Overpass' JSON (with its tags, `out;`)
+    that people on foot cross at."""
     with open(path, encoding="utf-8") as file:
-        return [(e["lat"], e["lon"]) for e in json.load(file)["elements"] if e.get("type") == "node"]
+        elements = json.load(file)["elements"]
+    points = []
+    for element in elements:
+        tags = element.get("tags") or {}
+        if element.get("type") != "node" or tags.get("traffic_signals") in NOT_FOR_WALKING:
+            continue
+        points.append((element["lat"], element["lon"]))
+    return points
 
 
 def city(path):
@@ -65,9 +76,12 @@ def merged(points):
     """`points` with those within `MERGE` of one already kept left out."""
     kept = []
     cells = {}
+    # A cell `MERGE` across each way: a degree of longitude is shorter than one of latitude
+    # by the cosine of the city's latitude
     size = MERGE / 111_320
+    size_lon = size / math.cos(math.radians(40.7))
     for lat, lon in sorted(points):
-        cell = (int(lat / size), int(lon / size))
+        cell = (int(lat / size), int(lon / size_lon))
         east = 111_320 * math.cos(math.radians(lat))
         near = any(
             math.hypot((lat - a) * 111_320, (lon - b) * east) < MERGE

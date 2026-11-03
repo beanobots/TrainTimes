@@ -6,8 +6,6 @@ enum BulletImage {
     private static let cache = NSCache<NSString, NSData>()
     private static let side: CGFloat = 60
     private static let scale: CGFloat = 3
-    /// Image width in pixels, for drawing at another size.
-    static let pixelSide = side * scale
 
     static func data(for routes: [String]) -> Data? {
         let key = routes.joined(separator: ",") as NSString

@@ -30,22 +30,31 @@ final class WalkSession: Identifiable {
 
     /// Changed by `switchToFaster()`, and `walks` by re-routes. Nil walking all the way.
     private(set) var trip: TripPlanner.Trip?
-    private(set) var walks: WalkingDirections.TripWalks?
+    private(set) var walks: WalkingDirections.TripWalks? {
+        didSet { updatePathLeft() }
+    }
     /// Walking all the way: the walk, followed as walking out from a train is (`.fromTrain`).
-    private(set) var plainWalk: Walk?
+    private(set) var plainWalk: Walk? {
+        didSet { updatePathLeft() }
+    }
     let endName: String
     let end: CLLocation
     /// When Go was tapped: the walk's countdown ends `TrainActivityController.walkLifetime` on.
     let started: Date
 
     private(set) var stage = Stage.toTrain {
-        didSet { if stage != oldValue { showOnWidget() } }
+        didSet {
+            if stage != oldValue { showOnWidget() }
+            updatePathLeft()
+        }
     }
     /// Your last location while walking; none from getting off the train until the next fix,
     /// the last being where you got on.
     private(set) var location: CLLocation?
     /// Where you are along the walk you're on.
-    private(set) var progress: Walk.Progress?
+    private(set) var progress: Walk.Progress? {
+        didSet { updatePathLeft() }
+    }
     /// The first train's next trains from its platform, soonest first.
     private(set) var trains: [Arrival] = []
     /// With a change, the next trains of the lines changed to, from the change, soonest first.
@@ -57,6 +66,11 @@ final class WalkSession: Identifiable {
     private(set) var boarded: Arrival?
     /// The train changed to, once you're on it.
     private(set) var boardedOnward: Arrival?
+    /// The trains of `trains` and `onwardTrains` seen lately, gone ones too, by trip: the train you
+    /// say you're on may have left before the board's latest (`board()`).
+    private var seen: [String: Arrival] = [:]
+    /// Where you were as you said you were on the train, for `ride` to place it by.
+    private var boardedAt: CLLocation?
     /// Where the train you're on is, for the map, while you're on it.
     private(set) var ride: RideTracker?
     /// Each trip's latest from the feeds at where you get off it, by trip: the train you're on
@@ -89,19 +103,45 @@ final class WalkSession: Identifiable {
     private static let there: Double = 25
     /// Seconds from the entrance to the platform: the stairs, the turnstiles.
     static let downToPlatform: TimeInterval = 60
+    /// Seconds a train seen at your platform is remembered after it's left (`seen`).
+    private static let seenFor: TimeInterval = 20 * 60
+    /// Metres from the station you got on at that count as having ridden on from it.
+    private static let awayFromStation: CLLocationDistance = 300
+    /// Seconds a station check on the ride waits for a fix: one from Wi-Fi or cell comes in a
+    /// few, and underground, waiting longer mostly gets none anyway.
+    private static let ridingFixWait: TimeInterval = 8
+    /// Station checks in a row without a fix before only every other one's tried.
+    private static let ridingMisses = 2
     /// Metres a second walking, for what's left of a walk: Apple Maps' pace for it if known.
     private static let pace = 1.33
 
     /// Metres off the walk's path that count as having gone another way, twice in a row.
-    private static let offRoute: Double = 40
+    /// About an avenue's width: past the far sidewalk, as GPS good to a few metres can tell.
+    static let offRoute: Double = 25
     /// Seconds between re-routes, so GPS wandering can't keep asking Apple Maps.
-    private static let rerouteGap: TimeInterval = 20
+    private static let rerouteGap: TimeInterval = 10
     /// Minutes sooner another trip must be to be offered: worth turning round for.
     nonisolated private static let worthSwitching = 3
 
+    /// Metres off the path you may be on the street's other sidewalk: past the width of the
+    /// sidewalk you're meant to be on, short of going another way (`offRoute`).
+    private static let otherSide: ClosedRange<Double> = 8...offRoute
+    /// Metres GPS must be good to, at most, to say which sidewalk you're on: less than a street's
+    /// width, as on an avenue with a clear sky. Worse is left on the walk's side.
+    private static let sidewalkAccuracy: Double = 10
+    /// Fixes in a row on the other sidewalk before the walk's moved over to it.
+    private static let otherSideFixes = 3
+
     private var offFixes = 0
+    /// Fixes in a row clearly on another sidewalk from the walk's.
+    private var sideFixes = 0
+    /// Each fix's sidewalk check, numbered, and the last counted or ruled out: one that comes
+    /// back after a later one's, after a fix that wasn't checked, or after a new walk, isn't
+    /// counted.
+    private var sideChecks = 0
+    private var sideCounted = 0
     private var lastReroute = Date.distantPast
-    private var following: Task<Void, Never>?
+    private var following: WalkFollower?
     private var refreshing: Task<Void, Never>?
     /// Taking a fix as the train should be at each station, while the app's open.
     private var checking: Task<Void, Never>?
@@ -126,6 +166,7 @@ final class WalkSession: Identifiable {
         self.trains = trains
         self.onwardTrains = onwardTrains
         started = .now
+        updatePathLeft()
     }
 
     /// Walking all the way to `end`, by `walk`: the walk out from a train, without the train.
@@ -135,6 +176,7 @@ final class WalkSession: Identifiable {
         self.end = end
         stage = .fromTrain
         started = .now
+        updatePathLeft()
     }
 
     /// Whether it's walking all the way, with no train.
@@ -157,16 +199,59 @@ final class WalkSession: Identifiable {
     /// The step whose instruction is next: the one whose path you're on, at the end of it (the
     /// first until you're found on one).
     var nextStep: Walk.Step? {
-        guard let walk else { return nil }
-        let index = progress?.step ?? 0
-        return walk.steps.indices.contains(index) ? walk.steps[index] : walk.steps.last
+        guard let walk, let index = nextIndex else { return nil }
+        return walk.steps[index]
     }
 
-    /// What's left of the walk's path, from where you are along it.
-    var pathLeft: [Walk.Point] {
-        guard let walk else { return [] }
-        guard let progress else { return walk.points }
-        return walk.path(last: progress.left)
+    /// Where `nextStep` is in the walk's steps.
+    private var nextIndex: Int? {
+        guard let walk, !walk.steps.isEmpty else { return nil }
+        let index = progress?.step ?? 0
+        return walk.steps.indices.contains(index) ? index : walk.steps.count - 1
+    }
+
+    /// The streets the walk crosses, by each crossing's middle, as the geocoder names them
+    /// (`CrossStreets`): asked for by the walking map, read by its signs, the turn card and
+    /// the Lock Screen.
+    var crossNames: [Walk.Point: String] = [:]
+
+    /// A step's instruction, a crossing's with its street's name once the geocoder has it,
+    /// where the turn before didn't say: "Cross 4th Ave".
+    func instruction(of step: Walk.Step) -> String {
+        guard step.turn == .cross, step.instruction == "Cross the street", let name = crossingName(of: step) else {
+            return step.instruction
+        }
+        return "Cross \(name)"
+    }
+
+    /// The street a step's crossing is over, as the geocoder has it.
+    private func crossingName(of step: Walk.Step) -> String? {
+        step.crossing.flatMap(CrossStreets.middle(of:)).flatMap { crossNames[$0] }
+    }
+
+    /// The warning at `nextStep`'s crossing, under its instruction, where there's no light: for
+    /// a crossing's own step, just that; for a turn with a street to cross straight after,
+    /// that street too. Nothing at a light.
+    var lightNote: String? {
+        guard let step = nextStep, let note = step.light?.note, let index = nextIndex else { return nil }
+        if step.turn == .cross { return note }
+        let street = walk?.streetTurnedOff(at: index) ?? crossingName(of: step) ?? "the street"
+        return "Then cross \(street) · \(note)"
+    }
+
+    /// What's left of the walk's path, from where you are along it. Kept, not worked out each
+    /// time it's read: the walking screen reads it several times a redraw, a few times a second.
+    private(set) var pathLeft: [Walk.Point] = []
+
+    private func updatePathLeft() {
+        let left: [Walk.Point]
+        if let walk {
+            left = progress.map { walk.path(last: $0.left) } ?? walk.points
+        } else {
+            left = []
+        }
+        // Not a redraw for the same path, as standing still
+        if left != pathLeft { pathLeft = left }
     }
 
     /// The steps after `nextStep`, the first on the turn card under it.
@@ -181,6 +266,12 @@ final class WalkSession: Identifiable {
         laterSteps.first.map { step in
             "Then \(step.instruction.prefix(1).lowercased() + step.instruction.dropFirst())"
         }
+    }
+
+    /// Under `nextStep` on the Lock Screen: the warning where its crossing has no light, as
+    /// in the app (`lightNote`); or the step after.
+    var liveDetail: String? {
+        lightNote ?? thenStep
     }
 
     /// Seconds of walking left on the walk you're on, at its own pace.
@@ -283,6 +374,13 @@ final class WalkSession: Identifiable {
         return currentTrains.first { $0.leaves >= ready }
     }
 
+    /// The train in at the platform as you're at the station or the change: due a moment ago
+    /// (`AtStation`).
+    func trainAtStation(now: Date = .now) -> Arrival? {
+        guard stage == .atStation || stage == .changing else { return nil }
+        return currentTrains.first { AtStation.covers($0.time, at: now) }
+    }
+
     /// Trains that will have gone by the time you're down, the soonest first: "You'll miss the 8:18".
     func missed(now: Date = .now) -> [Arrival] {
         let ready = onPlatform(now: now)
@@ -331,6 +429,11 @@ final class WalkSession: Identifiable {
         refreshing = Task { [weak self] in
             var round = 0
             while !Task.isCancelled, let stage = self?.stage, stage != .arrived {
+                // Past its countdown's time, never found there: ended, so it stops following you
+                if let self, Date.now >= self.started.addingTimeInterval(TrainActivityController.walkLifetime) {
+                    if ActiveWalk.shared.session === self { ActiveWalk.shared.end() } else { self.stop() }
+                    return
+                }
                 // The trains matter until you're off the last of them
                 if stage != .fromTrain {
                     await self?.refreshTrains()
@@ -373,16 +476,32 @@ final class WalkSession: Identifiable {
 
     /// `boardedTrain()`, waited for: from the Lock Screen's button, which iOS gives only so long.
     func board() async {
-        // The train at the platform: due now, or just gone if the tap's late
-        let atPlatform = { (trains: [Arrival]) in trains.first { $0.leaves >= .now.addingTimeInterval(-90) } }
+        // The leg's trains first if there are none yet, as when the Lock Screen's button has
+        // relaunched the app, or with it open, the latest: the train you're on is picked from
+        // them, and never again after
+        let open = UIApplication.shared.applicationState == .active
+        switch stage {
+        case .toTrain where trains.isEmpty || open, .atStation where trains.isEmpty || open: await refreshTrains()
+        case .changing where onwardTrains.isEmpty || open: await refreshTrains()
+        default: break
+        }
+        // Where you are: the last fix walking if it's fresh, else with the app open, one now.
+        // Underground there may be none
+        let fresh = location.flatMap { $0.timestamp.timeIntervalSinceNow > -120 ? $0 : nil }
+        var here = fresh
+        if here == nil, open { here = await RideTracker.fix(within: 5) }
+        boardedAt = here
         switch stage {
         case .toTrain, .atStation:
-            boarded = atPlatform(trains) ?? catchable()
+            boarded = onTrain(of: trains, from: Set(trip?.selection.stopIDs ?? []), at: trip?.selection.station,
+                              here: here) ?? catchable()
+            offFixes = 0
             stage = .riding
             progress = nil
             unfollow()
         case .changing:
-            boardedOnward = atPlatform(onwardTrains) ?? catchable()
+            boardedOnward = onTrain(of: onwardTrains, from: Set(onwardSelections.flatMap(\.stopIDs)),
+                                    at: trip?.change?.station, here: here) ?? catchable()
             stage = .ridingOn
         case .riding, .ridingOn, .fromTrain, .arrived:
             return
@@ -390,6 +509,32 @@ final class WalkSession: Identifiable {
         track()
         save()
         await postLive()
+    }
+
+    /// The train you're on, of the leg's `trains` from `stops` at `station`, said just now: the one at the
+    /// platform by the feeds, due or just gone; else of that and the last of the leg's to have
+    /// left (`seen`), the one away from your station if `here` is, or the one nearer now. As the
+    /// feeds can have it minutes off when you're on it, one still to come is timed as now.
+    private func onTrain(of trains: [Arrival], from stops: Set<String>, at station: Station?, here: CLLocation?,
+                         now: Date = .now) -> Arrival? {
+        let soon = trains.first { $0.leaves >= now.addingTimeInterval(-90) }
+        let gone = seen.values
+            .filter { stops.contains($0.stop) && $0.leaves < now.addingTimeInterval(-90) }
+            .max { $0.leaves < $1.leaves }
+        var train = soon
+        if let soon, soon.time <= now.addingTimeInterval(90) {
+            train = soon
+        } else if let gone {
+            let away = here.map { here in
+                station.map { here.distance(from: $0.location)
+                    > max(Self.awayFromStation, here.horizontalAccuracy) } ?? false
+            } ?? false
+            let goneNearer = soon.map { now.timeIntervalSince(gone.leaves) < $0.time.timeIntervalSince(now) } ?? true
+            if away || goneNearer { train = gone }
+        }
+        guard let train, train.time > now else { return train }
+        return Arrival(route: train.route, time: now, stop: train.stop, lastStop: train.lastStop, isLive: train.isLive,
+                       trip: train.trip, approach: train.approach, position: train.position)
     }
 
     /// Off the train, at `time`: at the change, over to the next; else up from the exit to the
@@ -404,6 +549,10 @@ final class WalkSession: Identifiable {
             stage = .fromTrain
             progress = nil
             location = nil
+            // Two fixes off the walk out from here, not one left over from the walk in
+            offFixes = 0
+            sideFixes = 0
+            sideCounted = sideChecks
             follow()
         case .toTrain, .atStation, .changing, .fromTrain, .arrived:
             return
@@ -428,18 +577,11 @@ final class WalkSession: Identifiable {
     private func follow() {
         guard following == nil else { return }
         background = CLBackgroundActivitySession()
-        following = Task { [weak self] in
-            do {
-                for try await update in CLLocationUpdate.liveUpdates(.otherNavigation) {
-                    guard let self, !Task.isCancelled else { return }
-                    if let location = update.location { self.moved(to: location) }
-                }
-            } catch {}
-        }
+        following = WalkFollower { [weak self] location in self?.moved(to: location) }
     }
 
     private func unfollow() {
-        following?.cancel()
+        following?.stop()
         following = nil
         background?.invalidate()
         background = nil
@@ -451,10 +593,16 @@ final class WalkSession: Identifiable {
         untrack()
         guard let trip, let train = isOnward ? boardedOnward : boarded,
               let end = isLastTrain ? trip.destination : trip.change?.station else { return }
-        let ride = RideTracker(train: train, to: end, live: riding[train.trip], arrives: arrivals[train.trip])
+        let ride = RideTracker(train: train, to: end, live: riding[train.trip], arrives: arrivals[train.trip],
+                               boardedAt: boardedAt)
+        // Only as you get on: once relaunched, the train's times have it
+        boardedAt = nil
         self.ride = ride
         checking = Task { [weak self] in
             await ride.build()
+            // Checks in a row that got no fix: deep underground, after a couple, only every other
+            // station's tried, until one gets a fix again
+            var misses = 0
             while !Task.isCancelled {
                 guard let next = ride.nextCheck() else { return }
                 // A while at a time, as the feeds' times move it
@@ -465,8 +613,11 @@ final class WalkSession: Identifiable {
                 }
                 guard self != nil else { return }
                 // Open, so the map shows it: closed, iOS gives no fix without following
-                let location = UIApplication.shared.applicationState == .active ? await RideTracker.fix() : nil
+                let open = UIApplication.shared.applicationState == .active
+                let skips = misses >= Self.ridingMisses && misses % 2 == 0
+                let location = open && !skips ? await RideTracker.fix(within: Self.ridingFixWait) : nil
                 guard !Task.isCancelled else { return }
+                if open { misses = location == nil ? misses + 1 : 0 }
                 ride.check(location, for: next.index)
             }
         }
@@ -492,6 +643,18 @@ final class WalkSession: Identifiable {
             if offFixes >= 2 { Task { await reroute(from: location) } }
         } else {
             offFixes = 0
+        }
+        // Over the street on the other sidewalk, with GPS good enough to tell: the walk's moved
+        // over to your side, as a new one from here, once it's said so a few times running
+        if let progress, walk.crossings != nil, Self.otherSide.contains(progress.offPath),
+           location.horizontalAccuracy > 0, location.horizontalAccuracy <= Self.sidewalkAccuracy,
+           let onPath = walk.path(last: progress.left).first {
+            sideChecks += 1
+            let check = sideChecks
+            Task { await checkSide(location, against: onPath, check: check) }
+        } else {
+            sideFixes = 0
+            sideCounted = sideChecks
         }
         switch stage {
         case .toTrain where walks.map { isThere(location, at: $0.boarding.location) } ?? false:
@@ -523,15 +686,37 @@ final class WalkSession: Identifiable {
         guard stage == .toTrain else { return }
         stage = .atStation
         progress = nil
+        offFixes = 0
+        // Going down to the platform, where GPS mostly can't reach: rough fixes, for your dot
+        // and for which train you're on (`board()`), not best accuracy to no end
+        following?.relax()
         save()
         // The train counted down to, again from here, as the walking screen has it
         Task { await postLive(trains: true) }
     }
 
+    /// Counts `location` toward moving the walk to your side of the street if it's on another
+    /// sidewalk from `onPath`, the walk's nearest point; re-routes from it once there are enough.
+    private func checkSide(_ location: CLLocation, against onPath: Walk.Point, check: Int) async {
+        let other = await SidewalkStore.shared.differentSidewalks(Walk.Point(location.coordinate), onPath)
+        guard stage == .toTrain || stage == .fromTrain, check > sideCounted else { return }
+        sideCounted = check
+        guard other else {
+            sideFixes = 0
+            return
+        }
+        sideFixes += 1
+        if sideFixes >= Self.otherSideFixes {
+            sideFixes = 0
+            await reroute(from: location)
+        }
+    }
+
     // MARK: When things change
 
     /// A new walk from `location`, gone off the path: to the nearest way in for the train from
-    /// here (it may now be another corner's), or on to the end.
+    /// here (it may now be another corner's), or on to the end; back onto the way it was going
+    /// where that's about as good.
     private func reroute(from location: CLLocation) async {
         guard !isFinding, Date.now.timeIntervalSince(lastReroute) >= Self.rerouteGap else { return }
         isFinding = true
@@ -541,17 +726,19 @@ final class WalkSession: Identifiable {
         case .toTrain:
             guard let trip, let current = walks else { return }
             let boarding = StationWays.boarding(trip.selection, from: location) ?? current.boarding
-            guard let walk = try? await WalkingDirections.walk(from: location, to: boarding), stage == .toTrain else { return }
+            guard let walk = try? await WalkingDirections.walk(from: location, to: boarding, along: pathLeft), stage == .toTrain else { return }
             walks?.boarding = boarding
             walks?.toTrain = walk
         case .fromTrain:
-            guard let walk = try? await WalkingDirections.walk(from: location, to: end), stage == .fromTrain else { return }
+            guard let walk = try? await WalkingDirections.walk(from: location, to: end, along: pathLeft), stage == .fromTrain else { return }
             // Walking out from a train, or all the way
             if walks != nil { walks?.fromTrain = walk } else { plainWalk = walk }
         case .atStation, .riding, .changing, .ridingOn, .arrived:
             return
         }
         offFixes = 0
+        sideFixes = 0
+        sideCounted = sideChecks
         progress = self.walk?.progress(at: Walk.Point(location.coordinate))
         save()
         await postLive()
@@ -605,12 +792,16 @@ final class WalkSession: Identifiable {
         onwardTrains = []
         arrivals = [:]
         offFixes = 0
+        sideFixes = 0
+        sideCounted = sideChecks
         save()
         // The Magic Widget shows the new trip, as Go showed the old
         SharedTrip(option: SharedTrip.Option(selection: trip.selection, change: trip.change,
                                              destinationID: trip.destination.id),
                    app: nil, shared: .now, bothWays: nil).show()
         await refreshTrains()
+        // Not if the walk's been ended or switched again while the trains came
+        guard isStarted, self.trip == trip else { return }
         if onLockScreen, let live = liveState {
             try? await TrainActivityController.startWalk(for: trip.selection, trains: countdownTrains, walk: live)
             liveStarted = true
@@ -727,8 +918,8 @@ final class WalkSession: Identifiable {
         case .toTrain:
             guard let step = nextStep else { return nil }
             return WalkState(phase: .toTrain, symbol: step.turn.systemImage,
-                             distance: Walk.distance(progress?.toTurn ?? step.meters), instruction: step.instruction,
-                             detail: thenStep, spare: spare(), part: part, endName: endName, arrives: arrives,
+                             distance: Walk.distance(progress?.toTurn ?? step.meters), instruction: instruction(of: step),
+                             detail: liveDetail, spare: spare(), part: part, endName: endName, arrives: arrives,
                              faster: faster.map { "Faster: \($0.label), \($0.minutesSooner) min sooner" })
         case .atStation:
             guard let walks else { return nil }
@@ -755,8 +946,8 @@ final class WalkSession: Identifiable {
             let up = step.turn == .stairsUp || step.turn == .elevatorUp
             return WalkState(phase: .fromTrain, symbol: step.turn.systemImage,
                              distance: up ? "Now" : Walk.distance(progress?.toTurn ?? step.meters),
-                             instruction: step.instruction,
-                             detail: thenStep,
+                             instruction: instruction(of: step),
+                             detail: liveDetail,
                              endName: endName, arrives: arrives)
         case .arrived:
             return nil
@@ -788,6 +979,7 @@ final class WalkSession: Identifiable {
             let last = trip.change == nil ? trip.destination : trip.change?.station
             if let found = await Self.trains(for: trip.selection, to: last) {
                 trains = found.trains
+                remember(found.trains)
                 // Kept, as the train you're on drops off the board once it's left your station
                 arrivals.merge(found.arrivals) { $1 }
                 riding.merge(found.riding) { $1 }
@@ -803,6 +995,13 @@ final class WalkSession: Identifiable {
             riding.merge(board.riding) { $1 }
         }
         if !found.isEmpty { onwardTrains = found.sorted { $0.leaves < $1.leaves } }
+        remember(found)
+    }
+
+    /// `trains` kept in `seen`, a while after they've gone.
+    private func remember(_ trains: [Arrival]) {
+        for train in trains where !train.trip.isEmpty { seen[train.trip] = train }
+        seen = seen.filter { $0.value.leaves > .now.addingTimeInterval(-Self.seenFor) }
     }
 
     /// The train you're on, as the feeds now have it, to `ride`.
@@ -893,6 +1092,7 @@ final class WalkSession: Identifiable {
         self.end = end
         self.stage = stage
         self.started = started
+        updatePathLeft()
     }
 
     /// Saves the walk as it is now, while it's under way.
@@ -931,6 +1131,17 @@ final class ActiveWalk {
         SharedStore.saveWalkStage(nil)
     }
 
+    /// The app quit from the app switcher: the walk ended there and then, as with End, and not
+    /// saved to carry on, so iOS has no location to relaunch the app for.
+    func quit() {
+        guard let session else { return }
+        session.stop(endingCountdown: false)
+        self.session = nil
+        WalkSession.Saved.clear()
+        SharedStore.saveWalkStage(nil)
+        TrainActivityController.endWalkBeforeQuitting()
+    }
+
     /// The saved walk, carried on if it's still under way, as iOS closed the app during it. A
     /// walk countdown with no walk left to follow it (or one past its time) is ended.
     func restore() {
@@ -961,4 +1172,58 @@ final class ActiveWalk {
         shared.restore()
         await shared.session?.refreshNow()
     }
+}
+
+/// Your location for a walk, from a location manager rather than `CLLocationUpdate.liveUpdates`:
+/// a cancelled live-updates loop waits for its next update to end, and standing still (as when
+/// End's tapped) none comes, so location stayed on, the blue pill with it. `stop()` stops it there
+/// and then.
+@MainActor
+private final class WalkFollower: NSObject, CLLocationManagerDelegate {
+    private let manager = CLLocationManager()
+    private let moved: (CLLocation) -> Void
+
+    init(moved: @escaping (CLLocation) -> Void) {
+        self.moved = moved
+        super.init()
+        manager.delegate = self
+        manager.activityType = .otherNavigation
+        manager.desiredAccuracy = kCLLocationAccuracyBest
+        // A few steps at a time: enough for turns and for telling which side of the street
+        // you're on, without a fix (and the walking screen redrawn) for every step or wobble
+        manager.distanceFilter = Self.walkingFilter
+        manager.pausesLocationUpdatesAutomatically = false
+        // With the walk's background activity session, so it carries on with the screen off
+        manager.allowsBackgroundLocationUpdates = true
+        manager.showsBackgroundLocationIndicator = true
+        manager.startUpdatingLocation()
+    }
+
+    /// Metres moved between fixes while walking.
+    private static let walkingFilter: CLLocationDistance = 5
+    /// Metres moved between fixes once relaxed.
+    private static let relaxedFilter: CLLocationDistance = 20
+
+    func stop() {
+        manager.stopUpdatingLocation()
+        manager.delegate = nil
+    }
+
+    /// Rough fixes from here on, at the station: a block or so is near enough, and costs far
+    /// less than GPS hunting for a fix underground.
+    func relax() {
+        manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
+        manager.distanceFilter = Self.relaxedFilter
+    }
+
+    nonisolated func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        guard let location = locations.last else { return }
+        Task { @MainActor in
+            // Not one already on its way when stopped
+            guard self.manager.delegate != nil else { return }
+            self.moved(location)
+        }
+    }
+
+    nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {}
 }

@@ -74,6 +74,8 @@ struct BusRide: Codable, Hashable, Sendable {
     var stops: Int?
     /// How long the ride takes by Google's timetable, for timing what comes after it.
     var seconds: Int?
+    /// When it leaves by Google's timetable, for timing the trip in New Trip.
+    var leaves: Date? = nil
 
     struct Place: Codable, Hashable, Sendable {
         var name: String
@@ -89,8 +91,8 @@ struct BusRide: Codable, Hashable, Sendable {
     }
 }
 
-/// A trip with a bus: the bus alone, or with a train before or after it, which is a trip of its
-/// own (`SharedTrip.Option`) to or from where the bus is changed for.
+/// A trip with a bus: the bus alone, with a train before or after it, which is a trip of its
+/// own (`SharedTrip.Option`) to or from where the bus is changed for, or with a second bus.
 struct BusTrip: Codable, Hashable, Sendable {
     var bus: BusRide
     /// The train: ridden to its `destinationID` after the bus, or before it to where the bus
@@ -98,23 +100,69 @@ struct BusTrip: Codable, Hashable, Sendable {
     var train: SharedTrip.Option?
     /// Whether the bus comes first; for a bus alone, true.
     var busFirst: Bool
+    /// The bus changed to after `bus`, for a trip by two buses, without a train.
+    var onward: BusRide? = nil
 
     /// The least a change between the bus and the train takes.
     private static let leastWalk: TimeInterval = 60
+    /// The wait counted for a bus where Google's timetable doesn't say when it leaves, or it
+    /// leaves before you can be there: about half the time between buses on most lines.
+    static let wait: TimeInterval = 5 * 60
 
     /// Where it starts and ends, by name.
     var startName: String { busFirst ? bus.from.name : train?.selection.station?.name ?? bus.from.name }
-    var endName: String { busFirst ? train?.endStation?.name ?? bus.to.name : bus.to.name }
+    var endName: String { busFirst ? train?.endStation?.name ?? onward?.to.name ?? bus.to.name : bus.to.name }
 
-    /// The walk between the bus stop and the station (`TripPlanner.walkSeconds(_:)`), at least
-    /// `leastWalk`; none for a bus alone.
+    /// The walk between the bus stop and the station, or the second bus's stop (`change(from:to:)`);
+    /// none for a bus alone.
     var walk: TimeInterval {
+        if let onward { return Self.change(from: bus.to.location, to: onward.from.location) }
         guard let train else { return 0 }
         let station = busFirst ? train.selection.station : train.endStation
         guard let station else { return Self.leastWalk }
-        let stop = busFirst ? bus.to : bus.from
-        let meters = stop.location.distance(from: CLLocation(latitude: station.lat, longitude: station.lon))
-        return max(Self.leastWalk, TripPlanner.walkSeconds(meters).rounded())
+        return Self.change(from: (busFirst ? bus.to : bus.from).location, to: station.location)
+    }
+
+    /// The walk for a change from `off` to `on` (`TripPlanner.walkSeconds(_:)`), at least
+    /// `leastWalk`.
+    static func change(from off: CLLocation, to on: CLLocation) -> TimeInterval {
+        max(leastWalk, TripPlanner.walkSeconds(off.distance(from: on)).rounded())
+    }
+
+    /// About when it gets from `start` to `end` leaving at `now`, walks included, for ranking
+    /// it with the train trips: each bus when Google's timetable has it leave, or `wait` after
+    /// you're at its stop, for Google's time for the ride (`BusRide.duration`); the train by the
+    /// timetable (`TripPlanner.arrival`). Only an estimate, as Bus Time isn't asked; nil without a
+    /// timetable to time its train by.
+    func arrival(from start: CLLocation, to end: CLLocation, at now: Date, timetable: Timetable?) -> Date? {
+        func ride(_ bus: BusRide, from ready: Date) -> Date {
+            let leaves = bus.leaves.flatMap { $0 >= ready ? $0 : nil } ?? ready.addingTimeInterval(Self.wait)
+            return leaves.addingTimeInterval(bus.duration)
+        }
+        let atStop = now.addingTimeInterval(TripPlanner.walkSeconds(start.distance(from: bus.from.location)))
+        guard let train else {
+            let off = ride(bus, from: atStop)
+            guard let onward else { return off.addingTimeInterval(TripPlanner.walkSeconds(bus.to.location.distance(from: end))) }
+            return ride(onward, from: off.addingTimeInterval(walk))
+                .addingTimeInterval(TripPlanner.walkSeconds(onward.to.location.distance(from: end)))
+        }
+        guard let timetable, let station = train.selection.station, let last = train.endStation else { return nil }
+        let trip = TripPlanner.Trip(selection: train.selection, destination: last)
+        if busFirst {
+            // From the bus stop, the walk to the station as the timetable's trips count it
+            return TripPlanner.arrival(of: trip, from: bus.to.location, to: end, at: ride(bus, from: atStop),
+                                       timetable: timetable)
+        }
+        let atStation = now.addingTimeInterval(TripPlanner.walkSeconds(start.distance(from: station.location)))
+        guard let off = TripPlanner.arrival(of: trip, from: station.location, to: last.location, at: atStation,
+                                            timetable: timetable) else { return nil }
+        return ride(bus, from: off.addingTimeInterval(walk))
+            .addingTimeInterval(TripPlanner.walkSeconds(bus.to.location.distance(from: end)))
+    }
+
+    /// `arrival`'s minutes from `now`, as New Trip shows a trip's.
+    func minutes(from start: CLLocation, to end: CLLocation, at now: Date, timetable: Timetable?) -> Int? {
+        arrival(from: start, to: end, at: now, timetable: timetable).map { Int($0.timeIntervalSince(now) / 60) }
     }
 }
 
@@ -135,12 +183,34 @@ struct BusStopTimes: Codable, Hashable, Sendable {
 }
 
 extension BusStopTimes {
-    /// Bus Time's capitals as a sign has them: "7 AV/9 ST" as "7 Av & 9 St", "via" kept small.
+    /// Bus Time's capitals, or Google's names, as a sign has them: "7 AV/9 ST" as "7 Av & 9 St",
+    /// "via" and "at" kept small, "LGA/TERMINAL B" as "LGA & Terminal B".
     static func readable(_ name: String) -> String {
         name.capitalized
-            .replacingOccurrences(of: " Via ", with: " via ")
             .replacingOccurrences(of: "/", with: " & ")
+            .split(separator: " ")
+            .map { word in word == "Via" || word == "At" ? word.lowercased() : acronyms[String(word)] ?? String(word) }
+            .joined(separator: " ")
     }
+
+    /// Names in capitals on a sign, as `capitalized` writes them.
+    private static let acronyms = ["Lga": "LGA", "Jfk": "JFK", "Lirr": "LIRR", "Cuny": "CUNY", "Suny": "SUNY",
+                                   "Mta": "MTA", "Lic": "LIC", "Si": "SI"]
+
+    /// Where a bus is going, as its sign has it: `readable`, without the service it's on, which
+    /// its badge shows. "Select Bus La Guardia Airport" as "La Guardia Airport", "Rush Jamaica
+    /// Lirr" as "Jamaica LIRR", "Sbs Wlmsbrg Brdg Plz via Nstrnd Via Rgrs" as "Wlmsbrg Brdg Plz
+    /// via Nstrnd via Rgrs".
+    static func destination(_ name: String) -> String {
+        var shown = readable(name)
+        while let service = services.first(where: { shown.hasPrefix($0 + " ") }) {
+            shown = String(shown.dropFirst(service.count + 1))
+        }
+        return shown
+    }
+
+    /// How Bus Time and Google start a headsign with a bus's service, after `readable`.
+    private static let services = ["Select Bus Service", "Select Bus", "Sbs", "+", "Limited", "Ltd", "Rush"]
 }
 
 /// A bus line near you, picked from Transit Directions' Nearby: its stop and next buses each way
@@ -158,12 +228,12 @@ struct NearbyBusPick: Codable, Hashable, Sendable {
         var arrivals: [BusArrival]
 
         /// "Pier 6", or the stop's name without a destination.
-        var name: String { destination.map(BusStopTimes.readable) ?? BusStopTimes.readable(stop.name) }
+        var name: String { destination.map(BusStopTimes.destination) ?? BusStopTimes.readable(stop.name) }
 
         /// As a trip's bus ride, from this stop.
         func ride(line: String) -> BusRide {
             let place = BusRide.Place(name: BusStopTimes.readable(stop.name), latitude: stop.latitude, longitude: stop.longitude)
-            return BusRide(line: line, from: place, to: place, headsign: destination.map(BusStopTimes.readable))
+            return BusRide(line: line, from: place, to: place, headsign: destination.map(BusStopTimes.destination))
         }
     }
 
@@ -221,7 +291,7 @@ struct NearbyBusPlace: Codable, Hashable, Sendable {
     var name: String { ways.first.map { BusStopTimes.readable($0.stop.name) } ?? "" }
 
     /// As `Nearby.Result.walkMinutes` works it out for a station.
-    var walkMinutes: Int { max(1, Int((TripPlanner.walkSeconds(meters) / 60).rounded())) }
+    var walkMinutes: Int { TripPlanner.walkMinutes(meters) }
 
     /// Its lines, soonest first, each with its stop and buses each way.
     func lines(at date: Date) -> [NearbyBusPick] {
@@ -278,9 +348,7 @@ enum BusTimes {
         guard let url = components?.url else { return nil }
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 8)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
-              (response as? HTTPURLResponse)?.statusCode == 200,
-              var times = try? JSONDecoder().decode(BusStopTimes.self, from: data) else { return nil }
+        guard var times = await ServerRoutes.fetch(BusStopTimes.self, with: request) else { return nil }
         times.arrivals = times.arrivals
             .filter { ($0.time ?? .distantPast) > now }
             .sorted { ($0.time ?? .distantFuture) < ($1.time ?? .distantFuture) }
@@ -372,9 +440,7 @@ enum NearbyBuses {
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: wait)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         struct Response: Decodable { var ways: [Way]; var places: [[Way]]? }
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
-              (response as? HTTPURLResponse)?.statusCode == 200,
-              let decoded = try? JSONDecoder().decode(Response.self, from: data) else { return nil }
+        guard let decoded = await ServerRoutes.fetch(Response.self, with: request) else { return nil }
         return (decoded.places ?? [decoded.ways]).filter { !$0.isEmpty }.map(place)
     }
 

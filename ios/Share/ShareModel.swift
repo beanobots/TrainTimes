@@ -173,22 +173,49 @@ final class ShareModel {
     private static func currentLocation() async -> CLLocation? {
         let status = CLLocationManager().authorizationStatus
         guard status == .authorizedWhenInUse || status == .authorizedAlways else { return nil }
-        return await withTaskGroup(of: CLLocation?.self) { group in
-            group.addTask {
-                do {
-                    for try await update in CLLocationUpdate.liveUpdates() {
-                        if let location = update.location { return location }
-                    }
-                } catch {}
-                return nil
+        return await ShareFix.get(within: 5)
+    }
+}
+
+/// One location from a location manager, or nil after `seconds`; the manager's stopped there and
+/// then. Not `CLLocationUpdate.liveUpdates` in a task group raced against a timer: the group
+/// waits for the cancelled loop, which only ends at its next update, so indoors, with none
+/// coming, location stayed on past the timeout (as `OneFix` in the app).
+@MainActor
+private final class ShareFix: NSObject, CLLocationManagerDelegate {
+    private let manager = CLLocationManager()
+    private var waiting: CheckedContinuation<CLLocation?, Never>?
+
+    static func get(within seconds: TimeInterval) async -> CLLocation? {
+        let fix = ShareFix()
+        return await withCheckedContinuation { continuation in
+            fix.waiting = continuation
+            fix.manager.delegate = fix
+            // A trip's start: a block or so is near enough, and comes sooner and cheaper
+            fix.manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
+            fix.manager.startUpdatingLocation()
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(seconds))
+                fix.finish(nil)
             }
-            group.addTask {
-                try? await Task.sleep(for: .seconds(5))
-                return nil
-            }
-            let first = await group.next() ?? nil
-            group.cancelAll()
-            return first
         }
     }
+
+    private func finish(_ location: CLLocation?) {
+        guard let waiting else { return }
+        self.waiting = nil
+        manager.stopUpdatingLocation()
+        manager.delegate = nil
+        waiting.resume(returning: location)
+    }
+
+    nonisolated func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        // Not one from before, cached
+        guard let location = locations.last(where: {
+            $0.horizontalAccuracy >= 0 && $0.timestamp.timeIntervalSinceNow > -60
+        }) else { return }
+        Task { @MainActor in self.finish(location) }
+    }
+
+    nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {}
 }

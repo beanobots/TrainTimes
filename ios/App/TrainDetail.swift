@@ -6,6 +6,7 @@ import SwiftUI
 struct TrainDetail: View {
     @Environment(SettingsStore.self) private var settings
     @Environment(\.accessibilityDifferentiateWithoutColor) private var withoutColor
+    @Environment(\.scenePhase) private var scenePhase
     @State private var selection: Selection
     @State private var board: Board?
     @State private var loadState = LoadState.loading
@@ -59,8 +60,10 @@ struct TrainDetail: View {
         }
         .refreshable { await loadBoard(includingNotices: true) }
         // Times every 30 s; alerts every 10 min (or with the times while counting down).
-        // Keyed on trainID, so a walking-time change doesn't reload
-        .task(id: selection.trainID) {
+        // Keyed on trainID, so a walking-time change doesn't reload; not in the background, and
+        // loaded as soon as the app comes back
+        .task(id: Polling(id: selection.trainID, inForeground: scenePhase != .background)) {
+            guard scenePhase != .background else { return }
             while !Task.isCancelled {
                 await loadBoard()
                 // After a failure, sooner; and as soon as the network's back (a station after a
@@ -316,7 +319,7 @@ struct TrainDetail: View {
         let ways = platforms.flatMap(\.entrances).filter { $0.exitOnly != true }
         let elevators = ways.filter(\.isElevator)
         let candidates = settings.settings.stepFree && !elevators.isEmpty ? elevators : ways
-        let middle = CLLocation(latitude: station.lat, longitude: station.lon)
+        let middle = station.location
         // Ignore fixes older than 10 minutes
         let here = CLLocationManager().location.flatMap { Date.now.timeIntervalSince($0.timestamp) < 10 * 60 ? $0 : nil }
         let from = here ?? middle
@@ -505,11 +508,11 @@ private struct StationMap: View {
 
     var body: some View {
         Map(initialPosition: .region(MKCoordinateRegion(
-            center: CLLocationCoordinate2D(latitude: station.lat, longitude: station.lon),
+            center: station.coordinate,
             latitudinalMeters: 350,
             longitudinalMeters: 350
         ))) {
-            Marker(station.name, systemImage: "tram.fill", coordinate: CLLocationCoordinate2D(latitude: station.lat, longitude: station.lon))
+            Marker(station.name, systemImage: "tram.fill", coordinate: station.coordinate)
                 .tint(LineStyle.of(route).swiftUIColor)
             ForEach(Array(station.entrances.enumerated()), id: \.offset) { _, entrance in
                 Annotation(entrance.isElevator ? "Elevator" : "", coordinate: CLLocationCoordinate2D(latitude: entrance.lat, longitude: entrance.lon)) {

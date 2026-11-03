@@ -62,6 +62,64 @@ enum StreetNames {
         return out.joined(separator: " ")
     }
 
+    /// Streets' names with no kind of street in them.
+    static let bare: Set<String> = ["broadway", "bowery", "the bowery"]
+
+    /// Whether `name`, as `display` gives it or OSM has it, reads as a street's, for saying
+    /// it's crossed: a kind of street in it ("W 72nd St", "West Dr", "72nd Street Transverse"),
+    /// a way along it ("Central Park W"), or one with none ("Broadway"). Not a park's or a
+    /// place's, as OSM names a crosswalk in Central Park "Strawberry Fields".
+    static func isStreet(_ name: String) -> Bool {
+        if bare.contains(name.lowercased()) { return true }
+        let words = key(name).split(separator: " ").map(String.init)
+        let kinds = Set(longhand.values).union(["transverse", "driveway", "way", "loop", "row", "slip", "oval"])
+            .subtracting(["path", "pedestrian", "bridge", "north", "south", "east", "west"])
+        guard words.count > 1, let last = words.last else { return false }
+        return words.contains(where: kinds.contains) || ["north", "south", "east", "west"].contains(last)
+    }
+
+    /// Words written short and long, and the long way, for telling whether two names are one
+    /// street's however they're spelled (`same`).
+    static let longhand: [String: String] = [
+        "st": "street", "ave": "avenue", "av": "avenue", "blvd": "boulevard", "bl": "boulevard", "pkwy": "parkway",
+        "pl": "place", "rd": "road", "dr": "drive", "ter": "terrace", "ct": "court", "ln": "lane", "sq": "square",
+        "expy": "expressway", "expwy": "expressway", "hwy": "highway", "tpke": "turnpike", "cir": "circle",
+        "plz": "plaza", "brdg": "bridge", "brg": "bridge", "br": "bridge", "ped": "pedestrian", "conc": "concourse",
+        "espl": "esplanade", "prom": "promenade", "bdwk": "boardwalk", "pth": "path", "n": "north", "s": "south",
+        "e": "east", "w": "west",
+    ]
+
+    /// `name` as one spelling: lower case, its words written out, numbers without their
+    /// endings. "Hudson Bl W" and "Hudson Boulevard West" are both "hudson boulevard west".
+    static func key(_ name: String) -> String {
+        name.lowercased().split { !$0.isLetter && !$0.isNumber }.map { part in
+            let word = String(part)
+            // "43rd" is 43
+            let digits = word.prefix { $0.isNumber }
+            if !digits.isEmpty, ["", "st", "nd", "rd", "th"].contains(String(word.dropFirst(digits.count))) {
+                return String(digits)
+            }
+            return longhand[word] ?? word
+        }.joined(separator: " ")
+    }
+
+    /// Whether `a` and `b` are the same street's name, however they're spelled: OSM's
+    /// "Brooklyn Bridge Pedestrian Path" and the city's "Brooklyn Brdg Pedestrian Path".
+    static func same(_ a: String?, _ b: String?) -> Bool {
+        guard let a, let b else { return a == b }
+        return a == b || key(a) == key(b)
+    }
+
+    /// Of two spellings of a name, the one with fewer words cut short other than as these are
+    /// ("Brdg", "Bl"; not "St", "W"); `a` where they've as many.
+    static func nicer(_ a: String, _ b: String) -> String {
+        let written = Set(kinds.values).union(["N", "S", "E", "W"])
+        func short(_ name: String) -> Int {
+            name.split(separator: " ").filter { !written.contains(String($0)) && longhand[$0.lowercased()] != nil }.count
+        }
+        return short(b) < short(a) ? b : a
+    }
+
     /// 1st, 2nd, 3rd, 4th, 11th, 12th, 13th, 21st, 101st, 111th.
     static func ordinal(_ number: Int) -> String {
         let suffix = (11...13).contains(number % 100) ? "th"

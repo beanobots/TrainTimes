@@ -11,27 +11,56 @@ enum WalkPreference: String, Codable, CaseIterable, Sendable {
 /// speed and trucks; doubles without a light; shrinks with a walk signal first, or every car
 /// stopped. Ramps onto highways cost most of all.
 enum WalkCosts {
-    /// Metres a second.
-    static let pace = 1.33
-    /// Seconds for a turn onto another street, so a route doesn't zigzag through the grid.
-    static let turn = 3.0
+    /// Metres a second, walking: with `lightWait` at each light, Apple Maps' times for the
+    /// bench's walks within about 4% (tools/walkbench).
+    static let pace = 1.30
+    /// Seconds a walk's time takes for each crossing at a light, waiting for it: the walk's
+    /// time (`Stats.seconds`, which budgets are kept to), not its cost (`signalWait`), so
+    /// waits don't send routes to crossings with none.
+    static let lightWait = 12.0
+    /// Of its cost, what a block along the way a walk was going costs, routed again.
+    static let followShare = 0.85
+    /// Metres from the way it was going a block's middle is to be along it.
+    static let followNear = 10.0
+    /// Seconds for a turn onto another street, so a route doesn't zigzag through the grid:
+    /// every staircase across it is about as long, with as many crossings.
+    static let turn = 10.0
+    /// Metres a block must be to count as a stretch of sidewalk a turn's measured from.
+    static let turnReach = 8.0
     /// Degrees a way turns before it's a turn.
     static let turning = 30.0
 
     // A crossing, per carriageway crossed
     static let perMetreWide = 0.8
+    /// More for each metre of a crossing past `longFrom`, light or no light: out in front of
+    /// turning trucks and cars that much longer, a long crossing's worse than its length.
+    static let perMetreLong = 2.0
+    static let longFrom = 12.0
     static let perExtraLane = 3.0
     static let twoWay = 4.0
     static let truckLocal = 6.0
     static let truckThrough = 12.0
     static let bikeLane = 1.0
     /// For a crossing with no light: its risk this many times, plus `unsignalledExtra`, plus
-    /// `unsignalledWideExtra` where it's wide or three lanes or more.
+    /// `unsignalledWideExtra` where it's wide or three lanes or more. A short one (`short` or
+    /// less) only `unsignalledShortTimes` and `unsignalledShortExtra`, as it's soon over, the
+    /// penalty growing with the width from there to `wide`.
     static let unsignalledTimes = 2.0
     static let unsignalledExtra = 10.0
+    static let unsignalledShortTimes = 1.2
+    static let unsignalledShortExtra = 3.0
     static let unsignalledWideExtra = 25.0
+    /// Metres curb to curb up to which a crossing's short: a side street, a lane and parking
+    /// each side.
+    static let short = 9.0
     /// Metres curb to curb from which a street's wide.
     static let wide = 15.0
+
+    /// How much of the full no-light penalty a crossing `width` metres over takes: none of
+    /// it short, all of it wide.
+    static func unsignalledShare(width: Double) -> Double {
+        min(1, max(0, (width - short) / (wide - short)))
+    }
     static let leadingTimes = 0.8
     static let exclusiveTimes = 0.6
     /// A highway or ramp crossed at grade, on top of its risk.
@@ -48,6 +77,30 @@ enum WalkCosts {
     static let signalWait = 8.0
     /// Metres curb to curb assumed where the city doesn't say.
     static let unknownWidth = 10.0
+    /// More for a crosswalk with no light and no markings either.
+    static let unmarked = 5.0
+    /// More for a crossing at one of Vision Zero's priority intersections, the city's worst
+    /// for people walking.
+    static let priorityIntersection = 8.0
+    /// More for each pedestrian hurt at a crossing in five years (`WalkGraph.nodeCrashes`), up
+    /// to `crashesAtMost` of them: a busy corner has more people to hurt, so it's capped.
+    static let perCrash = 1.5
+    static let crashesAtMost = 12
+    /// Seconds more, step-free, for a crossing with no curb ramp at an end, on top of its cost:
+    /// steered clear of, not ruled out, as the ramp list may have missed one.
+    static let noRamp = 60.0
+    /// Metres further a start or end is taken to be from a side with no sidewalk, so it's put
+    /// on a real one nearby.
+    static let noSidewalkSnap = 20.0
+    /// Seconds for stepping between a city corner and its OSM sidewalk junction, besides the walk.
+    static let link = 1.0
+    /// More for crossing, at the city's corner, a street OSM maps the sidewalks and
+    /// crosswalks of, where it has no crosswalk: most likely there's none.
+    static let unmapped = 60.0
+    /// Metres of a crossing's corner-to-corner line on the sidewalks either end.
+    static let sidewalksAtEnds = 4.0
+    /// The most times its street's width a crossing's taken to be, however far apart its corners.
+    static let skewedAtMost = 1.2
 
     /// Speed in miles per hour: risk per crossing, and per 100 m walked beside it.
     static func speed(_ mph: Int) -> (crossing: Double, beside: Double) {
@@ -64,7 +117,11 @@ enum WalkCosts {
     static let besideTruckRoute = 5.0
     static let besideManyLanes = 3.0
     static let underElevated = 15.0
+    /// Along a Vision Zero priority corridor, per 100 m.
+    static let besideCorridor = 4.0
     static let noSidewalk = 60.0
+    /// A side the city has a sidewalk on but OSM, mapping all round, doesn't: likely none to walk.
+    static let unmappedSide = 30.0
     static let alley = 10.0
     /// Steps take this much longer than the flat.
     static let stepsTimes = 1.5
@@ -102,6 +159,9 @@ final class WalkRouter {
     private let armBearing: [Float]
     /// Walkable blocks by the 100 m cells their lines pass.
     private var cells: [Cell: [Int32]] = [:]
+    /// The city corners linked to each OSM sidewalk junction (`WalkGraph.cornerLink`), the
+    /// other way round.
+    private var linkedCorners: [Int32: [Int32]] = [:]
     private static let cellSize = 100.0
     private static let origin = Walk.Point(lat: 40.7, lon: -74.0)
 
@@ -112,8 +172,17 @@ final class WalkRouter {
     // The search's scratch, reused: by state (corner × how it was come to)
     private var cost: [Float] = []
     private var parent: [Int32] = []
+    /// The arm the walk last came in along a stretch of sidewalk (`turnCost`), at the node
+    /// it came to, or -1: carried over crossings, crosswalks and the short bits between, so a
+    /// turn made through them is still a turn.
+    private var heading: [Int32] = []
     private var stamp: [UInt32] = []
     private var generation: UInt32 = 0
+    /// The blocks along the way a walk was going (`Options.along`), for this search.
+    private var followed: Set<Int> = []
+    /// Each block's sides' metres as walked, corner to corner (`sideMetres`), by block × 2,
+    /// and 1 more for its right; 0 till worked out.
+    private var walkedMetres: [Float] = []
 
     init(graph: WalkGraph) {
         self.graph = graph
@@ -146,6 +215,10 @@ final class WalkRouter {
         cornerX = cx
         cornerY = cy
         armBearing = bearings
+        walkedMetres = [Float](repeating: 0, count: graph.blockCount * 2)
+        for (corner, node) in graph.cornerLink.enumerated() where node != WalkGraph.noLink {
+            linkedCorners[Int32(node), default: []].append(Int32(corner))
+        }
         for block in 0..<graph.blockCount where graph.class(of: block) != .arm {
             let line = graph.line(of: block).map(plane)
             var seen = Set<Cell>()
@@ -184,6 +257,10 @@ final class WalkRouter {
         var preference: WalkPreference = .balanced
         /// No steps or step streets.
         var stepFree = false
+        /// The way a walk was going, routed again from off it: the blocks along it cost
+        /// `WalkCosts.followShare` of what they would, so it's rejoined unless another way's
+        /// clearly better, rather than a new one picked between two much the same.
+        var along: [Walk.Point] = []
     }
 
     /// One piece of a route.
@@ -213,6 +290,8 @@ final class WalkRouter {
     struct Route: Sendable {
         let legs: [Leg]
         let stats: Stats
+        /// Each leg's cost, time and weighted risk, in seconds: what makes a route cost what it does.
+        var costs: [Double] = []
     }
 
     // MARK: Routing
@@ -220,13 +299,15 @@ final class WalkRouter {
     /// The route from `start` to `end` for `options`, kept within its preference's budget of
     /// the fastest route's time. Nil where either's off the graph, or they aren't joined.
     func route(from start: Walk.Point, to end: Walk.Point, options: Options = Options()) -> Route? {
-        guard let fastest = search(from: start, to: end, weight: WalkCosts.weight(.fastest), floors: true, options: options)
+        followed = blocks(along: options.along)
+        defer { followed = [] }
+        guard let fastest = search(from: start, to: end, weight: WalkCosts.weight(.fastest), options: options)
         else { return nil }
         if options.preference == .fastest { return finish(fastest, fastestSeconds: fastest.stats.seconds) }
         let budget = WalkCosts.budget(options.preference, fastest: fastest.stats.seconds)
         var weight = WalkCosts.weight(options.preference)
         for _ in 0..<4 {
-            if let route = search(from: start, to: end, weight: weight, floors: true, options: options),
+            if let route = search(from: start, to: end, weight: weight, options: options),
                route.stats.seconds <= budget {
                 return finish(route, fastestSeconds: fastest.stats.seconds)
             }
@@ -235,10 +316,32 @@ final class WalkRouter {
         return finish(fastest, fastestSeconds: fastest.stats.seconds)
     }
 
+    /// The walkable blocks that run along `line`: their middle and both ends within
+    /// `WalkCosts.followNear` of it.
+    private func blocks(along line: [Walk.Point]) -> Set<Int> {
+        guard line.count >= 2 else { return [] }
+        let near = WalkCosts.followNear
+        func off(_ p: Walk.Point) -> Double {
+            zip(line, line.dropFirst()).map { p.nearest(from: $0, to: $1).gap }.min() ?? .infinity
+        }
+        var seen = Set<Int32>(), found = Set<Int>()
+        for (a, b) in zip(line, line.dropFirst()) {
+            for cell in Self.cells(from: Self.xy(a), to: Self.xy(b), pad: near) {
+                for block in cells[cell] ?? [] where seen.insert(block).inserted {
+                    let points = graph.line(of: Int(block))
+                    guard let first = points.first, let last = points.last else { continue }
+                    let middle = Self.point(along: points, metres: graph.length(of: Int(block)) / 2, offset: 0)
+                    if off(middle) <= near, off(first) <= near * 1.5, off(last) <= near * 1.5 { found.insert(Int(block)) }
+                }
+            }
+        }
+        return found
+    }
+
     private func finish(_ route: Route, fastestSeconds: Double) -> Route {
         var stats = route.stats
         stats.fastestSeconds = fastestSeconds
-        return Route(legs: route.legs, stats: stats)
+        return Route(legs: route.legs, stats: stats, costs: route.costs)
     }
 
     /// A place a route can start or end: on a block's side, `along` metres from its start,
@@ -248,7 +351,6 @@ final class WalkRouter {
         let left: Bool
         let along: Double
         let off: Double
-        let point: Walk.Point
     }
 
     /// The walkable blocks' sides near `point`, nearest first: on its side of each street (both
@@ -256,25 +358,95 @@ final class WalkRouter {
     func snaps(near point: Walk.Point, limit: Int = 4) -> [Snap] {
         let p = (Float((point.lon - Self.origin.lon) * WalkGraph.metresEast), Float((point.lat - Self.origin.lat) * WalkGraph.metresNorth))
         var found: [(Double, Snap)] = []
+        // Those only across a street from it, for if there's nothing else
+        var across: [(Double, Snap)] = []
         var seen = Set<Int32>()
         for cell in Self.cells(from: p, to: p, pad: 150) {
             for block in cells[cell] ?? [] where seen.insert(block).inserted {
                 let b = Int(block)
                 guard let nearest = nearestOnLine(of: b, to: point) else { continue }
                 let isPath = graph.class(of: b) == .path
-                guard nearest.off <= (isPath ? 150 : 60) else { continue }
+                // Not onto a crosswalk, in the street
+                guard nearest.off <= (isPath ? 150 : 60), !graph.flags(of: b).contains(.crosswalk),
+                      reachable(b, along: nearest.along, off: nearest.off) else { continue }
                 let width = max(graph.width(of: b), 4)
                 let sides: [Bool] = isPath ? [true] : abs(nearest.lateral) < min(width / 2 - 1, 2) ? [true, false] : [nearest.lateral > 0]
-                for left in sides {
+                for left in sides where isPath || !graph.isCovered(b, left: left) {
                     let lineOffset = isPath ? 0 : sideOffset(block: b, left: left)
                     let off = isPath ? nearest.off : abs((left ? 1 : -1) * nearest.lateral - lineOffset)
-                    found.append((off + (isPath ? 5 : 0), Snap(block: b, left: left, along: nearest.along, off: off, point: point)))
+                    // Not across another street to it: that's crossing mid-block, unsaid
+                    let at = Self.point(along: graph.line(of: b), metres: nearest.along, offset: left ? lineOffset : -lineOffset)
+                    if crossesStreet(from: point, to: at, except: b) {
+                        across.append((off, Snap(block: b, left: left, along: nearest.along, off: off)))
+                        continue
+                    }
+                    // A side with no sidewalk (a median's) only where nothing's nearer by more
+                    // than `noSidewalkSnap`
+                    let bare = !isPath && graph.offset(of: b, left: left) == 0
+                    found.append((off + (isPath ? 5 : 0) + (bare ? WalkCosts.noSidewalkSnap : 0),
+                                  Snap(block: b, left: left, along: nearest.along, off: off)))
                 }
             }
         }
         // Keep to the walkable part most of them are in
-        let ranked = found.sorted { $0.0 < $1.0 }.map(\.1)
-        return Array(ranked.prefix(limit))
+        let ranked = (found.isEmpty ? across : found).sorted { $0.0 < $1.0 }
+        // Only those about as near as the nearest: a long way off one, straight, through
+        // whatever's between, isn't a shortcut to take
+        guard let nearest = ranked.first?.0 else { return [] }
+        return Array(ranked.filter { $0.0 <= nearest + Self.snapSpread }.prefix(limit).map(\.1))
+    }
+
+    /// Metres further than the nearest side a walk may start or end on another.
+    static let snapSpread = 15.0
+    /// Metres off a bridge's deck (or a tunnel's way) a walk may start or end on it: on it, as
+    /// near as GPS can tell. Further, it's under it or beside it, with no way up.
+    static let onDeck = 10.0
+    /// Metres along from its end on the ground a bridge's way may be started on: the foot of
+    /// its ramp or stairs.
+    static let deckFoot = 20.0
+
+    /// Whether a walk can start or end `along` metres along `block`, `off` its line: on the
+    /// ground, or up on a bridge (down in a tunnel) only nearly on it or by its foot. Not up
+    /// onto the Queensboro Bridge from Roosevelt Island under it.
+    private func reachable(_ block: Int, along: Double, off: Double) -> Bool {
+        let a = graph.atGrade(block, end: 0), b = graph.atGrade(block, end: 1)
+        if (a && b) || off <= Self.onDeck { return true }
+        return (a && along <= Self.deckFoot) || (b && graph.length(of: block) - along <= Self.deckFoot)
+    }
+
+    /// Whether the straight way from `a` to `b` goes over a street's line, but `except`'s: from
+    /// a sidewalk to the one across the street. Not a street `a` is standing in, within a metre
+    /// of its line or half its width: from out in a junction (GPS in the middle of 7 Av and
+    /// 41 St), every corner's over one street's line or another's.
+    private func crossesStreet(from a: Walk.Point, to b: Walk.Point, except: Int) -> Bool {
+        let pa = Self.xy(a), pb = Self.xy(b)
+        let dx = pb.0 - pa.0, dy = pb.1 - pa.1
+        let length = (dx * dx + dy * dy).squareRoot()
+        guard length > 1 else { return false }
+        var seen = Set<Int32>()
+        for cell in Self.cells(from: pa, to: pb) {
+            for block in cells[cell] ?? [] where Int(block) != except && seen.insert(block).inserted {
+                guard graph.class(of: Int(block)) == .walk else { continue }
+                if let nearest = nearestOnLine(of: Int(block), to: a), nearest.off <= max(1, graph.width(of: Int(block)) / 2) {
+                    continue
+                }
+                let line = graph.line(of: Int(block)).map(Self.xy)
+                for (c, d) in zip(line, line.dropFirst()) {
+                    let ex = d.0 - c.0, ey = d.1 - c.1
+                    let den = dx * ey - dy * ex
+                    guard abs(den) > 1e-6 else { continue }
+                    let t = ((c.0 - pa.0) * ey - (c.1 - pa.1) * ex) / den
+                    let u = ((c.0 - pa.0) * dy - (c.1 - pa.1) * dx) / den
+                    if t * length > 1, t < 1, u >= 0, u <= 1 { return true }
+                }
+            }
+        }
+        return false
+    }
+
+    /// A point in the plane the router's cells are in: metres east and north of `origin`.
+    private static func xy(_ p: Walk.Point) -> (Float, Float) {
+        (Float((p.lon - origin.lon) * WalkGraph.metresEast), Float((p.lat - origin.lat) * WalkGraph.metresNorth))
     }
 
     /// The nearest point on a block's line: metres along it, metres off it, and how far to its
@@ -306,6 +478,22 @@ final class WalkRouter {
         return baked > 0 ? baked : max(graph.width(of: block) / 2, 2)
     }
 
+    /// Metres walking a block's side from corner to corner, as its line's drawn (`points(of:)`):
+    /// more than its street's line round the outside of a bend, and where its corners are far
+    /// out from the line's ends (round Columbus Circle, a 2 m bit of it 56 m corner to corner).
+    /// Never less than the line, so the search's estimate holds.
+    func sideMetres(block: Int, left: Bool) -> Double {
+        let slot = block * 2 + (left ? 0 : 1)
+        if walkedMetres[slot] > 0 { return Double(walkedMetres[slot]) }
+        let length = graph.length(of: block)
+        let (from, to) = graph.sideCorners(of: block, left: left)
+        let drawn = Self.metres(points(of: .side(block: block, left: left, from: corner(from), to: corner(to),
+                                                 fromAlong: 0, toAlong: length)))
+        let metres = max(length, drawn, 0.1)
+        walkedMetres[slot] = Float(metres)
+        return metres
+    }
+
     // MARK: The search
 
     /// A move from a state: walking along a corner's own arm or the next, or crossing either.
@@ -319,19 +507,25 @@ final class WalkRouter {
         static func < (a: Entry, b: Entry) -> Bool { a.f < b.f }
     }
 
-    private func search(from start: Walk.Point, to end: Walk.Point, weight: Double, floors: Bool, options: Options) -> Route? {
+    private func search(from start: Walk.Point, to end: Walk.Point, weight: Double, options: Options) -> Route? {
         let starts = snaps(near: start), ends = snaps(near: end)
-        guard let first = starts.first else { return nil }
-        // Both ends in the same walkable part: the first start's
-        let part = graph.nodePart[Int(graph.blockA[first.block])]
-        let sources = starts.filter { graph.nodePart[Int(graph.blockA[$0.block])] == part }
-        let targets = ends.filter { graph.nodePart[Int(graph.blockA[$0.block])] == part }
-        guard !sources.isEmpty, !targets.isEmpty else { return nil }
+        // Both ends in one walkable part: of those both are near, the one they're nearest
+        // (a start by a loose bit of park path still goes by the streets)
+        func part(_ snap: Snap) -> UInt32 { graph.nodePart[Int(graph.blockA[snap.block])] }
+        let shared = Set(starts.map(part)).intersection(ends.map(part))
+        guard let chosen = shared.min(by: { a, b in
+            let da = (starts.first { part($0) == a }?.off ?? .infinity) + (ends.first { part($0) == a }?.off ?? .infinity)
+            let db = (starts.first { part($0) == b }?.off ?? .infinity) + (ends.first { part($0) == b }?.off ?? .infinity)
+            return da < db
+        }) else { return nil }
+        let sources = starts.filter { part($0) == chosen }
+        let targets = ends.filter { part($0) == chosen }
 
         let states = graph.armBlock.count * 3
         if cost.count != states {
             cost = [Float](repeating: .infinity, count: states)
             parent = [Int32](repeating: -1, count: states)
+            heading = [Int32](repeating: -1, count: states)
             stamp = [UInt32](repeating: 0, count: states)
             generation = 0
         }
@@ -340,20 +534,22 @@ final class WalkRouter {
             stamp = [UInt32](repeating: 0, count: states)
             generation = 1
         }
-        var moves = [Int32: Move]()
         var heap = Heap<Entry>()
         let endXY = (Float((end.lon - Self.origin.lon) * WalkGraph.metresEast), Float((end.lat - Self.origin.lat) * WalkGraph.metresNorth))
+        // Of a metre's time, the least it can cost: 0.9 for slack, and less along the way a
+        // walk was going (`followShare`), so the estimate's never more than what's left
+        let lowest = Float(0.9 * (followed.isEmpty ? 1 : WalkCosts.followShare))
         func h(_ corner: Int) -> Float {
             let dx = cornerX[corner] - endXY.0, dy = cornerY[corner] - endXY.1
-            return (dx * dx + dy * dy).squareRoot() / Float(WalkCosts.pace) * 0.9
+            return (dx * dx + dy * dy).squareRoot() / Float(WalkCosts.pace) * lowest
         }
-        func relax(_ state: Int, _ value: Double, from previous: Int32, _ move: Move) {
+        func relax(_ state: Int, _ value: Double, from previous: Int32, _ move: Move, heading came: Int32) {
             let v = Float(value)
             if stamp[state] != generation || v < cost[state] {
                 stamp[state] = generation
                 cost[state] = v
                 parent[state] = previous
-                moves[Int32(state)] = move
+                heading[state] = came
                 heap.push(Entry(f: v + h(state / 3), state: Int32(state)))
             }
         }
@@ -364,7 +560,7 @@ final class WalkRouter {
             let access = snap.off / WalkCosts.pace
             let length = graph.length(of: snap.block)
             let (from, to) = graph.sideCorners(of: snap.block, left: snap.left)
-            let perMetre = sideCost(block: snap.block, left: snap.left, weight: weight, floors: floors, options: options) / max(length, 1)
+            let perMetre = sideCost(block: snap.block, left: snap.left, weight: weight, options: options) / max(length, 1)
             guard perMetre.isFinite else { continue }
             // Toward its end: arriving along its arm there; back toward its start, likewise
             let toState = to * 3 + (snap.left ? 0 : 1), fromState = from * 3 + (snap.left ? 1 : 0)
@@ -372,7 +568,12 @@ final class WalkRouter {
             if toCost < (startCost[toState]?.0 ?? .infinity) { startCost[toState] = (toCost, snap) }
             if fromCost < (startCost[fromState]?.0 ?? .infinity) { startCost[fromState] = (fromCost, snap) }
         }
-        for (state, (value, _)) in startCost { relax(state, value, from: -1, .start) }
+        // Coming along the start's block: its arm at the corner, as `along` sets it
+        for (state, (value, snap)) in startCost {
+            let corner = state / 3
+            let into = state % 3 == 0 ? corner : graph.next(corner, at: graph.node(ofArm: corner))
+            relax(state, value, from: -1, .start, heading: Self.setsHeading(graph, snap.block) ? Int32(into) : -1)
+        }
 
         // Off each end's side, from the corner at either end
         var exits: [Int: [(Double, Snap)]] = [:]
@@ -380,7 +581,7 @@ final class WalkRouter {
             let access = snap.off / WalkCosts.pace
             let length = graph.length(of: snap.block)
             let (from, to) = graph.sideCorners(of: snap.block, left: snap.left)
-            let perMetre = sideCost(block: snap.block, left: snap.left, weight: weight, floors: floors, options: options) / max(length, 1)
+            let perMetre = sideCost(block: snap.block, left: snap.left, weight: weight, options: options) / max(length, 1)
             guard perMetre.isFinite else { continue }
             exits[from, default: []].append((access + perMetre * snap.along, snap))
             exits[to, default: []].append((access + perMetre * (length - snap.along), snap))
@@ -390,7 +591,7 @@ final class WalkRouter {
         for source in sources {
             for target in targets where target.block == source.block && target.left == source.left {
                 let length = graph.length(of: source.block)
-                let perMetre = sideCost(block: source.block, left: source.left, weight: weight, floors: floors, options: options) / max(length, 1)
+                let perMetre = sideCost(block: source.block, left: source.left, weight: weight, options: options) / max(length, 1)
                 let value = (source.off + target.off) / WalkCosts.pace + perMetre * abs(target.along - source.along)
                 if value < (best?.cost ?? .infinity) { best = (value, -1, target, source) }
             }
@@ -402,6 +603,7 @@ final class WalkRouter {
             if let best, Double(entry.f) >= best.cost { break }
             let g = Double(cost[state])
             let corner = state / 3, came = state % 3
+            let into = heading[state]
             if let out = exits[corner] {
                 for (exitCost, snap) in out where g + exitCost < (best?.cost ?? .infinity) {
                     best = (g + exitCost, Int32(state), snap, nil)
@@ -422,101 +624,210 @@ final class WalkRouter {
                 let (from, to) = graph.sideCorners(of: block, left: leftOfBlock)
                 let destination = end == 0 ? to : from
                 let arrive = move == .alongOwn ? 1 : 0
-                var step = sideCost(block: block, left: leftOfBlock, weight: weight, floors: floors, options: options)
+                var step = sideCost(block: block, left: leftOfBlock, weight: weight, options: options)
                 guard step.isFinite else { continue }
-                if came < 2 {
-                    let into = came == 0 ? own : next
-                    step += turnCost(into: into, outOf: arm)
+                // A stretch of sidewalk turns from the last one; crosswalks and bits between
+                // carry it on
+                var onward = into
+                if Self.setsHeading(graph, block) {
+                    if into >= 0 { step += turnCost(into: Int(into), outOf: arm) }
+                    onward = Int32(arrive == 0 ? destination : graph.next(destination, at: graph.node(ofArm: destination)))
                 }
-                relax(destination * 3 + arrive, g + step, from: Int32(state), move)
+                relax(destination * 3 + arrive, g + step, from: Int32(state), move, heading: onward)
+            }
+            // Between a city corner and its OSM sidewalk junction, either way
+            let linked = graph.cornerLink[corner]
+            if linked != WalkGraph.noLink {
+                let step = linkCost(corner: corner, node: Int(linked))
+                for arm in graph.arms(of: Int(linked)) {
+                    relax(arm * 3 + 2, g + step, from: Int32(state), .start, heading: into)
+                }
+            }
+            if let corners = linkedCorners[Int32(node)] {
+                for other in corners {
+                    relax(Int(other) * 3 + 2, g + linkCost(corner: Int(other), node: node), from: Int32(state), .start, heading: into)
+                }
             }
             // Over either arm, at a junction (or a signalled crosswalk mid-block)
             guard degree >= 3 || (degree == 2 && graph.nodeSignal[node] != 0) else { continue }
             for (arm, move) in [(own, Move.crossOwn), (next, Move.crossNext)] {
                 let destination = move == .crossOwn ? graph.previous(own, at: node) : next
                 guard destination != corner,
-                      let step = crossCost(node: node, arm: arm, from: corner, to: destination, weight: weight, floors: floors)
+                      let step = crossCost(node: node, arm: arm, from: corner, to: destination, weight: weight,
+                                           stepFree: options.stepFree)
                 else { continue }
-                relax(destination * 3 + 2, g + step, from: Int32(state), move)
+                relax(destination * 3 + 2, g + step, from: Int32(state), move, heading: into)
             }
         }
         guard let best else { return nil }
-        return reconstruct(best: best, sources: startCost, weight: weight, floors: floors, options: options, start: start, end: end)
+        return reconstruct(best: best, sources: startCost, weight: weight, options: options, start: start, end: end)
+    }
+
+    /// Whether walking `block` is a stretch of sidewalk a turn's measured from (`heading`): not
+    /// a crosswalk, named for the street it crosses, nor a connector or a bit shorter than
+    /// `WalkCosts.turnReach`, as at a rounded corner.
+    static func setsHeading(_ graph: WalkGraph, _ block: Int) -> Bool {
+        let flags = graph.flags(of: block)
+        return !flags.contains(.crosswalk) && !flags.contains(.connector) && graph.length(of: block) >= WalkCosts.turnReach
     }
 
     /// The turn penalty for coming into a junction along `into`'s street and leaving along `arm`'s.
     private func turnCost(into: Int, outOf arm: Int) -> Double {
         let a = Int(graph.armBlock[into]), b = Int(graph.armBlock[arm])
-        guard graph.name(of: a) != graph.name(of: b) || graph.name(of: a).isEmpty else { return 0 }
+        // Along the same street isn't a turn, however it bends; unnamed paths might be anything
+        guard graph.blockName[a] != graph.blockName[b] || graph.blockName[a] == 0 else { return 0 }
         let came = (Double(armBearing[into]) + 180).truncatingRemainder(dividingBy: 360)
         let degrees = abs((Double(armBearing[arm]) - came + 540).truncatingRemainder(dividingBy: 360) - 180)
         return degrees > WalkCosts.turning ? WalkCosts.turn : 0
     }
 
-    /// Walking a block's side, end to end: its time, and its risk per 100 m weighted.
-    /// Infinite where it can't be walked.
-    func sideCost(block: Int, left: Bool, weight: Double, floors: Bool, options: Options) -> Double {
+    /// Walking a block's side, end to end: its time, and its risk per 100 m weighted. Infinite
+    /// where it can't be walked: steps when step-free, a street's side OSM's sidewalk takes.
+    /// One of OSM's crosswalks costs what crossing its street does.
+    func sideCost(block: Int, left: Bool, weight: Double, options: Options) -> Double {
+        let cost = fullSideCost(block: block, left: left, weight: weight, options: options)
+        return followed.contains(block) ? cost * WalkCosts.followShare : cost
+    }
+
+    /// `sideCost`, not taking the way it was going into account.
+    private func fullSideCost(block: Int, left: Bool, weight: Double, options: Options) -> Double {
         let flags = graph.flags(of: block)
         if options.stepFree && flags.contains(.steps) { return .infinity }
-        let metres = graph.length(of: block)
+        if flags.contains(.crosswalk) { return crosswalkCost(block: block, weight: weight, stepFree: options.stepFree) }
+        let metres = sideMetres(block: block, left: left)
         var seconds = metres / WalkCosts.pace
         if flags.contains(.steps) { seconds *= WalkCosts.stepsTimes }
-        guard graph.class(of: block) == .walk else { return seconds }
+        let isStreet = graph.class(of: block) == .walk
+        guard isStreet || flags.contains(.osmSidewalk) else { return seconds }
+        if isStreet && graph.isCovered(block, left: left) { return .infinity }
         var risk = WalkCosts.besideTraffic
         if flags.contains(.truckLocal) || flags.contains(.truckThrough) { risk += WalkCosts.besideTruckRoute }
         risk += WalkCosts.speed(Int(graph.blockSpeed[block])).beside
         if graph.blockLanes[block] >= 4 { risk += WalkCosts.besideManyLanes }
         if flags.contains(.underElevated) { risk += WalkCosts.underElevated }
+        if graph.safety(of: block).contains(.corridor) { risk += WalkCosts.besideCorridor }
         if flags.contains(.alley) { risk += WalkCosts.alley }
         // The bit of street through a median is the crosswalk, not a sidewalk
-        if graph.offset(of: block, left: left) == 0 && !flags.contains(.median) { risk += WalkCosts.noSidewalk }
+        if isStreet && graph.offset(of: block, left: left) == 0 && !flags.contains(.median) { risk += WalkCosts.noSidewalk }
+        if isStreet && graph.isUnmapped(block, left: left) { risk += WalkCosts.unmappedSide }
         return seconds + weight * risk * metres / 100
     }
 
-    /// Crossing an arm at a junction, from one corner to the next: its time and weighted
-    /// risk. Nil where there's nothing to cross (a path, a driveway) costs nothing.
-    func crossCost(node: Int, arm: Int, from: Int, to: Int, weight: Double, floors: Bool) -> Double? {
-        let block = Int(graph.armBlock[arm])
-        let flags = graph.flags(of: block)
-        let rw = graph.blockRW[block]
-        switch graph.class(of: block) {
-        case .path:
-            return 0.5
-        case .arm where rw == 8 || rw == 13:
-            // A driveway, a U-turn through a median
-            return 2
-        default:
-            break
-        }
-        let width = graph.width(of: block) > 0 ? graph.width(of: block) : WalkCosts.unknownWidth
-        let lanes = Int(graph.blockLanes[block])
-        let signal = Sidewalks.Signal.Kind(rawValue: Int(graph.nodeSignal[node]))
-        var risk = WalkCosts.perMetreWide * width + WalkCosts.perExtraLane * Double(max(0, lanes - 1))
-        if !flags.contains(.oneWay) && graph.class(of: block) == .walk { risk += WalkCosts.twoWay }
-        risk += WalkCosts.speed(Int(graph.blockSpeed[block])).crossing
+    /// What's crossed: the street's measure and traffic, and what's there for someone on foot.
+    struct Crossing {
+        var width: Double
+        var lanes: Int
+        var speed: Int
+        var twoWay: Bool
+        var flags: WalkGraph.BlockFlags
+        var signal: Sidewalks.Signal.Kind
+        var ramp = false
+        var unmarked = false
+        /// A median or island to wait on partway.
+        var refuge = false
+        /// At a Vision Zero priority intersection.
+        var priority = false
+        /// Pedestrians hurt there in five years.
+        var crashes = 0
+        /// No curb ramp at an end.
+        var noRamp = false
+        /// The fixed part of a crossing's cost to pay: all of it, or half from or to a median.
+        var fixed: Double
+    }
+
+    /// A crossing's time and weighted risk (`WalkCosts`).
+    func cost(of crossing: Crossing, weight: Double, stepFree: Bool = false) -> Double {
+        let width = crossing.width, lanes = crossing.lanes, flags = crossing.flags, signal = crossing.signal
+        var risk = WalkCosts.perMetreWide * width + WalkCosts.perMetreLong * max(0, width - WalkCosts.longFrom)
+            + WalkCosts.perExtraLane * Double(max(0, lanes - 1))
+        if crossing.twoWay { risk += WalkCosts.twoWay }
+        risk += WalkCosts.speed(crossing.speed).crossing
         if flags.contains(.truckThrough) { risk += WalkCosts.truckThrough } else if flags.contains(.truckLocal) { risk += WalkCosts.truckLocal }
         if flags.contains(.bikeLane) { risk += WalkCosts.bikeLane }
         let isWide = width >= WalkCosts.wide || lanes >= 3
         var floor = 0.0
         if !signal.contains(.signal) {
-            risk = risk * WalkCosts.unsignalledTimes + WalkCosts.unsignalledExtra
+            // Soon over where it's short; the full penalty from wide
+            let share = WalkCosts.unsignalledShare(width: width)
+            let times = WalkCosts.unsignalledShortTimes + (WalkCosts.unsignalledTimes - WalkCosts.unsignalledShortTimes) * share
+            let extra = WalkCosts.unsignalledShortExtra + (WalkCosts.unsignalledExtra - WalkCosts.unsignalledShortExtra) * share
+            risk = risk * times + extra
+            if crossing.unmarked { risk += WalkCosts.unmarked }
             if isWide {
                 risk += WalkCosts.unsignalledWideExtra
-                if floors { floor += WalkCosts.unsignalledWideExtra * 0.5 }
+                floor += WalkCosts.unsignalledWideExtra * 0.5
             }
         } else if signal.contains(.exclusive) {
             risk *= WalkCosts.exclusiveTimes
         } else if signal.contains(.leading) {
             risk *= WalkCosts.leadingTimes
         }
-        if graph.class(of: block) == .arm {
+        if crossing.ramp {
             let ramp = signal.contains(.signal) ? WalkCosts.rampSignalled : WalkCosts.rampUnsignalled
             risk += ramp
-            if floors { floor += ramp }
+            floor += ramp
         }
+        // Where people walking have been hurt, light or no light
+        if crossing.priority { risk += WalkCosts.priorityIntersection }
+        risk += WalkCosts.perCrash * Double(min(crossing.crashes, WalkCosts.crashesAtMost))
+        if crossing.refuge { risk *= WalkCosts.refugeShare }
+        let wait = signal.contains(.signal) ? WalkCosts.signalWait : 0
+        let ramp = stepFree && crossing.noRamp ? WalkCosts.noRamp : 0
+        let seconds = width / WalkCosts.pace
+        // Fastest still keeps off ramps and wide streets with no light
+        let weighted = max(weight * risk, min(floor, risk))
+        return seconds + wait + weighted + weight * crossing.fixed + ramp
+    }
+
+    /// One of OSM's crosswalks: as long as it really is, over the street it's over, with its
+    /// own light and markings.
+    func crosswalk(_ block: Int) -> Crossing {
+        let flags = graph.flags(of: block), bits = graph.crossing(of: block)
+        var signal = Sidewalks.Signal.Kind()
+        if bits.contains(.signal) { signal.insert(.signal) }
+        if bits.contains(.leading) { signal.insert(.leading) }
+        if bits.contains(.exclusive) { signal.insert(.exclusive) }
+        let refuge = bits.contains(.island)
+        let safety = graph.safety(of: block)
+        return Crossing(width: max(graph.length(of: block), 1), lanes: max(Int(graph.blockLanes[block]), 1),
+                        speed: Int(graph.blockSpeed[block]), twoWay: !flags.contains(.oneWay) && graph.blockWidth[block] > 0,
+                        flags: flags, signal: signal, ramp: bits.contains(.ramp), unmarked: bits.contains(.unmarked),
+                        refuge: refuge, priority: safety.contains(.priority), crashes: Int(graph.blockCrashes[block]),
+                        noRamp: !safety.contains(.rampAtStart) || !safety.contains(.rampAtEnd),
+                        fixed: refuge ? WalkCosts.fixed / 2 : WalkCosts.fixed)
+    }
+
+    func crosswalkCost(block: Int, weight: Double, stepFree: Bool = false) -> Double {
+        cost(of: crosswalk(block), weight: weight, stepFree: stepFree)
+    }
+
+    /// Crossing an arm at a junction, from one corner to the next: its time and weighted
+    /// risk. A street OSM's sidewalks take a side of is crossed at OSM's crosswalks; at the
+    /// city's corner only as a last resort (`unmapped` more), where OSM has none to get to.
+    func crossCost(node: Int, arm: Int, from: Int, to: Int, weight: Double, stepFree: Bool = false) -> Double? {
+        let block = Int(graph.armBlock[arm])
+        let flags = graph.flags(of: block)
+        let rw = graph.blockRW[block]
+        // These cost no less than walking from corner to corner, which the search's estimate
+        // (`h`) counts on: less, and it could settle on a route a few seconds worse
+        let walking = crossingMetres(from: from, to: to) / WalkCosts.pace
+        switch graph.crossingClass(of: block) {
+        case .path:
+            return max(0.5, walking)
+        case .arm where rw == 8 || rw == 13:
+            // A driveway, a U-turn through a median
+            return max(2, walking)
+        case .arm where graph.nodeLevel[node] != WalkGraph.grade:
+            // Off the ground (a bridge's walkway touching its roadway): passed, not crossed
+            return max(0.5, walking)
+        default:
+            break
+        }
+        // Either side: a divided road's half has its median side unmapped, but OSM's crosswalks
+        // are still the way over it
+        let unmapped = flags.contains(.coveredLeft) || flags.contains(.coveredRight) ? WalkCosts.unmapped : 0
         // Medians either end: a refuge halfway, and the crossing's fixed cost paid once
         let fromKind = graph.kind(ofCorner: from), toKind = graph.kind(ofCorner: to)
-        if fromKind == .refuge || toKind == .refuge { risk *= WalkCosts.refugeShare }
         var fixed = 0.0
         for kind in [fromKind, toKind] {
             switch kind {
@@ -525,22 +836,63 @@ final class WalkRouter {
             case .refuge: break
             }
         }
-        let wait = signal.contains(.signal) ? WalkCosts.signalWait : 0
-        let seconds = width / WalkCosts.pace
-        // Fastest still keeps off ramps and wide streets with no light
-        let weighted = max(weight * risk, floors ? min(floor, risk) : 0)
-        return seconds + wait + weighted + weight * fixed
+        let crossing = Crossing(
+            // As wide as the city says, or as far as it really is from corner to corner
+            width: crossingWidth(block: block, from: from, to: to), lanes: Int(graph.blockLanes[block]),
+            speed: Int(graph.blockSpeed[block]), twoWay: !flags.contains(.oneWay) && graph.crossingClass(of: block) == .walk,
+            flags: flags, signal: Sidewalks.Signal.Kind(rawValue: Int(graph.nodeSignal[node])),
+            ramp: graph.crossingClass(of: block) == .arm, refuge: fromKind == .refuge || toKind == .refuge,
+            priority: graph.safety(ofNode: node).contains(.priority), crashes: Int(graph.nodeCrashes[node]),
+            // Off a sidewalk corner with no ramp; a median's level with the street
+            noRamp: (fromKind == .sidewalk && !graph.hasRamp(from)) || (toKind == .sidewalk && !graph.hasRamp(to)),
+            fixed: fixed)
+        return cost(of: crossing, weight: weight, stepFree: stepFree) + unmapped
+    }
+
+    /// Metres over a street from one corner to another: its width as the city has it, or
+    /// further where the corners are (a skewed crossing, round a slip lane), less the
+    /// sidewalks either end, but not more than `skewedAtMost` times its width (corners far out
+    /// in a sharp wedge, where the crosswalk's really nearer square).
+    func crossingWidth(block: Int, from: Int, to: Int) -> Double {
+        let listed = graph.width(of: block) > 0 ? graph.width(of: block) : WalkCosts.unknownWidth
+        let corners = crossingMetres(from: from, to: to) - WalkCosts.sidewalksAtEnds
+        return min(max(listed, corners), listed * WalkCosts.skewedAtMost)
+    }
+
+    /// Stepping between a city corner and an OSM sidewalk junction.
+    func linkCost(corner: Int, node: Int) -> Double {
+        let dx = Double(cornerX[corner] - nodeX[node]), dy = Double(cornerY[corner] - nodeY[node])
+        return (dx * dx + dy * dy).squareRoot() / WalkCosts.pace + WalkCosts.link
+    }
+
+    /// Metres between two corners.
+    func crossingMetres(from: Int, to: Int) -> Double {
+        let dx = Double(cornerX[from] - cornerX[to]), dy = Double(cornerY[from] - cornerY[to])
+        return (dx * dx + dy * dy).squareRoot()
     }
 
     /// The route's legs and stats, from the search's last state back to its start.
     private func reconstruct(best: (cost: Double, state: Int32, exit: Snap, direct: Snap?),
-                             sources: [Int: (Double, Snap)], weight: Double, floors: Bool, options: Options,
+                             sources: [Int: (Double, Snap)], weight: Double, options: Options,
                              start: Walk.Point, end: Walk.Point) -> Route {
         var stats = Stats()
         stats.weight = weight
-        func addSide(block: Int, metres: Double) {
-            stats.metres += metres
-            stats.seconds += metres / WalkCosts.pace * (graph.flags(of: block).contains(.steps) ? WalkCosts.stepsTimes : 1)
+        /// `metres` of its line along a block's side, walked as far as its side is (`sideMetres`).
+        func addSide(block: Int, left: Bool, metres: Double) {
+            let walked = metres * sideMetres(block: block, left: left) / max(graph.length(of: block), 0.1)
+            stats.metres += walked
+            stats.seconds += walked / WalkCosts.pace * (graph.flags(of: block).contains(.steps) ? WalkCosts.stepsTimes : 1)
+            // One of OSM's crosswalks: a crossing, as one at a corner is
+            guard graph.flags(of: block).contains(.crosswalk) else { return }
+            let crossing = crosswalk(block)
+            stats.crossings += 1
+            if crossing.signal.contains(.signal) {
+                stats.seconds += WalkCosts.lightWait
+            } else {
+                stats.unsignalled += 1
+                if crossing.width >= WalkCosts.wide || crossing.lanes >= 3 { stats.unsignalledWide += 1 }
+            }
+            if crossing.ramp { stats.ramps += 1 }
         }
         func sidePoint(_ snap: Snap) -> Walk.Point {
             let line = graph.line(of: snap.block)
@@ -551,13 +903,16 @@ final class WalkRouter {
         if let direct = best.direct {
             let exit = best.exit
             let a = sidePoint(direct), b = sidePoint(exit)
-            addSide(block: direct.block, metres: abs(exit.along - direct.along))
+            addSide(block: direct.block, left: direct.left, metres: abs(exit.along - direct.along))
             stats.metres += (direct.off + exit.off)
             stats.seconds += (direct.off + exit.off) / WalkCosts.pace
             stats.risk = best.cost - stats.seconds
+            let length = max(graph.length(of: direct.block), 1)
+            let along = sideCost(block: direct.block, left: direct.left, weight: weight, options: options)
+                * abs(exit.along - direct.along) / length
             return Route(legs: [.access(start, a), .side(block: direct.block, left: direct.left, from: a, to: b,
                                                           fromAlong: direct.along, toAlong: exit.along), .access(b, end)],
-                         stats: stats)
+                         stats: stats, costs: [direct.off / WalkCosts.pace, along, exit.off / WalkCosts.pace])
         }
         var chain: [Int] = []
         var state = Int(best.state)
@@ -567,6 +922,10 @@ final class WalkRouter {
         }
         chain.reverse()
         var legs: [Leg] = []
+        var costs: [Double] = []
+        func partial(_ block: Int, _ left: Bool, _ metres: Double) -> Double {
+            sideCost(block: block, left: left, weight: weight, options: options) * metres / max(graph.length(of: block), 1)
+        }
         // From the start along its side to the first corner
         let first = chain[0]
         if let (_, snap) = sources[first] {
@@ -577,7 +936,8 @@ final class WalkRouter {
             let towardStart = first / 3 == from
             legs.append(.side(block: snap.block, left: snap.left, from: p, to: corner(first / 3),
                               fromAlong: snap.along, toAlong: towardStart ? 0 : length))
-            addSide(block: snap.block, metres: towardStart ? snap.along : length - snap.along)
+            addSide(block: snap.block, left: snap.left, metres: towardStart ? snap.along : length - snap.along)
+            costs += [snap.off / WalkCosts.pace, partial(snap.block, snap.left, towardStart ? snap.along : length - snap.along)]
             stats.metres += snap.off
             stats.seconds += snap.off / WalkCosts.pace
         }
@@ -598,27 +958,49 @@ final class WalkRouter {
                     let length = graph.length(of: block)
                     legs.append(.side(block: block, left: leftOfBlock, from: self.corner(corner), to: self.corner(target),
                                       fromAlong: end == 0 ? 0 : length, toAlong: end == 0 ? length : 0))
-                    addSide(block: block, metres: length)
+                    addSide(block: block, left: leftOfBlock, metres: length)
+                    costs.append(partial(block, leftOfBlock, length))
                     done = true
                     break
                 }
             }
             if done { continue }
+            // A step between a city corner and an OSM sidewalk junction
+            if graph.node(ofArm: target) != node {
+                let from = self.corner(corner), to = self.corner(target)
+                legs.append(.access(from, to))
+                let linked = graph.cornerLink[corner] != WalkGraph.noLink && Int(graph.cornerLink[corner]) == graph.node(ofArm: target)
+                let step = linked ? linkCost(corner: corner, node: graph.node(ofArm: target))
+                    : linkCost(corner: target, node: node)
+                costs.append(step)
+                stats.metres += from.metres(to: to)
+                stats.seconds += from.metres(to: to) / WalkCosts.pace
+                continue
+            }
             let arm = target == next ? next : own
             legs.append(.cross(node: node, arm: arm, from: self.corner(corner), to: self.corner(target)))
+            costs.append(crossCost(node: node, arm: arm, from: corner, to: target, weight: weight,
+                                   stepFree: options.stepFree) ?? 0)
             let block = Int(graph.armBlock[arm])
-            let width = graph.width(of: block) > 0 ? graph.width(of: block) : WalkCosts.unknownWidth
-            if graph.class(of: block) != .path && !(graph.class(of: block) == .arm && [8, 13].contains(graph.blockRW[block])) {
+            let width = crossingWidth(block: block, from: corner, to: target)
+            if passes(node: node, block: block) {
+                // Not a crossing, but still walked, corner to corner
+                let metres = crossingMetres(from: corner, to: target)
+                stats.metres += metres
+                stats.seconds += metres / WalkCosts.pace
+            } else {
                 stats.metres += width
                 stats.seconds += width / WalkCosts.pace
                 // A divided road's halves count once, from the side it starts on
                 if graph.kind(ofCorner: corner) != .refuge { stats.crossings += 1 }
                 let signal = Sidewalks.Signal.Kind(rawValue: Int(graph.nodeSignal[node]))
-                if !signal.contains(.signal) {
+                if signal.contains(.signal) {
+                    if graph.kind(ofCorner: corner) != .refuge { stats.seconds += WalkCosts.lightWait }
+                } else {
                     if graph.kind(ofCorner: corner) != .refuge { stats.unsignalled += 1 }
                     if width >= WalkCosts.wide || graph.blockLanes[block] >= 3 { stats.unsignalledWide += 1 }
                 }
-                if graph.class(of: block) == .arm { stats.ramps += 1 }
+                if graph.crossingClass(of: block) == .arm { stats.ramps += 1 }
             }
         }
         // From the last corner along the end's side, off to the end
@@ -629,12 +1011,20 @@ final class WalkRouter {
         let length = graph.length(of: exit.block)
         legs.append(.side(block: exit.block, left: exit.left, from: corner(last), to: p,
                           fromAlong: last == from ? 0 : length, toAlong: exit.along))
-        addSide(block: exit.block, metres: last == from ? exit.along : length - exit.along)
+        addSide(block: exit.block, left: exit.left, metres: last == from ? exit.along : length - exit.along)
         legs.append(.access(p, end))
+        costs += [partial(exit.block, exit.left, last == from ? exit.along : length - exit.along), exit.off / WalkCosts.pace]
         stats.metres += exit.off
         stats.seconds += exit.off / WalkCosts.pace
         stats.risk = max(0, best.cost - stats.seconds)
-        return Route(legs: legs, stats: stats)
+        return Route(legs: legs, stats: stats, costs: costs)
+    }
+
+    /// Whether going over `block` at `node` isn't crossing a street: a path, a driveway or
+    /// U-turn, or a road met off the ground.
+    func passes(node: Int, block: Int) -> Bool {
+        graph.crossingClass(of: block) == .path
+            || graph.crossingClass(of: block) == .arm && ([8, 13].contains(graph.blockRW[block]) || graph.nodeLevel[node] != WalkGraph.grade)
     }
 
     /// A corner's place.
@@ -649,7 +1039,7 @@ final class WalkRouter {
                 let t = min(1, max(0, (metres - travelled) / piece))
                 let (dx, dy) = b.offset(from: a)
                 let x = dx * t - dy / piece * offset, y = dy * t + dx / piece * offset
-                return Walk.Point(lat: a.lat + y / WalkGraph.metresNorth, lon: a.lon + x / (111_320 * cos(a.lat * .pi / 180)))
+                return Walk.Point(lat: a.lat + y / WalkGraph.metresNorth, lon: a.lon + x / (Earth.metresPerDegree * cos(a.lat * .pi / 180)))
             }
             travelled += piece
         }
@@ -660,34 +1050,35 @@ final class WalkRouter {
     /// between its corners; each crossing straight over.
     func points(of route: Route) -> [Walk.Point] {
         var out: [Walk.Point] = []
-        func add(_ p: Walk.Point) {
-            if let last = out.last, last.metres(to: p) < 0.3 { return }
-            out.append(p)
-        }
         for leg in route.legs {
-            switch leg {
-            case let .access(a, b), let .cross(_, _, a, b):
-                add(a)
-                add(b)
-            case let .side(block, left, from, to, fromAlong, toAlong):
-                add(from)
-                let line = graph.line(of: block)
-                let offset = graph.class(of: block) == .path ? 0 : sideOffset(block: block, left: left) * (left ? 1 : -1)
-                var travelled = 0.0
-                var inner: [(Double, Walk.Point)] = []
-                for (a, b) in zip(line, line.dropFirst()) {
-                    travelled += a.metres(to: b)
-                    if b != line.last { inner.append((travelled, b)) }
-                }
-                let lo = min(fromAlong, toAlong), hi = max(fromAlong, toAlong)
-                let between = inner.filter { $0.0 > lo + 1 && $0.0 < hi - 1 }
-                for (metres, _) in (fromAlong <= toAlong ? between : between.reversed()) {
-                    add(Self.point(along: line, metres: metres, offset: offset))
-                }
-                add(to)
+            for p in points(of: leg) where out.last.map({ $0.metres(to: p) >= 0.3 }) ?? true {
+                out.append(p)
             }
         }
         return out
+    }
+
+    /// A leg's line: a side along its street's line moved out to the side, between its corners
+    /// (or a start or end part way along); anything else straight from one end to the other.
+    func points(of leg: Leg) -> [Walk.Point] {
+        switch leg {
+        case let .access(a, b), let .cross(_, _, a, b):
+            return [a, b]
+        case let .side(block, left, from, to, fromAlong, toAlong):
+            let line = graph.line(of: block)
+            let offset = graph.class(of: block) == .path ? 0 : sideOffset(block: block, left: left) * (left ? 1 : -1)
+            var travelled = 0.0
+            var inner: [Double] = []
+            for (a, b) in zip(line, line.dropFirst()) {
+                travelled += a.metres(to: b)
+                if b != line.last { inner.append(travelled) }
+            }
+            let lo = min(fromAlong, toAlong), hi = max(fromAlong, toAlong)
+            let between = inner.filter { $0 > lo + 1 && $0 < hi - 1 }
+            return [from] + (fromAlong <= toAlong ? between : between.reversed()).map {
+                Self.point(along: line, metres: $0, offset: offset)
+            } + [to]
+        }
     }
 }
 

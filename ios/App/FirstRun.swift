@@ -302,16 +302,19 @@ final class FirstRunAnswers {
     /// Minutes walking from Home (or the hotel) to `selection`'s station.
     func walk(to selection: Selection) -> Int? {
         guard let from = (home ?? hotel)?.location, let station = selection.station else { return nil }
-        let meters = from.distance(from: CLLocation(latitude: station.lat, longitude: station.lon))
-        return max(1, Int((TripPlanner.walkSeconds(meters) / 60).rounded()))
+        let meters = from.distance(from: station.location)
+        return TripPlanner.walkMinutes(meters)
     }
 
     /// Saves it all where the app keeps it: the places, the home station, how you'll go, the
     /// reminder, and a visit's stay.
     func save(to settings: SettingsStore) async {
         let saved = SavedPlaces.shared
-        // Set up again, no longer visiting: Home and Work back
-        if kind != .visit, saved.homeIsHotel { saved.setVisiting(false) }
+        // Set up again (Settings' Run Setup Again): the places from before, and a visit's hotel
+        // and sights, forgotten for these, only now it's finished, so setup left part way
+        // through keeps them
+        VisitStay.clear()
+        saved.clear()
         switch kind {
         case .commute:
             if let home { saved.set(.home, to: home) }
@@ -330,9 +333,16 @@ final class FirstRunAnswers {
         if kind != .visit, let train { settings.settings.defaultTrain = train }
         settings.settings.includesBuses = buses
         settings.settings.stepFree = stepFree
-        UserDefaults.standard.set(walkMinutes, forKey: "tripWalkMinutes")
-        UserDefaults.standard.set(bike?.rawValue ?? "", forKey: "tripBike")
-        if kind == .commute, remindsToLeave, let train, await LeaveReminder.isAllowed {
+        UserDefaults.standard.set(walkMinutes, forKey: NewTripView.walkMinutesKey)
+        UserDefaults.standard.set(bike != nil, forKey: NewTripView.bikeKey)
+        if let bike {
+            UserDefaults.standard.set(bike == .eBike ? BikeKinds.eBike.rawValue : BikeKinds.bike.rawValue, forKey: BikeKinds.key)
+            // A Citi Bike picked here turns Citi Bike back on, if Settings had it off
+            UserDefaults.standard.set(false, forKey: BikeKinds.offKey)
+        }
+        // Asked here if it wasn't on the summary, as the summary says the reminder's set; once
+        // allowed or turned down, iOS answers without asking again
+        if kind == .commute, remindsToLeave, let train, await LeaveReminder.requestPermission() {
             await LeaveReminder.schedule(at: leaveTime, train: train)
         } else {
             LeaveReminder.cancel()
@@ -395,7 +405,7 @@ struct FirstRunView: View {
         .background(Color(uiColor: .systemBackground))
         .onAppear { location.start() }
         .sheet(item: $searching) { searching in
-            PlaceSearch(title: searching.title, location: location) { place in
+            PlaceSearch(title: searching.title) { place in
                 set(searching, to: place)
             }
         }
@@ -757,7 +767,8 @@ struct FirstRunView: View {
                            allowed: location.isAllowed, denied: location.status == .denied) {
                         location.find()
                     }
-                    if answers.kind == .commute && answers.remindsToLeave {
+                    // Only with a train, as only then is a reminder set (`save`)
+                    if answers.kind == .commute && answers.remindsToLeave && answers.train != nil {
                         Divider().padding(.leading, 56)
                         askRow("bell.badge.fill", "Notifications", "Your reminder to leave", allowed: notificationsAllowed,
                                denied: false) {
@@ -781,7 +792,7 @@ struct FirstRunView: View {
             rows.append(("house.fill", "Home", answers.home?.name ?? "Not set"))
             rows.append(("briefcase.fill", "Work", answers.work?.name ?? "Not set"))
             rows.append(("tram.fill", "Your train", answers.train?.station?.name ?? "Not set"))
-            if answers.remindsToLeave {
+            if answers.remindsToLeave, answers.train != nil {
                 rows.append(("clock", "Reminder", "Weekdays \(answers.leaveTime.formatted(date: .omitted, time: .shortened))"))
             }
         case .city:
@@ -1216,20 +1227,22 @@ private struct SightPicker: View {
 /// Searching for a place to save: an address, a place or a station, as New Trip's search.
 private struct PlaceSearch: View {
     let title: String
-    let location: NearbyLocation
     let pick: (TripPlace) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var search = ""
+    /// Bumped by Return, for the list to pick its first result.
+    @State private var submits = 0
     @FocusState private var focused: Bool
 
     var body: some View {
         NavigationStack {
-            TripPlaceList(search: search, location: location, offersHere: false) { place in
+            TripPlaceList(search: search, submits: submits) { place in
                 pick(place)
                 dismiss()
             }
             .searchable(text: $search, placement: .navigationBarDrawer(displayMode: .always), prompt: "Address or place")
             .searchFocused($focused)
+            .onSubmit(of: .search) { submits += 1 }
             .onAppear { focused = true }
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)

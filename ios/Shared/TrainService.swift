@@ -454,10 +454,14 @@ enum TrainService {
         let wait = deadline.timeIntervalSinceNow
         return await withCheckedContinuation { (continuation: CheckedContinuation<T?, Never>) in
             let once = ResumeOnce(continuation)
-            Task { once.resume(await task.value) }
-            Task {
-                try? await Task.sleep(nanoseconds: UInt64(max(wait, 0) * 1_000_000_000))
+            let timer = Task {
+                // Stopped once the value's in: not left asleep until the deadline, several a board
+                guard (try? await Task.sleep(nanoseconds: UInt64(max(wait, 0) * 1_000_000_000))) != nil else { return }
                 once.resume(nil)
+            }
+            Task {
+                once.resume(await task.value)
+                timer.cancel()
             }
         }
     }
@@ -727,6 +731,17 @@ enum TrainService {
         let url: URL
         let part: FeedPart
 
+        /// Whether this fetch has all `other` asks for: the same feed, all of it, or a train
+        /// feed's trips at the same stops and more. Nearby, a train's page, a walk and the
+        /// countdown each ask for their own stops of the same feed within moments.
+        func covers(_ other: FeedKey) -> Bool {
+            guard url == other.url else { return false }
+            if part == .all { return true }
+            guard part.routes == nil, other.part.routes == nil, let stops = part.stops,
+                  let wanted = other.part.stops else { return false }
+            return wanted.isSubset(of: stops)
+        }
+
         /// For `sharedCache`: the feed and part, which differ in what's sent.
         var name: String {
             let list = { (ids: Set<String>?) in ids.map { $0.sorted().joined(separator: ",") } ?? "all" }
@@ -756,20 +771,22 @@ enum TrainService {
         // Without the push server (as on it), the whole feed, so fetches of it are shared. In a
         // batch, a train feed's trips at all the batch's stops, if it covers these, so every
         // board's fetch of it is the same one
-        let part: FeedPart = relayURL == nil ? .all
+        let part: FeedPart = serverURL == nil ? .all
             : batch.flatMap { batch in
                 part.stops.flatMap { $0.isSubset(of: batch.stops) && part.routes == nil ? FeedPart(stops: batch.stops) : nil }
             } ?? part
         let key = FeedKey(url: url, part: part)
         let fetching = { @Sendable in
-            try await feeds.value(for: key, reusingFor: reuseWindow) {
+            try await feeds.value(for: key, reusingFor: reuseWindow, orAny: { $0.covers(key) }, priority: priority) {
                 let shared = sharedFeeds.contains(url) ? sharedCache : nil
                 if let shared, let data = shared.data(for: key.name, within: sharedFor) { return data }
                 let data: Data
-                if let relayURL, let relayed = relayed(url, via: relayURL, for: part) {
+                if let serverURL, let relayed = relayed(url, via: serverURL, for: part) {
                     data = try await hedged(relayed, mta: url, priority: priority)
                 } else {
                     data = try await fetch(url, in: .shared, timeout: 15, priority: priority)
+                    // A failed read, not a board with no trains, kept and shared with widgets
+                    guard isUsable(data, from: url) else { throw URLError(.cannotParseResponse) }
                 }
                 shared?.save(data, for: key.name)
                 return data
@@ -819,7 +836,11 @@ enum TrainService {
     /// whichever arrives first; the other is cancelled.
     private static func hedged(_ relay: URL, mta: URL, priority: Float) async throws -> Data {
         try await withThrowingTaskGroup(of: Attempt.self) { group in
-            group.addTask { .relay(try? await fetch(relay, in: relaySession, timeout: relayTimeout, priority: priority)) }
+            // Either's answer that isn't a feed counts as failing (`isUsable`), so the other's tried
+            group.addTask {
+                let data = try? await fetch(relay, in: serverSession, timeout: relayTimeout, priority: priority)
+                return .relay(data.flatMap { isUsable($0, from: mta) ? $0 : nil })
+            }
             group.addTask {
                 try? await Task.sleep(nanoseconds: UInt64(hedgeDelay * 1_000_000_000))
                 return .hedge
@@ -847,7 +868,9 @@ enum TrainService {
                     askedMTA = true
                     group.addTask {
                         do {
-                            return .mta(.success(try await fetch(mta, in: .shared, timeout: 15, priority: priority)))
+                            let data = try await fetch(mta, in: .shared, timeout: 15, priority: priority)
+                            guard isUsable(data, from: mta) else { throw URLError(.cannotParseResponse) }
+                            return .mta(.success(data))
                         } catch {
                             return .mta(.failure(error))
                         }
@@ -867,7 +890,7 @@ enum TrainService {
         // The push server is behind Cloudflare, which speaks HTTP/3: QUIC is raced with TCP from
         // the first request, and copes better with lost packets and a switch between station
         // Wi-Fi and LTE
-        request.assumesHTTP3Capable = session === relaySession
+        request.assumesHTTP3Capable = session === serverSession
         let (data, response) = try await session.data(for: request, delegate: Prioritizing(priority: priority))
         #endif
         if let http = response as? HTTPURLResponse, http.statusCode != 200 {
@@ -895,23 +918,35 @@ enum TrainService {
 
     /// Info.plist's TrainTimesServerURL, whose `GET /feeds` passes on the MTA's feeds as it last
     /// read them. Nil on the server itself, whose bundle has none, so it reads the MTA.
-    private static let relayURL: URL? = (Bundle.main.object(forInfoDictionaryKey: "TrainTimesServerURL") as? String)
+    static let serverURL: URL? = (Bundle.main.object(forInfoDictionaryKey: "TrainTimesServerURL") as? String)
         .flatMap { URL(string: $0.hasSuffix("/") ? String($0.dropLast()) : $0) }
 
     /// Short, so a widget, which has seconds to draw, still has time for the MTA.
     private static let relayTimeout: TimeInterval = 4
 
-    private static let relaySession: URLSession = {
+    /// The one session for everything asked of the push server (TrainTimesServerURL): its feeds,
+    /// buses, routes, timetable, countdowns. One pool of connections to it, not a handshake for
+    /// each of several sessions. Each request sets its own timeout, shorter than this.
+    static let serverSession: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = relayTimeout
+        configuration.timeoutIntervalForRequest = 30
         configuration.waitsForConnectivity = false
         return URLSession(configuration: configuration)
     }()
 
     /// Where the MTA's feeds are; each one's name follows ("nyct%2Fgtfs-nqrw").
-    private static let mtaFeeds = "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/"
+    static let mtaFeeds = "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/"
 
     /// An MTA feed's name, as `GET /feeds` takes it: "nyct/gtfs-nqrw". Nil if not an MTA feed.
+    /// Whether `data` read from `url` is a feed, not an empty or cut-off 200 that would read as
+    /// no trains: JSON for the alerts and outages, a train feed with its header's timestamp for
+    /// the rest. What isn't an MTA feed is taken as it is.
+    static func isUsable(_ data: Data, from url: URL) -> Bool {
+        guard let name = feedName(of: url) else { return true }
+        if name.hasSuffix(".json") { return (try? JSONSerialization.jsonObject(with: data)) != nil }
+        return SubwayFeed.made(data) != nil
+    }
+
     static func feedName(of url: URL) -> String? {
         let address = url.absoluteString
         guard address.hasPrefix(mtaFeeds) else { return nil }
@@ -933,19 +968,27 @@ enum TrainService {
 
     /// In-flight and recently finished fetches, by `Key`.
     private actor InFlight<Key: Hashable & Sendable, Value: Sendable> {
-        private var fetches: [Key: Task<Value, Error>] = [:]
+        private var fetches: [Key: (task: Task<Value, Error>, priority: Float)] = [:]
         private var recent: [Key: (value: Value, fetched: Date)] = [:]
 
-        /// Reuses a value fetched under `window` seconds ago.
-        func value(for key: Key, reusingFor window: TimeInterval,
+        /// Reuses a value fetched under `window` seconds ago, or joins one in flight: for `key`,
+        /// or any key `covers` takes to have what `key` asks for. Another key's in flight only if
+        /// it's going at `priority` or higher (URLSessionTask's): a train's own feed waited
+        /// otherwise behind a fetch of other lines' put off for it.
+        func value(for key: Key, reusingFor window: TimeInterval, orAny covers: (@Sendable (Key) -> Bool)? = nil,
+                   priority: Float = URLSessionTask.defaultPriority,
                    fetch: @escaping @Sendable () async throws -> Value) async throws -> Value {
             let now = Date.now
             // Drop expired entries
             recent = recent.filter { $0.value.fetched.isWithin(window, before: now) }
-            if let recent = recent[key] { return recent.value }
-            if let fetch = fetches[key] { return try await fetch.value }
+            let fetched = recent[key] ?? covers.flatMap { covers in recent.first { covers($0.key) }?.value }
+            if let fetched { return fetched.value }
+            let joined = fetches[key]?.task ?? covers.flatMap { covers in
+                fetches.first { covers($0.key) && $0.value.priority >= priority }?.value.task
+            }
+            if let joined { return try await joined.value }
             let task = Task { try await fetch() }
-            fetches[key] = task
+            fetches[key] = (task, priority)
             defer { fetches[key] = nil }
             let value = try await task.value
             if window > 0 { recent[key] = (value, .now) }

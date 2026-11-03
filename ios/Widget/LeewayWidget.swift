@@ -428,8 +428,9 @@ struct Provider: AppIntentTimelineProvider {
             board.trains = aligned.trains
             board.connections = board.connections.map(aligned.connections)
         }
-        let trains = selection.catchable(board.trains, now: now)
-        let connections = selection.catchable(board.connections ?? [], now: now)
+        // With one just due, still at the station
+        let trains = TimelinePlan.shown(board.trains, at: now, selection: selection)
+        let connections = TimelinePlan.shown(board.connections ?? [], at: now, selection: selection)
         let entry = { (date: Date) -> TrainEntry in
             TrainEntry(date: date, selection: selection,
                        trains: TimelinePlan.trains(trains, at: date, selection: selection, fetched: board.fetched,
@@ -492,9 +493,9 @@ struct Provider: AppIntentTimelineProvider {
         merged.entries = dates.map { date in
             var entry = plan.entries.last { $0.date <= date } ?? first
             let theirs = other.entries.last { $0.date <= date } ?? otherFirst
-            let trains = theirs.selection.catchable(theirs.trains, now: date)
+            let trains = TimelinePlan.shown(theirs.trains, at: date, selection: theirs.selection)
             entry.date = date
-            entry.trains = entry.selection.catchable(entry.trains, now: date)
+            entry.trains = TimelinePlan.shown(entry.trains, at: date, selection: entry.selection)
             entry.otherWay = OtherWay(selection: theirs.selection, trains: trains,
                                       problem: trains.isEmpty ? theirs.problem : nil)
             return entry

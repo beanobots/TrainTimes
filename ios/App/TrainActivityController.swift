@@ -109,12 +109,13 @@ enum TrainActivityController {
         // End the old one only after the new one starts, so if iOS refuses, nothing changes
         let activity: Activity<TrainActivityAttributes>
         do {
-            activity = try Activity.request(attributes: attributes, content: content(state, ends: ends), pushType: .token)
+            activity = try Activity.request(attributes: attributes, content: content(state, ends: ends, serverBacked: false), pushType: .token)
         } catch {
             // Maybe only the push token (a build without push notifications); try without
-            activity = try Activity.request(attributes: attributes, content: content(state, ends: ends))
+            activity = try Activity.request(attributes: attributes, content: content(state, ends: ends, serverBacked: false))
         }
         await ActivityPush.watch(activity, started: now)
+        await moveOnLater(activity, from: state)
         await endActivities(except: activity.id)
         let countdown = SharedStore.Countdown(trainID: selection.trainID, ends: ends, widgetID: widgetID)
         // Save now, so a walk button can stop it even if iOS kills the app before the fetch below
@@ -156,9 +157,48 @@ enum TrainActivityController {
     @discardableResult
     private static func post(_ state: CountdownState, to activity: Activity<TrainActivityAttributes>) async -> Bool {
         let changed = !activity.content.state.hasSameTrains(as: state)
-        await activity.update(content(state, ends: activity.attributes.ends))
+        let next = content(state, ends: activity.attributes.ends,
+                           serverBacked: await ActivityPush.isServerBacked(activity.id))
+        // Not redrawn the same: TrainDetail's times come every 30 s. Its "Updated" shows the
+        // minute, so a fetch in a new one still goes up
+        if !looksSame(next, as: activity.content) { await activity.update(next) }
         share(activity, state: state)
+        await moveOnLater(activity, from: state)
         return changed
+    }
+
+    /// Each countdown's move on from its train once that's been at the station, by id.
+    @MainActor private static var movingOn: [String: Task<Void, Never>] = [:]
+
+    /// While the app runs, moves `activity` on from `state`'s train once it's been at the station
+    /// (`AtStation`): iOS redraws it only as the train's due, saying it's there, and the push
+    /// server, which moves on those it has, has no walks. Without a next train, it's redrawn
+    /// at 0:00.
+    @MainActor
+    private static func moveOnLater(_ activity: Activity<TrainActivityAttributes>, from state: CountdownState) {
+        let id = activity.id, train = state.train
+        movingOn[id]?.cancel()
+        let at = train.addingTimeInterval(AtStation.seconds)
+        guard at > .now else {
+            movingOn[id] = nil
+            return
+        }
+        movingOn[id] = Task {
+            try? await Task.sleep(for: .seconds(at.timeIntervalSinceNow + 0.5))
+            guard !Task.isCancelled else { return }
+            _ = try? await inTurn {
+                guard let activity = running.first(where: { $0.id == id }), activity.content.state.train == train
+                else { return }
+                await post(activity.content.state.movedOn(at: .now), to: activity)
+            }
+        }
+    }
+
+    /// Cancels the move on of a countdown being ended, so its timer doesn't wake to queue behind
+    /// (and hold up) whatever comes next.
+    @MainActor
+    private static func forgetMovingOn(_ id: String) {
+        movingOn.removeValue(forKey: id)?.cancel()
     }
 
     /// Saves `activity`'s state (`state`, if just posted) and push token for widgets showing its
@@ -241,7 +281,8 @@ enum TrainActivityController {
             let ends = now.addingTimeInterval(walkLifetime)
             let attributes = TrainActivityAttributes(selection: selection, stationName: selection.station?.name ?? "",
                                                      heading: selection.heading, ends: ends)
-            let activity = try Activity.request(attributes: attributes, content: content(state, ends: ends))
+            let activity = try Activity.request(attributes: attributes, content: content(state, ends: ends, serverBacked: false))
+            await moveOnLater(activity, from: state)
             await endActivities(except: activity.id)
             let countdown = SharedStore.Countdown(trainID: selection.trainID, ends: ends, widgetID: nil)
             let old = record(countdown)
@@ -263,7 +304,7 @@ enum TrainActivityController {
             state.walk = walk
             let attributes = TrainActivityAttributes(selection: Selection(stationID: "", routes: [], direction: .north),
                                                      stationName: "", heading: "", ends: ends)
-            let activity = try Activity.request(attributes: attributes, content: content(state, ends: ends))
+            let activity = try Activity.request(attributes: attributes, content: content(state, ends: ends, serverBacked: false))
             await endActivities(except: activity.id)
             // Another countdown it took the place of is gone from the widgets
             await tellWidgets(nil)
@@ -277,9 +318,11 @@ enum TrainActivityController {
         _ = try? await inTurn {
             for activity in running where activity.content.state.walk != nil {
                 let selection = activity.attributes.selection
-                var state = activity.content.state.movedOn(at: .now)
-                if let trains, var fresh = CountdownState(for: selection, trains: trains, notice: state.notice, now: .now,
-                                                          following: nil, after: nil) {
+                var state = activity.content.state.movedOn(at: .now, holding: AtStation.seconds)
+                // Not while its train's at the station: it's moved on once it's been there
+                if let trains, !AtStation.covers(state.train, at: .now),
+                   var fresh = CountdownState(for: selection, trains: trains, notice: state.notice, now: .now,
+                                              following: nil, after: nil) {
                     fresh.updated = .now
                     state = fresh
                 }
@@ -305,6 +348,21 @@ enum TrainActivityController {
             }
             if running.isEmpty { await tellWidgets(nil) }
         }
+    }
+
+    /// `endWalk()` as the app's quit, waited for up to `seconds` without the main actor: iOS
+    /// ends the app straight after, and nothing would be left to keep the countdown's turns true.
+    nonisolated static func endWalkBeforeQuitting(within seconds: TimeInterval = 2) {
+        let done = DispatchSemaphore(value: 0)
+        Task.detached {
+            for activity in running where activity.content.state.walk != nil {
+                await activity.end(nil, dismissalPolicy: .immediate)
+            }
+            // As `endWalk()`, so widgets don't go on showing a countdown that's gone
+            if running.isEmpty { await tellWidgets(nil) }
+            done.signal()
+        }
+        _ = done.wait(timeout: .now() + seconds)
     }
 
     /// A widget's walk button: stops the countdown if that widget shows it, else starts one
@@ -393,7 +451,8 @@ enum TrainActivityController {
 
     /// Re-posts `activity`'s state if Settings' marks changed.
     private static func redraw(_ activity: Activity<TrainActivityAttributes>) async {
-        let marked = content(activity.content.state, ends: activity.attributes.ends)
+        let marked = content(activity.content.state, ends: activity.attributes.ends,
+                             serverBacked: await ActivityPush.isServerBacked(activity.id))
         guard marked.state != activity.content.state else { return }
         await activity.update(marked)
     }
@@ -414,6 +473,7 @@ enum TrainActivityController {
         let expired = running.filter { $0.attributes.ends.map { $0 <= now } ?? false }
         guard !expired.isEmpty else { return }
         for activity in expired {
+            await forgetMovingOn(activity.id)
             await ActivityPush.ended(activity.id)
             await activity.end(nil, dismissalPolicy: .immediate)
         }
@@ -422,6 +482,7 @@ enum TrainActivityController {
 
     private static func endActivities(except kept: String? = nil) async {
         for activity in Activity<TrainActivityAttributes>.activities where activity.id != kept {
+            await forgetMovingOn(activity.id)
             await ActivityPush.ended(activity.id)
             await activity.end(nil, dismissalPolicy: .immediate)
         }
@@ -456,14 +517,37 @@ enum TrainActivityController {
         }
     }
 
-    /// Stale when the train is due, so iOS redraws it then and it moves on to the next train
-    /// (see `CountdownState.movedOn(at:)`), or when the countdown `ends` if that's sooner, so it
-    /// says so. Carries Settings' marks so changing them redraws it.
-    private static func content(_ state: CountdownState, ends: Date?) -> ActivityContent<CountdownState> {
+    /// Stale when the train is due, so iOS redraws it then saying it's at the station, before the
+    /// push server moves it on to the next train; without the push server (`serverBacked`), once
+    /// it's been there, so it moves on by itself as it redraws (`CountdownState.staleDate(pushedOn:)`,
+    /// `movedOn(at:holding:)`). Or when the countdown `ends` if that's sooner, so it says so.
+    /// Carries Settings' marks so changing them redraws it.
+    private static func content(_ state: CountdownState, ends: Date?, serverBacked: Bool) -> ActivityContent<CountdownState> {
         var state = state
         let settings = SharedStore.loadSettings()
         state.marksLiveTimes = settings.marksLiveTimes
         state.marksScheduledTimes = settings.marksScheduledTimes
-        return ActivityContent(state: state, staleDate: min(state.staleDate, ends ?? .distantFuture))
+        return ActivityContent(state: state, staleDate: min(state.staleDate(pushedOn: serverBacked), ends ?? .distantFuture))
+    }
+
+    /// Whether `next` draws as `shown` does: the same but for when its times were fetched, within
+    /// the minute the countdown's "Updated" shows.
+    private static func looksSame(_ next: ActivityContent<CountdownState>, as shown: ActivityContent<CountdownState>) -> Bool {
+        guard next.staleDate == shown.staleDate,
+              Calendar.current.isDate(next.state.updated, equalTo: shown.state.updated, toGranularity: .minute)
+        else { return false }
+        var unfetched = next.state
+        unfetched.updated = shown.state.updated
+        return unfetched == shown.state
+    }
+
+    /// Posts `id`'s countdown again as it is, once whether the push server has it is known or
+    /// changes, for the stale date that goes with that (`content`).
+    static func restale(_ id: String) async {
+        _ = try? await inTurn {
+            guard let activity = running.first(where: { $0.id == id }) else { return }
+            await activity.update(content(activity.content.state, ends: activity.attributes.ends,
+                                          serverBacked: await ActivityPush.isServerBacked(id)))
+        }
     }
 }

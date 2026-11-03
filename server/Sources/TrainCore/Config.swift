@@ -42,10 +42,6 @@ struct Limits: Sendable {
     /// `GET /feeds`'s own limit: a refresh reads several feeds for each widget at once.
     var feedRequestsPerMinute = 240.0
     var feedRequestBurst = 120.0
-    var maxChallenges = 10_000
-    /// Outstanding challenges per client: one for each request the app is
-    /// about to sign, with room for a few it gave up on.
-    var challengesPerIP = 10
     var keysPerIPPerDay = 10
     /// Attest keys unused this long are forgotten.
     var keyRetention: TimeInterval = 90 * 86400
@@ -57,6 +53,9 @@ struct Limits: Sendable {
     /// and for everyone: a Nearby asks for up to 7 at once, and what's kept doesn't count.
     var busTimePerIPPerDay = 2_000
     var busTimePerDay = 100_000
+    /// `POST /diagnostics`: reports a day from each attest key, and kept in all.
+    var diagnosticsPerKeyPerDay = 20
+    var maxDiagnostics = 1000
 }
 
 /// The server's settings, from environment variables.
@@ -141,9 +140,6 @@ struct Config: Sendable {
                                                                default: Int(limits.feedRequestsPerMinute), range: 1...100_000))
         limits.feedRequestBurst = Double(try Self.integer("FEED_RATE_LIMIT_BURST", in: env,
                                                           default: Int(limits.feedRequestBurst), range: 1...100_000))
-        limits.maxChallenges = try Self.integer("MAX_CHALLENGES", in: env, default: limits.maxChallenges, range: 1...10_000_000)
-        limits.challengesPerIP = try Self.integer("MAX_CHALLENGES_PER_IP", in: env, default: limits.challengesPerIP,
-                                                  range: 1...100_000)
         limits.keysPerIPPerDay = try Self.integer("MAX_KEYS_PER_IP_PER_DAY", in: env, default: limits.keysPerIPPerDay,
                                                   range: 1...100_000)
         limits.routesPerIPPerDay = try Self.integer("ROUTES_PER_IP_PER_DAY", in: env, default: limits.routesPerIPPerDay,
@@ -153,6 +149,10 @@ struct Config: Sendable {
                                                      range: 1...1_000_000)
         limits.busTimePerDay = try Self.integer("BUS_TIME_PER_DAY", in: env, default: limits.busTimePerDay,
                                                 range: 1...10_000_000)
+        limits.diagnosticsPerKeyPerDay = try Self.integer("DIAGNOSTICS_PER_KEY_PER_DAY", in: env,
+                                                          default: limits.diagnosticsPerKeyPerDay, range: 0...10_000)
+        limits.maxDiagnostics = try Self.integer("MAX_DIAGNOSTICS", in: env, default: limits.maxDiagnostics,
+                                                 range: 1...1_000_000)
         self.limits = limits
         logPushes = Self.optional("LOG_PUSHES", in: env) == "1"
         googleRoutesKey = Self.optional("GOOGLE_ROUTES_API_KEY", in: env)

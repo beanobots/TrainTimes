@@ -557,39 +557,21 @@ final class TestDevice: @unchecked Sendable {
         }
     }
 
-    @Test func capsOutstandingChallenges() async throws {
-        var limits = testLimits()
-        limits.maxChallenges = 2
-        try await withApp(limits: limits) { (client, _, _) async throws in
-            _ = try await Self.challenge(client)
-            _ = try await Self.challenge(client)
-            try await client.execute(uri: "/attest/challenge", method: .get) { response in
-                #expect(response.status == .serviceUnavailable)
-            }
-        }
-    }
-
-    @Test func capsEachClientsOutstandingChallenges() async throws {
-        var limits = testLimits()
-        limits.challengesPerIP = 2
+    @Test func challengesAreNeverRefusedForBeingOutstanding() async throws {
         // Live, so requests come from loopback, as cloudflared's do, and CF-Connecting-IP counts
-        try await withApp(limits: limits, setup: .live) { (client, _, _) async throws in
-            let requests: [(String, HTTPResponse.Status)] = [
-                ("2001:db8:1:2::1", .ok), ("2001:db8:1:2::2", .ok),
-                // Another address in the same /64 is the same client
-                ("2001:db8:1:2::3", .tooManyRequests),
-                ("2001:db8:1:3::1", .ok), ("203.0.113.9", .ok), ("203.0.113.9", .ok), ("203.0.113.9", .tooManyRequests),
-            ]
-            for (address, expected) in requests {
-                try await client.execute(uri: "/attest/challenge", method: .get, headers: [.cfConnectingIP: address]) { response in
-                    #expect(response.status == expected)
-                    if expected == .tooManyRequests {
-                        // When its first expires
-                        let retryAfter = try #require(response.headers[.retryAfter].flatMap { Int($0) })
-                        #expect((290...300).contains(retryAfter))
-                    }
-                }
+        try await withApp(setup: .live) { (client, _, _) async throws in
+            // Many addresses' worth, none used: nothing kept to fill, so the next is still given
+            for block in 0..<50 {
+                try await client.execute(uri: "/attest/challenge", method: .get,
+                                         headers: [.cfConnectingIP: "2001:db8:\(block):1::1"]) { #expect($0.status == .ok) }
             }
+            let challenge = try await client.execute(uri: "/attest/challenge", method: .get,
+                                                     headers: [.cfConnectingIP: "2001:db8:ffff:1::1"]) { response in
+                #expect(response.status == .ok)
+                #expect(response.headers[.cacheControl] == "no-store")
+                return text(response)
+            }
+            #expect(challenge.contains(#""expiresIn":300"#))
         }
     }
 
@@ -617,9 +599,15 @@ final class TestDevice: @unchecked Sendable {
         // Live, so requests come from loopback, as cloudflared's do, and CF-Connecting-IP counts
         try await withApp(limits: limits, setup: .live) { (client, _, _) async throws in
             try await client.execute(uri: "/health", method: .get) { #expect($0.status == .ok) }
-            let behind: HTTPFields = [.cfConnectingIP: "203.0.113.9"]
+            let behind: HTTPFields = [.cfConnectingIP: "2001:db8:1:2::1"]
             try await client.execute(uri: "/health", method: .get, headers: behind) { #expect($0.status == .ok) }
             try await client.execute(uri: "/health", method: .get, headers: behind) { #expect($0.status == .tooManyRequests) }
+            // An IPv4 address, shared behind NAT, ten times as many
+            let shared: HTTPFields = [.cfConnectingIP: "203.0.113.9"]
+            for _ in 0..<ClientIP.ipv4Share {
+                try await client.execute(uri: "/health", method: .get, headers: shared) { #expect($0.status == .ok) }
+            }
+            try await client.execute(uri: "/health", method: .get, headers: shared) { #expect($0.status == .tooManyRequests) }
             try await client.execute(uri: "/health", method: .get) { #expect($0.status == .tooManyRequests) }
         }
     }

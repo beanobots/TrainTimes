@@ -55,7 +55,7 @@ actor PushServer {
         case refused(Int)
     }
 
-    private static let log = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Leeway", category: "PushServer")
+    private static let log = AppLog(category: "PushServer")
 
     /// When requests started being refused (`401`) even with a fresh challenge, kept across
     /// launches; nil once one gets through.
@@ -88,12 +88,8 @@ actor PushServer {
         #endif
     }()
 
-    private let session: URLSession = {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 15
-        configuration.waitsForConnectivity = false
-        return URLSession(configuration: configuration)
-    }()
+    /// Seconds to wait for the push server.
+    private static let timeout: TimeInterval = 15
 
     /// The latest request; each waits for the one before.
     private var last: Task<Void, Never>?
@@ -122,6 +118,16 @@ actor PushServer {
     /// Stops pushes to a countdown. Already gone counts as done.
     func unregister(token: String) async throws {
         let status = try await inTurn { try await self.signed("DELETE", path: "/activities/\(token)", body: Data()) }
+        switch status {
+        case 204: return
+        case 429, 500...: throw Failure.unavailable
+        default: throw Failure.refused(status)
+        }
+    }
+
+    /// Sends a crash or hang report (`Diagnostics.report`), for anyone sharing diagnostics.
+    func sendDiagnostics(_ body: Data) async throws {
+        let status = try await inTurn { try await self.signed("POST", path: "/diagnostics", body: body) }
         switch status {
         case 204: return
         case 429, 500...: throw Failure.unavailable
@@ -159,6 +165,10 @@ actor PushServer {
                 AttestKey.discard()
                 keyID = try await attestedKey()
                 continue
+            } catch {
+                // Anything else as the server being out of reach, so callers queue it to try again
+                Self.log.error("App Attest assertion failed: \(error.localizedDescription)")
+                throw Failure.unavailable
             }
             var request = request(method, path: path)
             request.setValue(keyID, forHTTPHeaderField: "X-Attest-Key")
@@ -177,7 +187,7 @@ actor PushServer {
                 return status
             }
             refusals += 1
-            Self.log.notice("\(method, privacy: .public) \(path.prefix(20), privacy: .public)… refused (401), attempt \(attempt + 1)")
+            Self.log.notice("\(method) \(path.prefix(20))… refused (401), attempt \(attempt + 1)")
         }
         return status
     }
@@ -202,11 +212,12 @@ actor PushServer {
     private func attestedKey() async throws -> String {
         if AttestKey.isAttested, let keyID = AttestKey.saved { return keyID }
         let keyID: String
+        let madeNow = AttestKey.saved == nil
         if let saved = AttestKey.saved {
             keyID = saved
         } else {
             do { keyID = try await AttestKey.make() } catch {
-                Self.log.error("Couldn't make an App Attest key: \(error.localizedDescription, privacy: .public)")
+                Self.log.error("Couldn't make an App Attest key: \(error.localizedDescription)")
                 throw Failure.unavailable
             }
         }
@@ -215,13 +226,21 @@ actor PushServer {
         do {
             attestation = try await AttestKey.attest(keyID, challenge: challenge)
         } catch let error as DCError where error.code == .invalidKey {
-            // Attested before, but the server never heard (or Apple refused it): start again
-            Self.log.notice("App Attest key can't be attested; making a new one next time")
+            // Attested before, but the server never heard (or Apple refused it), or left in the
+            // Keychain by an install since deleted: start again with a new key now, once
+            Self.log.notice("App Attest key can't be attested; making a new one")
             AttestKey.discard()
+            guard !madeNow else { throw Failure.unavailable }
+            return try await attestedKey()
+        } catch let error as DCError where error.code == .serverUnavailable {
+            // Apple's servers unreachable: try the same key again later, as Apple asks
+            Self.log.error("App Attest attestation failed: \(error.localizedDescription)")
             throw Failure.unavailable
         } catch {
-            // e.g. Apple's servers unreachable: try the same key again later, as Apple asks
-            Self.log.error("App Attest attestation failed: \(error.localizedDescription, privacy: .public)")
+            // Anything else, Apple asks for a new key: the next try makes one, rather than
+            // retrying one that can never be attested
+            Self.log.error("App Attest attestation failed; dropping the key: \(error.localizedDescription)")
+            AttestKey.discard()
             throw Failure.unavailable
         }
         var request = request("POST", path: "/attest")
@@ -258,7 +277,8 @@ actor PushServer {
 
     private func request(_ method: String, path: String) -> URLRequest {
         // `signed` checked there's a URL
-        var request = URLRequest(url: URL(string: ServerRoutes.baseURL!.absoluteString + path)!)
+        var request = URLRequest(url: URL(string: ServerRoutes.baseURL!.absoluteString + path)!,
+                                 cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: Self.timeout)
         request.httpMethod = method
         return request
     }
@@ -266,10 +286,10 @@ actor PushServer {
     /// The response's body and status; network errors are `Failure.unavailable`.
     private func send(_ request: URLRequest) async throws -> (data: Data, status: Int) {
         do {
-            let (data, response) = try await session.data(for: request)
+            let (data, response) = try await TrainService.serverSession.data(for: request)
             return (data, (response as? HTTPURLResponse)?.statusCode ?? 0)
         } catch {
-            Self.log.notice("Push server unreachable: \(error.localizedDescription, privacy: .public)")
+            Self.log.notice("Push server unreachable: \(error.localizedDescription)")
             throw Failure.unavailable
         }
     }

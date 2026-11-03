@@ -17,7 +17,7 @@ struct ContactAddress: Identifiable, Hashable, Sendable {
 }
 
 /// Your contacts' addresses for New Trip's search, by name. Reads only what Leeway may see: all
-/// your contacts, or those you've shared with it (`ContactAccessButton`). Never asks itself.
+/// your contacts, or those you've shared with it (`ContactAccessButton`). Asks only when told to.
 @MainActor
 @Observable
 final class ContactSearch {
@@ -27,8 +27,10 @@ final class ContactSearch {
     private var resultsQuery = ""
     @ObservationIgnored private var lookup: Task<Void, Never>?
 
-    /// Whether Apple's button may offer more contacts: Leeway sees only some, or hasn't asked.
-    var mayShare: Bool { status == .limited || status == .notDetermined }
+    /// Whether Leeway hasn't asked for your contacts yet.
+    var mayAsk: Bool { status == .notDetermined }
+    /// Whether Apple's button may offer more contacts: Leeway sees only some.
+    var mayShare: Bool { status == .limited }
 
     var query = "" {
         didSet {
@@ -40,6 +42,12 @@ final class ContactSearch {
     /// The results for `query`, none while they're still for what was typed before it.
     func results(for query: String) -> [ContactAddress] {
         query == resultsQuery ? results : []
+    }
+
+    /// Asks for your contacts (all, or some you choose), then looks.
+    func ask() async {
+        _ = try? await CNContactStore().requestAccess(for: .contacts)
+        refresh()
     }
 
     /// Looks again, after contacts are shared.
@@ -74,9 +82,13 @@ final class ContactSearch {
             CNContactFamilyNameKey as CNKeyDescriptor,
             CNContactOrganizationNameKey as CNKeyDescriptor,
         ]
+        let store = CNContactStore()
         let predicate = CNContact.predicateForContacts(matchingName: query)
-        guard let contacts = try? CNContactStore().unifiedContacts(matching: predicate, keysToFetch: keys) else {
+        guard var contacts = try? store.unifiedContacts(matching: predicate, keysToFetch: keys) else {
             return []
+        }
+        if contacts.isEmpty {
+            contacts = nearlyNamed(query, in: store, keys: keys)
         }
         let streets = CNPostalAddressFormatter()
         var found: [ContactAddress] = []
@@ -98,6 +110,32 @@ final class ContactSearch {
             }
         }
         return Array(found.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }.prefix(12))
+    }
+
+    /// Contacts with addresses whose names are a typo or two from `query`, for when none match
+    /// exactly: "sarha" is Sarah Chen. Each word typed has to be near the start of a word of the
+    /// name, as in station search (`Typos`).
+    private nonisolated static func nearlyNamed(_ query: String, in store: CNContactStore,
+                                                keys: [CNKeyDescriptor]) -> [CNContact] {
+        let typed = words(in: query)
+        guard typed.contains(where: { Typos.allowed(in: $0) > 0 }) else { return [] }
+        var found: [CNContact] = []
+        try? store.enumerateContacts(with: CNContactFetchRequest(keysToFetch: keys)) { contact, _ in
+            guard !contact.postalAddresses.isEmpty else { return }
+            let name = words(in: [contact.givenName, contact.familyName, contact.organizationName].joined(separator: " "))
+            let near = typed.allSatisfy { word in
+                let allowed = Typos.allowed(in: word)
+                return name.contains { Typos.count(from: word, toStartOf: $0, upTo: allowed) <= allowed }
+            }
+            if near { found.append(contact) }
+        }
+        return found
+    }
+
+    /// Lowercased without accents, split on what isn't a letter or number.
+    private nonisolated static func words(in text: String) -> [String] {
+        text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil).lowercased()
+            .split { !$0.isLetter && !$0.isNumber }.map(String.init)
     }
 
     /// "SC" for Sarah Chen; a company's first letter.

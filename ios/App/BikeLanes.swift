@@ -1,5 +1,5 @@
-import CoreLocation
 import Foundation
+import simd
 
 /// The city's protected bike lanes and paths (bike_lanes.json, made by tools/make_bike_lanes.py
 /// from NYC DOT's bike route map), for how much of a Citi Bike ride runs on them. Only shown, not

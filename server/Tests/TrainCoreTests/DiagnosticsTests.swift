@@ -39,7 +39,7 @@ func diagnosticsBody(kind: String = "crash", log: Any? = "2026-11-01T14:03:22Z n
         defer { try? FileManager.default.removeItem(at: dir) }
         let store = try DiagnosticStore(directory: dir)
         let body = try diagnosticsBody()
-        let name = try await store.save(body, kind: "crash", now: Date(timeIntervalSince1970: 1_793_628_202))
+        let name = try await store.save(body, kind: "crash", now: Date(timeIntervalSince1970: 1_793_541_802))
         #expect(name.hasPrefix("20261101-140322-crash-"))
         #expect(name.hasSuffix(".json"))
         #expect(try await store.body(named: name) == body)

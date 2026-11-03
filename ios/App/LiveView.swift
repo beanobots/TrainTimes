@@ -9,41 +9,76 @@ import UIKit
 struct LiveView: View {
     /// Set when the Nearby widget's "allow location" link opens the app.
     @Binding var allowingLocation: Bool
+    /// Counts taps on the Nearby tab, each one bringing the map back to you.
+    let recenterRequests: Int
     @Environment(SettingsStore.self) private var settings
     @Environment(\.accessibilityDifferentiateWithoutColor) private var withoutColor
     @State private var location = NearbyLocation()
     @State private var path = NavigationPath()
     @State private var live = LiveTrains()
-    /// A map-picked place Nearby uses instead of your location, until Near Me is tapped.
-    @State private var pin: CLLocation?
-    @State private var droppingPin = false
+    /// The map's middle once you've moved it, which Nearby lists what's near instead of you
+    /// until the Nearby tab (or the note over the map) brings it back.
+    @State private var mapCenter: CLLocation?
+    /// Where the map last came to rest, to tell a move of more than `followMeters` from it;
+    /// and till when a rest is the map settling where `frame()` put it, not you moving it.
+    @State private var restCenter: CLLocation?
+    @State private var framingUntil = Date.distantPast
+    /// Places tapped on the map since it was moved, their tiles saying how far they are from you.
+    @State private var revealed: Set<String> = []
     /// Closest stations to `here`, nearest first. Recomputed only when `here` changes,
     /// not on every redraw.
     @State private var nearby: [Nearby.Result] = []
     @State private var camera = MapCameraPosition.userLocation(fallback: .automatic)
-    /// The chips and card over the map's bottom, for the map to frame clear of them.
+    /// The card over the map's bottom, for the map to frame clear of it.
     @State private var cardsHeight: CGFloat = 0
     /// The trains' full height, for the card to be no taller.
     @State private var trainsHeight: CGFloat = 0
     /// What Nearby lists, each a toggle at the foot of its card; all may be off.
-    @AppStorage("nearbyShowsSubway") private var showsSubway = true
-    @AppStorage("nearbyShowsBuses") private var showsBuses = false
-    /// Citi Bike docks with classic bikes, e-bikes, or either, as the Citi Bike menu picks.
-    @AppStorage("nearbyShowsBikes") private var showsClassicBikes = false
-    @AppStorage("nearbyShowsEBikes") private var showsEBikes = false
+    @AppStorage(Self.showsSubwayKey) private var showsSubway = true
+    @AppStorage(Self.showsBusesKey) private var showsBuses = false
+    /// Citi Bike docks, with the bikes Settings picks (`BikeKinds`): it was two switches, bikes
+    /// and e-bikes, either on bringing it on.
+    @AppStorage(Self.showsCitiBikeKey) private var showsCitiBike =
+        UserDefaults.standard.bool(forKey: BikeKinds.oldNearbyBikesKey) || UserDefaults.standard.bool(forKey: BikeKinds.oldNearbyEBikesKey)
+    private static let showsSubwayKey = "nearbyShowsSubway"
+    private static let showsBusesKey = "nearbyShowsBuses"
+    private static let showsCitiBikeKey = "nearbyShowsCitiBike"
+    @AppStorage(BikeKinds.key) private var bikeKinds = BikeKinds.saved
     /// The map mark last tapped, for the card to scroll to its place.
     @State private var focusedMark: String?
+    /// Where each place's tile starts in the card's list, by its map mark's id.
+    @State private var tileTops: [String: CGFloat] = [:]
+    @State private var cardScroll = ScrollPosition()
+    /// Blank room under the list, for a place near its end to scroll to the top too; dropped
+    /// once scrolled back out of sight.
+    @State private var focusRoom: CGFloat = 0
     /// The bus places near `here`, as last loaded.
     @State private var buses: NearbyBusList = .finding
+    /// Where `buses` was found from, for a failed refresh to keep them only if still there.
+    @State private var busesFrom: CLLocation?
     /// The Citi Bike docks near `here`, nearest first; nil while finding them, and `docksFailed`
     /// if the feed couldn't be had.
     @State private var docks: [NearbyDock]?
     @State private var docksFailed = false
     /// When the last load finished, whatever it loaded.
     @State private var updated: Date?
-    /// Each map mark's size, by its `mapMarks` id, and those hidden for overlapping another.
+    /// Each map mark's size as a sign and as a bubble, by its `mapMarks` id, and how each shows
+    /// for them all to clear each other (`layOutMarks`).
     @State private var markSizes: [String: CGSize] = [:]
-    @State private var hiddenMarks: Set<String> = []
+    @State private var bubbleSizes: [String: CGSize] = [:]
+    @State private var markLayout = MarkLayout()
+    /// When the marks were last laid out as the map moved (`layoutEvery`).
+    @State private var laidOut = Date.distantPast
+    /// The nearby stations' lines, worked out when the stations change; and a count of each new
+    /// set, to tell the map's lines from the last ones'.
+    @State private var lines = NearbyLines.none
+    /// The other stops along the listed bus stops' lines, every few blocks (`findLines`).
+    @State private var alongStops: [AlongStop] = []
+    @State private var linesVersion = 0
+    /// The map's height, and map points a point is once it last came to rest, to keep lines side
+    /// by side the same points apart however far it's zoomed.
+    @State private var mapHeight: CGFloat = 0
+    @State private var mapPointsPerPoint: Double = 0
 
     /// The page's side margin and its card's corners, as New Trip's.
     private static let margin: CGFloat = 16
@@ -55,16 +90,82 @@ struct LiveView: View {
     private static let cardHeight: CGFloat = 250
     /// The modes row's height at the card's foot, as New Trip's.
     private static let modesRowHeight: CGFloat = 58
+    /// The margin around the card's list of places, kept over one scrolled to the top.
+    private static let tilesMargin: CGFloat = 8
+    /// The card's list of places, for each tile to note where it starts.
+    private static let tilesSpace = "nearbyTiles"
 
-    /// The pin, or else your location.
-    private var here: CLLocation? { pin ?? location.location }
+    /// How far the map's middle moves, once it comes to rest, for Nearby to list what's there.
+    private static let followMeters: Double = 100
 
-    /// Clears the pin and re-locates, even if you haven't moved. Times reload once
-    /// the nearby stations change.
-    private func findLocation() {
-        pin = nil
+    /// The map's middle once moved, or else your location.
+    private var here: CLLocation? { mapCenter ?? location.location }
+
+    /// Back to you: the map framed on you again, re-located even if you haven't moved. Times
+    /// reload once the nearby stations change.
+    private func recenter() {
+        revealed = []
+        let wasMoved = mapCenter != nil
+        mapCenter = nil
         location.find()
+        if here == nil {
+            withAnimation(.smooth) { camera = .userLocation(fallback: .automatic) }
+        } else if !wasMoved {
+            // Still `here`, so not framed by its change
+            frame()
+        }
         Task { await load() }
+    }
+
+    /// The map's come to rest at `center`: past `followMeters` from where it last rested, by
+    /// your hand rather than `frame()`'s, Nearby lists what's near there.
+    private func mapRested(at center: CLLocationCoordinate2D) {
+        let middle = CLLocation(latitude: center.latitude, longitude: center.longitude)
+        guard let rested = restCenter, Date.now > framingUntil else {
+            restCenter = middle
+            return
+        }
+        guard middle.distance(from: rested) > Self.followMeters else { return }
+        restCenter = middle
+        revealed = []
+        mapCenter = middle
+    }
+
+    /// A mark tapped on the map: its place to the top of the card, and once the map's moved,
+    /// its distance from you on its tile.
+    private func tapped(_ id: String) {
+        focusedMark = id
+        if mapCenter != nil { revealed.insert(id) }
+    }
+
+    /// A merged bubble tapped: zoomed in round the places it stands for, till they come apart.
+    private func zoom(into ids: [String]) {
+        let points = mapMarks.filter { ids.contains($0.id) }.map(\.coordinate)
+        let lats = points.map(\.latitude), lons = points.map(\.longitude)
+        guard let minLat = lats.min(), let maxLat = lats.max(), let minLon = lons.min(), let maxLon = lons.max() else { return }
+        let region = MKCoordinateRegion(
+            center: CLLocationCoordinate2D(latitude: (minLat + maxLat) / 2, longitude: (minLon + maxLon) / 2),
+            span: MKCoordinateSpan(latitudeDelta: max((maxLat - minLat) * 2.5, 0.003),
+                                   longitudeDelta: max((maxLon - minLon) * 2.5, 0.003)))
+        // Where it comes to rest is where the bubble was, not a move of yours to list round
+        framingUntil = .now.addingTimeInterval(1.5)
+        withAnimation(.smooth) { camera = .region(region) }
+    }
+
+    /// How far a place is, for its tile: its walk from you while the map's on you; once moved,
+    /// how far it is from you, if it's been tapped on the map; otherwise nothing.
+    private func distance(of id: String, walkMinutes: Int, at place: CLLocation) -> NearbyDistance? {
+        guard mapCenter != nil else { return .walk(walkMinutes) }
+        guard revealed.contains(id), let you = location.location else { return nil }
+        return .fromYou(Self.miles(you.distance(from: place)))
+    }
+
+    /// "1.2 miles" or "1.9 kilometers", as the phone's set, as the station lists' distances are
+    /// (`Nearby.Result.distance`).
+    private static func miles(_ meters: Double) -> String {
+        let unit: UnitLength = Locale.current.measurementSystem == .metric ? .kilometers : .miles
+        return Measurement(value: meters, unit: UnitLength.meters).converted(to: unit)
+            .formatted(.measurement(width: .wide, usage: .asProvided, numberFormatStyle: .number.precision(.fractionLength(1))))
     }
 
     /// Every nearby station's trains, fetched together; none with Subway off.
@@ -79,14 +180,7 @@ struct LiveView: View {
         guard let bikes else { return [] }
         return Array((docks ?? []).filter { bikes.count(at: $0.dock) > 0 }.prefix(3))
     }
-    private var bikes: NearbyBikes? {
-        switch (showsClassicBikes, showsEBikes) {
-        case (true, true): .both
-        case (true, false): .bike
-        case (false, true): .eBike
-        case (false, false): nil
-        }
-    }
+    private var bikes: BikeKinds? { showsCitiBike ? bikeKinds : nil }
     private var showsBikes: Bool { bikes != nil }
 
     /// Restarts loading when any of it changes.
@@ -108,12 +202,17 @@ struct LiveView: View {
                 .safeAreaPadding(.bottom, cardsHeight + 32)
                 .safeAreaPadding(.leading, 12)
                 .ignoresSafeArea(.container, edges: [.top, .bottom])
+                .overlay(alignment: .top) { movedNote }
                 .overlay(alignment: .bottom) {
-                    VStack(spacing: 10) {
-                        chips
-                        card
-                    }
+                    card
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { cardsHeight = $0 }
+                    .padding(.horizontal, Self.margin)
+                    .padding(.bottom, 8)
+                }
+                // The modes row over the card's foot, on its own so it stays put as the card
+                // opens and closes round it
+                .overlay(alignment: .bottom) {
+                    modesRow
                     .padding(.horizontal, Self.margin)
                     .padding(.bottom, 8)
                 }
@@ -130,10 +229,8 @@ struct LiveView: View {
                 .onChange(of: here) { frame() }
                 .onChange(of: showsBuses) { if showsBuses { buses = .finding } }
                 .onChange(of: showsBikes) { if showsBikes { docks = nil; docksFailed = false } }
-                .sheet(isPresented: $droppingPin) {
-                    DropPinSheet(start: (pin ?? location.location)?.coordinate) { pin = $0 }
-                }
                 .onAppear { location.start() }
+                .onChange(of: recenterRequests) { recenter() }
                 .onChange(of: allowingLocation, initial: true) { _, allowing in
                     guard allowing else { return }
                     allowingLocation = false
@@ -142,44 +239,42 @@ struct LiveView: View {
                        let url = URL(string: UIApplication.openSettingsURLString) {
                         UIApplication.shared.open(url)
                     } else {
-                        findLocation()
+                        recenter()
                     }
                 }
                 .onChange(of: here, initial: true) { _, here in
                     nearby = here.map { Nearby.stations(near: $0, limit: 3) } ?? []
                 }
+                .onChange(of: linesKey, initial: true) { findLines() }
                 // Reload every minute and when the train list changes; pull-to-refresh (in the
-                // card) and returning to the app also re-locate (unless pinned)
+                // card) and returning to the app also re-locate (unless the map's been moved)
                 .updatingTrains(live, id: loadKey, refreshing: {
-                    if location.isAllowed && pin == nil { location.find() }
+                    if location.isAllowed && mapCenter == nil { location.find() }
                 }, load: load)
         }
     }
 
-    /// You (or the pin), the nearby stations as signs, bus stops as blue signs and docks with
-    /// their bikes. Where marks would overlap, the farther-down one in `mapMarks` hides until
-    /// you zoom in far enough for it to fit.
+    /// You, the nearby stations as signs, bus stops as their lines and docks with their bikes.
+    /// Where they'd overlap, they condense to bubbles by kind, and those to one bubble each
+    /// (`layOutMarks`).
     private var map: some View {
         MapReader { proxy in
             Map(position: $camera) {
-                if let pin {
-                    Marker("Pin", systemImage: "mappin", coordinate: pin.coordinate)
-                        .tint(.red)
-                } else {
-                    UserAnnotation()
-                }
+                // Under everything else
+                NearbyLinesLayer(lines: lines, version: linesVersion, mapPointsPerPoint: mapPointsPerPoint)
+                UserAnnotation()
                 if showsStations && showsSubway {
                     ForEach(nearby) { result in
                         Annotation(result.station.name, coordinate: CLLocationCoordinate2D(latitude: result.station.lat,
                                                                                          longitude: result.station.lon)) {
-                            Button { focusedMark = "s" + result.id } label: {
+                            mark("s" + result.id) {
                                 MapSign(name: result.station.name, fill: .black) {
                                     ForEach(result.station.routes, id: \.self) { LineBullet(route: $0, size: 15) }
                                 }
+                            } bubble: { count in
+                                MapBubble(fill: .black, symbol: "tram.fill", count: count)
                             }
-                            .buttonStyle(.plain)
                             .accessibilityHint("Shows its trains")
-                            .placed(id: "s" + result.id, hidden: hiddenMarks, sizes: $markSizes)
                         }
                         // The signs carry their names
                         .annotationTitles(.hidden)
@@ -189,22 +284,31 @@ struct LiveView: View {
                     ForEach(busPlaces, id: \.self) { place in
                         if let stop = place.ways.first?.stop {
                             Annotation(place.name, coordinate: CLLocationCoordinate2D(latitude: stop.latitude, longitude: stop.longitude)) {
-                                Button { focusedMark = "b" + stop.id } label: {
-                                    MapSign(name: place.name, fill: BusBadge.blue) {
-                                        ForEach(place.lines(at: live.now).map(\.line), id: \.self) { MapSignBusBadge(line: $0) }
-                                    }
+                                mark("b" + stop.id) {
+                                    BusStopMark(name: place.name, lines: place.lines(at: live.mapNow).map(\.line))
+                                } bubble: { count in
+                                    MapBubble(fill: BusBadge.blue, symbol: "bus.fill", count: count)
                                 }
-                                .buttonStyle(.plain)
                                 .accessibilityHint("Shows its buses")
-                                .placed(id: "b" + stop.id, hidden: hiddenMarks, sizes: $markSizes)
                             }
                             .annotationTitles(.hidden)
                         }
                     }
+                    ForEach(alongStops) { stop in
+                        Annotation("Bus stop", coordinate: stop.coordinate) {
+                            mark(stop.id) {
+                                BusStopMark(name: "Bus stop", lines: stop.lines)
+                            } bubble: { _ in
+                                // Never shown: it hides where its lines don't fit
+                                MapBubble(fill: BusBadge.blue, symbol: "bus.fill")
+                            }
+                        }
+                        .annotationTitles(.hidden)
+                    }
                     if let bikes {
                         ForEach(shownDocks) { near in
                             Annotation(near.dock.name, coordinate: near.dock.coordinate) {
-                                Button { focusedMark = "d" + near.id } label: {
+                                mark("d" + near.id) {
                                     DockMark(dock: near.dock, bikes: bikes)
                                         // Redrawn when its counts change, which the map's marks
                                         // otherwise can miss
@@ -212,19 +316,54 @@ struct LiveView: View {
                                         // Room round the small pill to tap
                                         .padding(6)
                                         .contentShape(Rectangle())
+                                } bubble: { count in
+                                    // On its own, its bikes; standing for several, how many docks
+                                    MapBubble(fill: .citiBike, symbol: bikes.symbol, count: count,
+                                              number: bikes.count(at: near.dock))
+                                        .padding(6)
+                                        .contentShape(Rectangle())
                                 }
-                                .buttonStyle(.plain)
                                 .accessibilityHint("Shows its bikes")
-                                .placed(id: "d" + near.id, hidden: hiddenMarks, sizes: $markSizes)
                             }
                             .annotationTitles(.hidden)
                         }
                     }
                 }
             }
-            .onMapCameraChange(frequency: .continuous) { layOutMarks(proxy) }
+            // No businesses or places on it, only its own marks; muted, as New Trip's: the
+            // standard map's yellow main roads read as N/Q/R/W lines
+            .mapStyle(.standard(emphasis: .muted, pointsOfInterest: .excludingAll))
+            // A few times a second while it moves, then once more where it stops
+            .onMapCameraChange(frequency: .continuous) {
+                let now = Date.now
+                guard now.timeIntervalSince(laidOut) >= Self.layoutEvery else { return }
+                laidOut = now
+                layOutMarks(proxy)
+            }
+            .onMapCameraChange(frequency: .onEnd) { context in
+                layOutMarks(proxy)
+                if mapHeight > 0 { mapPointsPerPoint = context.rect.height / Double(mapHeight) }
+                mapRested(at: context.region.center)
+            }
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { mapHeight = $0 }
             .onChange(of: markSizes) { layOutMarks(proxy) }
+            .onChange(of: bubbleSizes) { layOutMarks(proxy) }
             .onChange(of: framedIDs) { layOutMarks(proxy) }
+        }
+    }
+
+    /// A place on the map as `markLayout` has it: its sign, or a bubble standing for it (and
+    /// how many it stands for, merged); a tap on a merged one zooms in to part them.
+    private func mark(_ id: String, @ViewBuilder sign: () -> some View,
+                      @ViewBuilder bubble: @escaping (Int?) -> some View) -> some View {
+        MapMark(id: id, layout: markLayout, signSizes: $markSizes, bubbleSizes: $bubbleSizes,
+                sign: sign(), bubble: bubble) { merged in
+            if let merged {
+                zoom(into: merged)
+            } else if !id.hasPrefix("e") {
+                // A stop along the lines has no tile to go to
+                tapped(id)
+            }
         }
     }
 
@@ -232,7 +371,7 @@ struct LiveView: View {
     /// the next nearest of each, and so on, so each kind shows where there's room for one.
     private var mapMarks: [(id: String, coordinate: CLLocationCoordinate2D)] {
         guard showsStations else { return [] }
-        let stations = showsSubway ? nearby.map { ("s" + $0.id, CLLocationCoordinate2D(latitude: $0.station.lat, longitude: $0.station.lon)) } : []
+        let stations = showsSubway ? nearby.map { ("s" + $0.id, $0.station.coordinate) } : []
         let stops = busPlaces.compactMap { place in
             place.ways.first.map { ("b" + $0.stop.id, CLLocationCoordinate2D(latitude: $0.stop.latitude, longitude: $0.stop.longitude)) }
         }
@@ -240,36 +379,174 @@ struct LiveView: View {
         return (0..<(kinds.map(\.count).max() ?? 0)).flatMap { index in
             kinds.compactMap { index < $0.count ? $0[index] : nil }
         }
+            // Then the stops along their lines, where there's room
+            + alongStops.map { ($0.id, $0.coordinate) }
     }
 
-    /// Hides each mark that would overlap one before it in `mapMarks` where the map is now.
+    /// How each mark shows where the map is now, most important first (`mapMarks`) and clear
+    /// of those before it: its sign, if that covers no other place; else a bubble on its place;
+    /// else merged into a bubble of its kind near enough, that one then standing for both; else
+    /// hidden. A sign never covers another place, so places by a station bubble rather than
+    /// vanish; but a bus stop's lines show if no mark covers much of them. Where one hides even with bubbles already merged, they're too crowded to show,
+    /// and none show.
     private func layOutMarks(_ proxy: MapProxy) {
+        let marks = mapMarks.compactMap { mark -> (id: String, kind: Character, point: CGPoint, sign: CGSize, bubble: CGSize)? in
+            guard let sign = markSizes[mark.id], let bubble = bubbleSizes[mark.id], let kind = mark.id.first,
+                  let point = proxy.convert(mark.coordinate, to: .local) else { return nil }
+            return (mark.id, kind, point, sign, bubble)
+        }
+        // With a little room round it
+        func rect(_ point: CGPoint, _ size: CGSize) -> CGRect {
+            CGRect(x: point.x - size.width / 2, y: point.y - size.height / 2, width: size.width, height: size.height)
+                .insetBy(dx: -3, dy: -3)
+        }
         var placed: [CGRect] = []
-        var hidden: Set<String> = []
-        for mark in mapMarks {
-            guard let size = markSizes[mark.id], let point = proxy.convert(mark.coordinate, to: .local) else { continue }
-            // Centred on its place, with a little room round it
-            let rect = CGRect(x: point.x - size.width / 2, y: point.y - size.height / 2,
-                              width: size.width, height: size.height).insetBy(dx: -3, dy: -3)
-            if placed.contains(where: { $0.intersects(rect) }) {
-                hidden.insert(mark.id)
+        var layout = MarkLayout()
+        var groups: [(leader: String, kind: Character, point: CGPoint, members: [String])] = []
+        var hiddenAlone = false
+        // Each mark's place, once, not again for every mark it's checked against. Stops along
+        // the lines don't keep others' signs off their places
+        let places = marks.map { $0.kind == "e" ? nil : rect($0.point, $0.bubble) }
+        for (index, mark) in marks.enumerated() {
+            let sign = rect(mark.point, mark.sign)
+            let coversOther = places.indices.contains { $0 != index && places[$0]?.intersects(sign) == true }
+            // A bus stop's lines, generously: still shown where they're crowded, if most of them
+            // can be seen, and whatever places they cover
+            let busFits = mark.kind == "b" && placed.allSatisfy { placedRect in
+                let overlap = placedRect.intersection(sign)
+                return overlap.isNull || overlap.width * overlap.height <= sign.width * sign.height * Self.busOverlap
+            }
+            // A stop along the lines shows its lines where they're clear of everything, and
+            // otherwise not at all, as there are so many
+            if mark.kind == "e" {
+                let clear = !placed.contains { $0.intersects(sign) }
+                if clear { placed.append(sign) }
+                layout.looks[mark.id] = clear ? .sign : .hidden
+                continue
+            }
+            if busFits || (!placed.contains(where: { $0.intersects(sign) }) && !coversOther) {
+                placed.append(sign)
+                layout.looks[mark.id] = .sign
+                continue
+            }
+            // Bubbles may touch: only a few points' overlap counts
+            let bubble = rect(mark.point, mark.bubble).insetBy(dx: 6, dy: 6)
+            if !placed.contains(where: { $0.intersects(bubble) }) {
+                placed.append(bubble)
+                layout.looks[mark.id] = .bubble
+                groups.append((mark.id, mark.kind, mark.point, [mark.id]))
+                continue
+            }
+            let near = groups.indices
+                .filter { groups[$0].kind == mark.kind }
+                .map { ($0, hypot(groups[$0].point.x - mark.point.x, groups[$0].point.y - mark.point.y)) }
+                .filter { $0.1 < Self.mergeReach }
+                .min { $0.1 < $1.1 }
+            if let (group, _) = near {
+                groups[group].members.append(mark.id)
             } else {
-                placed.append(rect)
+                hiddenAlone = true
+            }
+            layout.looks[mark.id] = .hidden
+        }
+        let merged = groups.filter { $0.members.count > 1 }
+        if hiddenAlone && !merged.isEmpty {
+            layout = MarkLayout(tooCrowded: true)
+        } else {
+            for group in merged {
+                layout.looks[group.leader] = .merged(group.members)
             }
         }
-        if hidden != hiddenMarks {
-            withAnimation(.easeOut(duration: 0.15)) { hiddenMarks = hidden }
+        if layout != markLayout {
+            withAnimation(.easeOut(duration: 0.2)) { markLayout = layout }
+        }
+    }
+
+    /// Seconds at least between laying the marks out while the map moves: each time is every
+    /// mark against every other, on the main thread, and the map moves every frame.
+    private static let layoutEvery: TimeInterval = 0.1
+
+    /// How much of a bus stop's lines may be covered by any one mark and still show.
+    private static let busOverlap: CGFloat = 0.35
+
+    /// How far off a bubble may be from one of its kind to merge into it, in points.
+    private static let mergeReach: CGFloat = 60
+
+    /// The lines of the stations and bus stops listed, for the map, and where they're found
+    /// from: the map's middle to about 100 m and the listed stops, which the lines' box and the
+    /// stops along them go by.
+    private var linesKey: [String] {
+        let middle = here.map { String(format: "%.3f,%.3f", $0.coordinate.latitude, $0.coordinate.longitude) } ?? ""
+        return (showsSubway ? nearby.flatMap(\.station.routes) : []) + ["|"]
+            + busPlaces.flatMap { $0.lines(at: live.mapNow).map(\.line) } + ["|", middle]
+            + busPlaces.flatMap { $0.ways.map { "\($0.stop.latitude),\($0.stop.longitude)" } }
+    }
+
+    /// The listed stations' lines, each its own colour, and the listed bus stops' lines, pale.
+    private func findLines() {
+        let points = nearby.map { $0.station.coordinate }
+            + busPlaces.compactMap { $0.ways.first.map { CLLocationCoordinate2D(latitude: $0.stop.latitude, longitude: $0.stop.longitude) } }
+            + [here?.coordinate].compactMap { $0 }
+        lines = NearbyLines(routes: showsSubway ? nearby.flatMap(\.station.routes) : [],
+                            busLines: busPlaces.flatMap { $0.lines(at: live.mapNow).map(\.line) }, around: points)
+        linesVersion += 1
+        alongStops = findAlongStops()
+    }
+
+    /// A stop along a listed bus stop's lines, marked with its lines but not listed.
+    private struct AlongStop: Identifiable {
+        let id: String
+        let coordinate: CLLocationCoordinate2D
+        let lines: [String]
+    }
+
+    /// Meters from the map's middle stops along the lines are marked, how far apart those of the
+    /// same lines are (about every other block, so each way's stops a block apart are one), and
+    /// how many at most, nearest first.
+    private static let alongReach: Double = 1500
+    private static let alongApart: Double = 150
+    /// Meters from a listed stop another isn't marked, as it's the listed one's other way.
+    private static let listedApart: Double = 60
+    private static let alongMost = 40
+
+    /// The stops along the listed bus stops' lines round the map's middle, but not those listed,
+    /// nor the other side of the street from one marked.
+    private func findAlongStops() -> [AlongStop] {
+        let drawn = Set(busPlaces.flatMap { $0.lines(at: live.mapNow).map { TrackShapes.busKey($0.line) } })
+        guard let center = here, !drawn.isEmpty else { return [] }
+        let listed = busPlaces.flatMap { $0.ways.map { CLLocation(latitude: $0.stop.latitude, longitude: $0.stop.longitude) } }
+        let degrees = Self.alongReach / Earth.metresPerDegree
+        let candidates = TrackShapes.busStops
+            .filter { abs($0.coordinate.latitude - center.coordinate.latitude) < degrees
+                && abs($0.coordinate.longitude - center.coordinate.longitude) < degrees * 1.4
+                && !drawn.isDisjoint(with: $0.lines) }
+            .map { stop in
+                let place = CLLocation(latitude: stop.coordinate.latitude, longitude: stop.coordinate.longitude)
+                return (stop: stop, place: place, meters: place.distance(from: center))
+            }
+            .filter { $0.meters < Self.alongReach }
+            // Each one's distance worked out once, not again in every comparison
+            .sorted { $0.meters < $1.meters }
+        var kept: [(stop: TrackShapes.BusStop, place: CLLocation)] = []
+        for (stop, place, _) in candidates where kept.count < Self.alongMost {
+            guard !listed.contains(where: { $0.distance(from: place) < Self.listedApart }),
+                  !kept.contains(where: { $0.stop.lines == stop.lines && $0.place.distance(from: place) < Self.alongApart }) else { continue }
+            kept.append((stop, place))
+        }
+        return kept.map { stop, _ in
+            AlongStop(id: "e\(stop.coordinate.latitude),\(stop.coordinate.longitude)", coordinate: stop.coordinate, lines: stop.lines)
         }
     }
 
     /// Everything on the map, to frame it again when they change.
-    private var framedIDs: [String] { mapMarks.map(\.id) }
+    private var framedIDs: [String] { mapMarks.map(\.id).filter { !$0.hasPrefix("e") } }
 
-    /// Frames you (or the pin) and the nearby stations; just you before there are any.
+    /// Frames you and the nearby stations; just you before there are any. Not once you've moved
+    /// the map, which stays where you put it.
     private func frame() {
         // Everything toggled off: leave the map where it is
-        guard let here, showsSubway || showsBuses || showsBikes else { return }
-        let stations = showsSubway ? nearby.map { CLLocationCoordinate2D(latitude: $0.station.lat, longitude: $0.station.lon) } : []
+        guard mapCenter == nil, let here, showsSubway || showsBuses || showsBikes else { return }
+        let stations = showsSubway ? nearby.map { $0.station.coordinate } : []
         let stops = busPlaces.compactMap { $0.ways.first.map { CLLocationCoordinate2D(latitude: $0.stop.latitude, longitude: $0.stop.longitude) } }
         let points = [here.coordinate] + stations + stops + shownDocks.map(\.dock.coordinate)
         let lats = points.map(\.latitude), lons = points.map(\.longitude)
@@ -278,43 +555,55 @@ struct LiveView: View {
         let region = MKCoordinateRegion(
             center: CLLocationCoordinate2D(latitude: (minLat + maxLat) / 2, longitude: (minLon + maxLon) / 2),
             // Room enough for the signs, which sit centred on their places, to clear the edges
-            span: MKCoordinateSpan(latitudeDelta: max((maxLat - minLat) * 1.9, 0.006),
-                                   longitudeDelta: max((maxLon - minLon) * 1.9, 0.006)))
+            span: MKCoordinateSpan(latitudeDelta: max((maxLat - minLat) * 1.4, 0.004),
+                                   longitudeDelta: max((maxLon - minLon) * 1.4, 0.004)))
+        // Where it comes to rest is where this put it, not a move of yours
+        framingUntil = .now.addingTimeInterval(1.5)
         withAnimation(.smooth) { camera = .region(region) }
     }
 
-    /// Near Me and Drop Pin as glass chips over the card, as New Trip's Home and Work, the one
-    /// the trains are for tinted. They lose their words where the row's too narrow for them.
-    private var chips: some View {
-        GlassEffectContainer(spacing: 8) {
-            ViewThatFits(in: .horizontal) {
-                places(iconOnly: false)
-                places(iconOnly: true)
+    /// Once the map's been moved off you, how far its middle is from you, over the map's top;
+    /// tapped, back to you, as the Nearby tab does. Only past 0.15 miles off, so a nudge of the
+    /// map doesn't bring it up.
+    @ViewBuilder private var movedNote: some View {
+        if let mapCenter, let you = location.location, you.distance(from: mapCenter) > 0.15 * 1609.344 {
+            Button(action: recenter) {
+                Label("\(Self.miles(you.distance(from: mapCenter))) from you. Tap to recenter.", systemImage: "location.fill")
+                    .font(.footnote.weight(.semibold))
+                    .padding(.horizontal, 14)
+                    .frame(height: 34)
+                    .contentShape(Capsule())
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .buttonStyle(.plain)
+            .glassEffect(.regular.interactive(), in: Capsule())
+            .padding(.top, 8)
+            .transition(.opacity)
         }
     }
 
-    private func places(iconOnly: Bool) -> some View {
-        HStack(spacing: 8) {
-            chip("Near Me", symbol: "location.fill", tinted: pin == nil && location.isAllowed, iconOnly: iconOnly,
-                 action: findLocation)
-                .accessibilityHint("Finds stations near where you are now")
-            chip("Drop Pin", symbol: pin == nil ? "mappin" : "mappin.circle.fill", tinted: pin != nil, iconOnly: iconOnly) {
-                droppingPin = true
-            }
-            .accessibilityHint(pin == nil ? "Drops a pin on the map to find stations near it" : "Moves the pin")
-        }
-        .fixedSize()
+    /// Turns off every kind Nearby lists but `on`, for a long press on it.
+    private func showOnly(_ on: Binding<Bool>) {
+        showsSubway = false
+        showsBuses = false
+        showsCitiBike = false
+        on.wrappedValue = true
+        onlyShown += 1
     }
 
-    /// What Nearby lists, at the card's foot as New Trip's ways to go: Subway and Bus each a
-    /// toggle, Citi Bike a menu, then when it last loaded. All off leaves just the row.
+    /// Bumped by `showOnly`, for its tap of feedback.
+    @State private var onlyShown = 0
+    /// Set as a long press shows only one kind, so letting go doesn't toggle it back off.
+    @State private var heldMode = false
+
+    /// What Nearby lists, at the card's foot as New Trip's ways to go: Subway, Bus and Citi Bike
+    /// each a toggle (the bikes counted are Settings' pick), then when it last loaded. All off
+    /// leaves just the row. A long press on a toggle shows only that kind.
     private var modesRow: some View {
         HStack(spacing: 8) {
-            modeToggle("Subway", symbol: "tram.fill", on: $showsSubway)
-            modeToggle("Bus", symbol: "bus.fill", on: $showsBuses)
-            bikeMenu
+            modeToggle("Subway", symbol: "tram.fill", on: $showsSubway, hint: "Shows stations nearby")
+            modeToggle("Bus", symbol: "bus.fill", on: $showsBuses, hint: "Shows bus stops nearby")
+            modeToggle("Citi Bike", symbol: "bicycle", on: $showsCitiBike, hint: "Shows Citi Bike docks nearby",
+                       eBike: bikeKinds == .eBike)
             Spacer(minLength: 0)
             if let updated, listing {
                 Text("Updated \(updated.formatted(date: .omitted, time: .shortened))")
@@ -325,12 +614,19 @@ struct LiveView: View {
         }
         .padding(.horizontal, Self.margin)
         .frame(height: Self.modesRowHeight)
+        .sensoryFeedback(.selection, trigger: onlyShown)
     }
 
-    /// What Nearby lists, an icon tinted while it's on, as New Trip's.
-    private func modeToggle(_ name: String, symbol: String, on: Binding<Bool>) -> some View {
+    /// What Nearby lists, an icon tinted while it's on, as New Trip's, a bolt badge on it for
+    /// e-bikes only; a long press on it shows only it.
+    private func modeToggle(_ name: String, symbol: String, on: Binding<Bool>, hint: String,
+                            eBike: Bool = false) -> some View {
         Button {
-            withAnimation(.smooth) { on.wrappedValue.toggle() }
+            guard !heldMode else {
+                heldMode = false
+                return
+            }
+            on.wrappedValue.toggle()
         } label: {
             Label(name, systemImage: symbol)
                 .labelStyle(.iconOnly)
@@ -338,75 +634,17 @@ struct LiveView: View {
                 .foregroundStyle(on.wrappedValue ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
                 .frame(width: 48, height: 38)
                 .background(on.wrappedValue ? AnyShapeStyle(.tint) : AnyShapeStyle(.quaternary), in: Capsule())
+                .eBikeBadge(eBike)
                 .contentShape(Capsule())
         }
         .buttonStyle(.plain)
+        .simultaneousGesture(LongPressGesture().onEnded { _ in
+            heldMode = true
+            showOnly(on)
+        })
         .accessibilityAddTraits(on.wrappedValue ? .isSelected : [])
-        .accessibilityHint(name == "Subway" ? "Shows stations nearby" : "Shows bus stops nearby")
-    }
-
-    /// Citi Bike docks, a menu as New Trip's: off, or docks with bikes, e-bikes or either. Tinted
-    /// while on, a bolt badge on it while it counts e-bikes.
-    private var bikeMenu: some View {
-        Menu {
-            Picker("Citi Bike", selection: Binding(
-                get: { bikes?.rawValue ?? "" },
-                set: { picked in
-                    let choice = NearbyBikes(rawValue: picked)
-                    withAnimation(.smooth) {
-                        showsClassicBikes = choice == .bike || choice == .both
-                        showsEBikes = choice == .eBike || choice == .both
-                    }
-                })) {
-                Text("Off").tag("")
-                ForEach(NearbyBikes.allCases, id: \.self) { choice in
-                    Label(choice.name, systemImage: choice.symbol).tag(choice.rawValue)
-                }
-            }
-        } label: {
-            Image(systemName: "bicycle")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(showsBikes ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
-                .frame(width: 48, height: 38)
-                .background(showsBikes ? AnyShapeStyle(.tint) : AnyShapeStyle(.quaternary), in: Capsule())
-                .overlay(alignment: .topTrailing) {
-                    if showsEBikes {
-                        Image(systemName: "bolt.fill")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(.black)
-                            .frame(width: 17, height: 17)
-                            .background(Circle().fill(.yellow))
-                            .offset(x: 3, y: -3)
-                    }
-                }
-                .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Citi Bike")
-        .accessibilityValue(bikes?.name ?? "Off")
-        .accessibilityHint("Shows Citi Bike docks nearby")
-    }
-
-    private func chip(_ title: String, symbol: String, tinted: Bool, iconOnly: Bool = false,
-                      action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Group {
-                if iconOnly {
-                    Image(systemName: symbol)
-                } else {
-                    Label(title, systemImage: symbol)
-                }
-            }
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(tinted ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
-                .padding(.horizontal, iconOnly ? 12 : 14)
-                .frame(height: 38)
-                .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .glassEffect(.regular.interactive(), in: Capsule())
-        .accessibilityLabel(title)
-        .accessibilityAddTraits(tinted ? .isSelected : [])
+        .accessibilityHint(hint)
+        .accessibilityAction(named: "Only \(name)") { showOnly(on) }
     }
 
     /// Whether there are stations, stops or docks to list, rather than why not.
@@ -416,22 +654,72 @@ struct LiveView: View {
 
     /// The trains at each nearby station, the buses at each stop and the bikes at each dock,
     /// scrolling within the card past `cardHeight`, or, with none to show, why, with what to do
-    /// about it, at its full height so its buttons show; the modes row at its foot. All toggled
-    /// off, just the row.
+    /// about it, at its full height so its buttons show; room for the modes row at its foot,
+    /// drawn over it on its own. All toggled off, just the row's room. It opens up out of the
+    /// row and closes back down into it.
     private var card: some View {
         VStack(spacing: 0) {
-            if listing {
-                ScrollViewReader { scroller in
-                    ScrollView {
+            if cardPanel != nil {
+                panel
+                    .transition(.opacity.combined(with: .scale(scale: 0.85, anchor: .bottom)))
+            }
+            Color.clear.frame(height: Self.modesRowHeight)
+        }
+        .clipShape(Self.card)
+        .glassEffect(.regular, in: Self.card)
+        .animation(.smooth, value: cardPanel)
+        // The list's height, once measured, grows and shrinks the card smoothly too
+        .animation(.smooth, value: trainsHeight)
+    }
+
+    /// What the card shows over the modes row, if anything.
+    private enum CardPanel: Equatable {
+        case crowded, list, empty
+    }
+
+    private var cardPanel: CardPanel? {
+        if listing && markLayout.tooCrowded { .crowded }
+        else if listing { .list }
+        else if showsSubway || showsBuses || showsBikes { .empty }
+        else { nil }
+    }
+
+    @ViewBuilder private var panel: some View {
+        VStack(spacing: 0) {
+            if listing && markLayout.tooCrowded {
+                ContentUnavailableView {
+                    Label("Zoom In to See What's Nearby", systemImage: "plus.magnifyingglass")
+                } description: {
+                    Text("Zoomed out this far, there's too much to show.")
+                }
+                .padding(.vertical, 16)
+                .padding(.horizontal, 8)
+                .frame(maxWidth: .infinity)
+                .fixedSize(horizontal: false, vertical: true)
+                Divider()
+            } else if listing {
+                ScrollView {
+                    VStack(spacing: 0) {
                         trains
+                            .coordinateSpace(.named(Self.tilesSpace))
                             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { trainsHeight = $0 }
+                        Color.clear.frame(height: focusRoom)
                     }
-                    // A tap on a map mark brings its place to the top of the card
-                    .onChange(of: focusedMark) { _, mark in
-                        guard let mark else { return }
-                        withAnimation(.smooth) { scroller.scrollTo(mark, anchor: .top) }
-                        focusedMark = nil
-                    }
+                }
+                .scrollPosition($cardScroll)
+                // A tap on a map mark brings its place to the top of the card, keeping the
+                // list's top margin over it, with room under the list for one near its end
+                .onChange(of: focusedMark) { _, mark in
+                    guard let mark else { return }
+                    focusedMark = nil
+                    let shown = Self.cardHeight - Self.modesRowHeight
+                    guard trainsHeight > shown, let top = tileTops[mark] else { return }
+                    let target = max(0, top - Self.tilesMargin)
+                    focusRoom = max(0, shown - (trainsHeight - target))
+                    withAnimation(.smooth) { cardScroll.scrollTo(y: target) }
+                }
+                .onScrollGeometryChange(for: Bool.self) { $0.visibleRect.maxY > trainsHeight + 0.5 } action: { roomShown, shows in
+                    if roomShown && !shows { focusRoom = 0 }
                 }
                 .scrollBounceBehavior(.basedOnSize)
                 .frame(height: min(trainsHeight, Self.cardHeight - Self.modesRowHeight))
@@ -444,10 +732,7 @@ struct LiveView: View {
                     .fixedSize(horizontal: false, vertical: true)
                 Divider()
             }
-            modesRow
         }
-        .clipShape(Self.card)
-        .glassEffect(.regular, in: Self.card)
     }
 
     /// Any failure note, then each station, bus stop and dock as a tile of its own (stations
@@ -464,11 +749,13 @@ struct LiveView: View {
                 // Identified as their map marks are, for a tap on one to scroll here
                 ForEach(nearby, id: \.markID) { result in
                     NearbyTile(symbol: "tram.fill", kind: "Station", name: result.station.name,
-                               walkMinutes: result.walkMinutes) {
+                               distance: distance(of: result.markID, walkMinutes: result.walkMinutes,
+                                                  at: result.station.location)) {
                         ForEach(result.station.routes, id: \.self) { route in
                             NearbyLineRow(station: result.station, route: route, live: live, marks: marks) { path.append($0) }
                         }
                     }
+                    .notingTop(of: result.markID, in: $tileTops)
                 }
             }
             if showsBuses { busTiles }
@@ -481,7 +768,7 @@ struct LiveView: View {
                     .padding(.horizontal, 8)
             }
         }
-        .padding(8)
+        .padding(Self.tilesMargin)
     }
 
     /// Each nearby bus place's lines with their next buses each way; or, with none, why.
@@ -495,18 +782,13 @@ struct LiveView: View {
             NearbyNoteTile(symbol: "bus.fill", text: "No bus stops within ¼ mile.")
         case .places:
             ForEach(busPlaces, id: \.self) { place in
-                NearbyTile(symbol: "bus.fill", kind: "Bus stop", name: place.name, walkMinutes: place.walkMinutes) {
-                    let lines = place.lines(at: live.now)
-                    if lines.isEmpty {
-                        Text("No buses due").font(.subheadline).foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.vertical, 6)
-                    }
-                    ForEach(lines, id: \.line) { pick in
-                        NearbyBusRow(pick: pick, now: live.now, marks: marks)
-                    }
+                let stop = place.ways.first?.stop
+                NearbyTile(symbol: "bus.fill", kind: "Bus stop", name: place.name,
+                           distance: distance(of: "b" + (stop?.id ?? ""), walkMinutes: place.walkMinutes,
+                                              at: CLLocation(latitude: stop?.latitude ?? 0, longitude: stop?.longitude ?? 0))) {
+                    NearbyBusLines(place: place, live: live, marks: marks)
                 }
-                .id("b" + (place.ways.first?.stop.id ?? ""))
+                .notingTop(of: "b" + (place.ways.first?.stop.id ?? ""), in: $tileTops)
             }
         }
     }
@@ -520,52 +802,50 @@ struct LiveView: View {
                 NearbyNoteTile(symbol: bikes.symbol, text: "No docks with \(bikes == .eBike ? "e-bikes" : "bikes") within ½ mile.")
             }
             ForEach(shownDocks, id: \.markID) { near in
-                NearbyTile(symbol: bikes.symbol, kind: "Citi Bike dock", name: near.dock.name, walkMinutes: near.walkMinutes) {
+                NearbyTile(symbol: bikes.symbol, kind: "Citi Bike dock", name: near.dock.name,
+                           distance: distance(of: near.markID, walkMinutes: near.walkMinutes, at: near.dock.location)) {
                     NearbyDockCounts(dock: near.dock, bikes: bikes)
                 }
+                .notingTop(of: near.markID, in: $tileTops)
             }
         } else {
             NearbyNoteTile(symbol: "bicycle", text: "Finding Citi Bike docks…", finding: true)
         }
     }
 
-    /// Whether there's a place to list stations near: the pin, or your location once found.
+    /// Whether there's a place to list stations near: the moved map's middle, or your location
+    /// once found.
     private var showsStations: Bool {
-        pin != nil || (location.isAllowed && !location.failed && location.location != nil)
+        mapCenter != nil || (location.isAllowed && !location.failed && location.location != nil)
     }
 
     /// Why there are no station cards, with what to do about it.
     @ViewBuilder private var emptyState: some View {
-        if pin != nil {
+        if mapCenter != nil {
             ContentUnavailableView {
-                Label("No Stations Nearby", systemImage: "mappin.slash")
+                Label("No Stations Here", systemImage: "map")
             } description: {
-                Text("No stations within \(Nearby.rangeDescription) of the pin.")
-            } actions: {
-                Button("Move the Pin") { droppingPin = true }
-                    .buttonStyle(.glassProminent)
+                Text("No stations within \(Nearby.rangeDescription) of the map's middle.")
             }
         } else if location.status == .notDetermined {
             ContentUnavailableView {
                 Label("Trains Near You", systemImage: "location.fill")
             } description: {
-                Text("See the next trains at the stations closest to you, or drop a pin anywhere.")
+                Text("See the next trains at the stations closest to you, or move the map to see them anywhere.")
             } actions: {
                 Button("Allow Location") { location.find() }
                     .buttonStyle(.glassProminent)
-                Button("Drop a Pin") { droppingPin = true }
             }
         } else if !location.isAllowed {
             ContentUnavailableView {
                 Label("Location Is Off", systemImage: "location.slash")
             } description: {
-                Text("Turn on Location for Leeway in Settings, or drop a pin to see trains near somewhere else.")
+                Text("Turn on Location for Leeway in Settings, or move the map to see trains near somewhere else.")
             } actions: {
                 if let url = URL(string: UIApplication.openSettingsURLString) {
                     Link("Turn On in Settings", destination: url)
                         .buttonStyle(.glassProminent)
                 }
-                Button("Drop a Pin") { droppingPin = true }
             }
         } else if location.failed {
             ContentUnavailableView {
@@ -583,8 +863,6 @@ struct LiveView: View {
                 Label("No Stations Nearby", systemImage: "tram")
             } description: {
                 Text("No stations within \(Nearby.rangeDescription) of you.")
-            } actions: {
-                Button("Drop a Pin") { droppingPin = true }
             }
         }
     }
@@ -600,9 +878,19 @@ struct LiveView: View {
         await live.load(trains, includingOtherLines: false)
         let places = await busPlaces, found = await allDocks
         guard !Task.isCancelled else { return }
-        if wantsBuses, here != nil {
-            // A failed refresh keeps the stops last found, rather than dropping them
-            buses = places.map { .places($0) } ?? (buses.places.isEmpty ? .unavailable : buses)
+        // Loads not cancelled by a move (recentering, coming back to the app) may finish after
+        // the one for where Nearby is now: not stops and docks near where it was
+        if let now = self.here, let here, now.distance(from: here) > Self.followMeters { return }
+        if wantsBuses, let here {
+            if let places {
+                buses = .places(places)
+                busesFrom = here
+            } else {
+                // A failed refresh keeps the stops last found, rather than dropping them; not
+                // once the map's moved on, where they'd be listed as near somewhere they aren't
+                let samePlace = busesFrom.map { $0.distance(from: here) <= Self.followMeters } ?? false
+                buses = buses.places.isEmpty || !samePlace ? .unavailable : buses
+            }
         }
         if wantsBikes, let here {
             docksFailed = found == nil
@@ -622,6 +910,15 @@ extension NearbyDock {
     fileprivate var markID: String { "d" + id }
 }
 
+extension View {
+    /// Notes where this tile starts in the card's list, under its map mark's id.
+    fileprivate func notingTop(of id: String, in tops: Binding<[String: CGFloat]>) -> some View {
+        onGeometryChange(for: CGFloat.self) { $0.frame(in: .named("nearbyTiles")).minY } action: {
+            tops.wrappedValue[id] = $0
+        }
+    }
+}
+
 /// What restarts Nearby's loading: its trains, what's switched on, and where it's near.
 private struct LoadKey: Equatable {
     var trains: [String]
@@ -638,7 +935,7 @@ struct NearbyDock: Identifiable, Hashable {
     let meters: Double
 
     var id: String { dock.id }
-    var walkMinutes: Int { max(1, Int((TripPlanner.walkSeconds(meters) / 60).rounded())) }
+    var walkMinutes: Int { TripPlanner.walkMinutes(meters) }
 
     /// Beyond this (about half a mile), no docks are listed.
     private static let range: Double = 800
@@ -653,6 +950,14 @@ struct NearbyDock: Identifiable, Hashable {
     }
 }
 
+/// How far a place in Nearby's card is.
+private enum NearbyDistance {
+    /// Minutes' walk from you
+    case walk(Int)
+    /// "1.2 miles"
+    case fromYou(String)
+}
+
 /// One station, bus stop or dock in Nearby's card, a tile of its own so each is clearly apart
 /// from the next: what it is and its name over its walk, then its rows.
 private struct NearbyTile<Content: View>: View {
@@ -660,8 +965,17 @@ private struct NearbyTile<Content: View>: View {
     /// "Station", "Bus stop": said by VoiceOver, shown as the icon.
     let kind: String
     let name: String
-    let walkMinutes: Int
+    /// Its walk, or how far it is from you; nil, neither.
+    let distance: NearbyDistance?
     @ViewBuilder let content: Content
+
+    private var spokenDistance: String {
+        switch distance {
+        case .walk(let minutes): ", \(minutes) minute walk"
+        case .fromYou(let miles): ", \(miles) from you"
+        case nil: ""
+        }
+    }
 
     var body: some View {
         VStack(spacing: 4) {
@@ -674,14 +988,20 @@ private struct NearbyTile<Content: View>: View {
                     .font(.headline)
                     .lineLimit(2)
                 Spacer(minLength: 8)
-                Label("\(walkMinutes) min", systemImage: "figure.walk")
-                    .font(.subheadline.weight(.medium))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-                    .fixedSize()
+                Group {
+                    switch distance {
+                    case .walk(let minutes): Label("\(minutes) min", systemImage: "figure.walk")
+                    case .fromYou(let miles): Label(miles, systemImage: "location.fill")
+                    case nil: EmptyView()
+                    }
+                }
+                .font(.subheadline.weight(.medium))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .fixedSize()
             }
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel("\(kind), \(name), \(walkMinutes) minute walk")
+            .accessibilityLabel("\(kind), \(name)\(spokenDistance)")
             .accessibilityAddTraits(.isHeader)
             content
         }
@@ -715,6 +1035,26 @@ private struct NearbyNoteTile: View {
 }
 
 /// One bus line at a stop with its next buses each way, as `NearbyLineRow` has a train's.
+/// A bus stop tile's lines, by the buses still due: its own view, so the ticks that count them
+/// down redraw it alone, not the whole page and its map.
+private struct NearbyBusLines: View {
+    let place: NearbyBusPlace
+    let live: LiveTrains
+    let marks: TimeMarks
+
+    var body: some View {
+        let lines = place.lines(at: live.now)
+        if lines.isEmpty {
+            Text("No buses due").font(.subheadline).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 6)
+        }
+        ForEach(lines, id: \.line) { pick in
+            NearbyBusRow(pick: pick, now: live.now, marks: marks)
+        }
+    }
+}
+
 private struct NearbyBusRow: View {
     let pick: NearbyBusPick
     let now: Date
@@ -755,12 +1095,33 @@ private struct NearbyBusRow: View {
     }
 }
 
-/// Which bikes Nearby counts at a dock, as its Citi Bike menu picks. Free docks aren't shown
-/// here: they matter once you're riding, which New Trip's bike trips show.
-enum NearbyBikes: String, CaseIterable {
+/// Which Citi Bikes you'll ride, as Settings picks: Nearby counts them at a dock, and New Trip
+/// plans trips on them. Free docks aren't shown on Nearby: they matter once you're riding,
+/// which New Trip's bike trips show.
+enum BikeKinds: String, CaseIterable {
     case bike
     case eBike
     case both
+
+    /// Where the pick is kept.
+    static let key = "bikeKinds"
+    /// Whether Settings has both Citi Bike tiles off: New Trip offers no Citi Bike then (Nearby
+    /// still counts these). The kinds are kept as they were, for turning one on again.
+    static let offKey = "citiBikeOff"
+    /// Where it was before Settings had it: New Trip's old Bike menu, and Nearby's two switches.
+    static let oldTripKey = "tripBike"
+    static let oldNearbyBikesKey = "nearbyShowsBikes"
+    static let oldNearbyEBikesKey = "nearbyShowsEBikes"
+    /// What it was before Settings had it: from New Trip's old Bike menu, or Nearby's.
+    static var saved: BikeKinds {
+        let defaults = UserDefaults.standard
+        if let trip = defaults.string(forKey: oldTripKey), let kind = BikeKinds(rawValue: trip) { return kind }
+        switch (defaults.bool(forKey: oldNearbyBikesKey), defaults.bool(forKey: oldNearbyEBikesKey)) {
+        case (true, false): return .bike
+        case (false, true): return .eBike
+        default: return .both
+        }
+    }
 
     var name: String {
         switch self {
@@ -790,11 +1151,10 @@ enum NearbyBikes: String, CaseIterable {
     }
 }
 
-/// A dock's bikes, e-bikes or both side by side, as the Citi Bike menu picks, in orange where
-/// they're few (`CitiBike.few`).
+/// A dock's bikes, e-bikes or both side by side, as the Citi Bike menu picks.
 private struct NearbyDockCounts: View {
     let dock: CitiBike.Dock
-    let bikes: NearbyBikes
+    let bikes: BikeKinds
 
     var body: some View {
         HStack(spacing: 0) {
@@ -810,7 +1170,6 @@ private struct NearbyDockCounts: View {
             Text("\(number)")
                 .font(.title3.weight(.bold))
                 .monospacedDigit()
-                .foregroundStyle(number < CitiBike.few ? AnyShapeStyle(.orange) : AnyShapeStyle(.primary))
             Label(name, systemImage: symbol)
                 .font(.caption.weight(.medium))
                 .foregroundStyle(.secondary)
@@ -821,9 +1180,8 @@ private struct NearbyDockCounts: View {
     }
 }
 
-/// A station or bus stop on Nearby's map, as a station sign: the name in white on `fill`
-/// (black for the subway, bus blue for a stop) over its bullets or badges, a white rule along
-/// the top.
+/// A station on Nearby's map, as a station sign: the name in white on `fill` over its
+/// bullets, a white rule along the top.
 private struct MapSign<Marks: View>: View {
     let name: String
     let fill: Color
@@ -848,7 +1206,35 @@ private struct MapSign<Marks: View>: View {
     }
 }
 
-/// A bus line on a bus stop's sign: white, with the line in bus blue.
+/// A bus stop on Nearby's map: just its lines in a bus blue pill, small enough that stops a
+/// block apart don't crowd each other off. Its name is on its tile.
+private struct BusStopMark: View {
+    let name: String
+    let lines: [String]
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(lines, id: \.self) { MapSignBusBadge(line: $0) }
+            // No buses due: still a stop
+            if lines.isEmpty {
+                Image(systemName: "bus.fill")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 15, height: 15)
+            }
+        }
+        .padding(3)
+        .background(BusBadge.blue, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(.white, lineWidth: 1.5))
+        .shadow(color: .black.opacity(0.3), radius: 2, y: 1)
+        .fixedSize()
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(name)
+        .accessibilityValue(lines.map(BusBadge.spokenName).joined(separator: ", "))
+    }
+}
+
+/// A bus line on a bus stop's mark: white, with the line in bus blue.
 private struct MapSignBusBadge: View {
     let line: String
 
@@ -864,11 +1250,10 @@ private struct MapSignBusBadge: View {
 }
 
 /// A dock on Nearby's map: a Citi Bike blue capsule with the bikes the Citi Bike menu picked,
-/// each kind with its symbol (a bike, or a bolt for e-bikes) and count, a count on orange where
-/// it's few.
+/// each kind with its symbol (a bike, or a bolt for e-bikes) and count.
 private struct DockMark: View {
     let dock: CitiBike.Dock
-    let bikes: NearbyBikes
+    let bikes: BikeKinds
 
     var body: some View {
         HStack(spacing: 6) {
@@ -893,19 +1278,102 @@ private struct DockMark: View {
             Image(systemName: symbol).font(.system(size: 10, weight: .bold))
             Text("\(number)").font(.system(size: 12, weight: .heavy)).monospacedDigit()
         }
-        .padding(.horizontal, number < CitiBike.few ? 4 : 0)
         .frame(height: 16)
-        .background { if number < CitiBike.few { Capsule().fill(.orange) } }
     }
 }
 
-extension View {
-    /// A map mark: its size noted under `id` for laying the marks out, and hidden (and
-    /// untappable) while it's among `hidden`.
-    fileprivate func placed(id: String, hidden: Set<String>, sizes: Binding<[String: CGSize]>) -> some View {
-        onGeometryChange(for: CGSize.self) { $0.size } action: { sizes.wrappedValue[id] = $0 }
-            .opacity(hidden.contains(id) ? 0 : 1)
-            .allowsHitTesting(!hidden.contains(id))
+/// How Nearby's map marks show, by id: each as its sign, a bubble, a bubble standing for
+/// several (their ids, its own first), or hidden, merged into another's; and whether they're too
+/// crowded to show at all.
+private struct MarkLayout: Equatable {
+    enum Look: Equatable {
+        case sign, bubble, merged([String]), hidden
+    }
+
+    var looks: [String: Look] = [:]
+    var tooCrowded = false
+}
+
+/// A place on Nearby's map as `layout` has it: its sign, or its bubble, each measured for
+/// laying them out. `tap` gets the ids a merged bubble stands for, or nil for one place.
+private struct MapMark<Sign: View, Bubble: View>: View {
+    let id: String
+    let layout: MarkLayout
+    @Binding var signSizes: [String: CGSize]
+    @Binding var bubbleSizes: [String: CGSize]
+    let sign: Sign
+    let bubble: (Int?) -> Bubble
+    let tap: ([String]?) -> Void
+
+    private var look: MarkLayout.Look { layout.tooCrowded ? .hidden : layout.looks[id] ?? .sign }
+
+    var body: some View {
+        let showsBubble = look == .bubble || look.merged != nil
+        Button {
+            tap(look.merged)
+        } label: {
+            ZStack {
+                sign
+                    .onGeometryChange(for: CGSize.self) { $0.size } action: { signSizes[id] = $0 }
+                    .opacity(look == .sign ? 1 : 0)
+                    .allowsHitTesting(look == .sign)
+                bubble(look.merged?.count)
+                    // Measured on its own, as a count would widen it
+                    .background {
+                        bubble(nil).hidden()
+                            .onGeometryChange(for: CGSize.self) { $0.size } action: { bubbleSizes[id] = $0 }
+                    }
+                    .opacity(showsBubble ? 1 : 0)
+                    .scaleEffect(showsBubble ? 1 : 0.6)
+                    .allowsHitTesting(showsBubble)
+            }
+        }
+        .buttonStyle(.plain)
+        .opacity(look == .hidden ? 0 : 1)
+        .allowsHitTesting(look != .hidden)
+        .accessibilityHidden(look == .hidden)
+        .accessibilityValue(look.merged.map { "\($0.count) here" } ?? "")
+    }
+}
+
+extension MarkLayout.Look {
+    /// The ids a merged bubble stands for.
+    fileprivate var merged: [String]? {
+        if case .merged(let ids) = self { ids } else { nil }
+    }
+}
+
+/// A place on Nearby's map condensed to a bubble of its kind's colour and symbol, with a number
+/// (a dock's bikes) if given. Standing for `count` places, it shows how many, stacked.
+private struct MapBubble: View {
+    let fill: Color
+    let symbol: String
+    var count: Int?
+    var number: Int?
+
+    var body: some View {
+        let shown = count ?? number
+        HStack(spacing: 3) {
+            Image(systemName: symbol).font(.system(size: 10, weight: .bold))
+            if let shown {
+                Text("\(shown)").font(.system(size: 12, weight: .heavy)).monospacedDigit()
+            }
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, shown == nil ? 0 : 7)
+        .frame(minWidth: 22, minHeight: 22)
+        .background(Capsule().fill(fill))
+        .overlay(Capsule().stroke(.white, lineWidth: 1.5))
+        // Several: another peeking out behind
+        .background {
+            if count != nil {
+                Capsule().fill(fill)
+                    .overlay(Capsule().stroke(.white, lineWidth: 1.5))
+                    .offset(x: 3, y: -3)
+            }
+        }
+        .shadow(color: .black.opacity(0.3), radius: 2, y: 1)
+        .fixedSize()
     }
 }
 
@@ -922,7 +1390,15 @@ final class LiveTrains {
     /// When the last load finished; nil before the first.
     private(set) var updated: Date?
     /// Ticks every few seconds so the minutes count down.
-    var now = Date.now
+    var now = Date.now {
+        didSet {
+            if now.timeIntervalSince(mapNow) >= Self.mapTick || now < mapNow { mapNow = now }
+        }
+    }
+    /// `now` a minute at a time, for the map: its bus stops' lines and the lines drawn, by the
+    /// buses still due. Not the whole map redrawn every tick for a bus gone a few seconds sooner.
+    private(set) var mapNow = Date.now
+    private static let mapTick: TimeInterval = 60
 
     /// Fetches via `TrainService.trains(for:)`. Trains missing from the result lose their
     /// old times rather than count down stale ones. Trains not in `selections` keep their
@@ -968,12 +1444,7 @@ extension View {
     /// Updates `now` every 10 seconds so, between loads, minutes count down and
     /// uncatchable trains drop off.
     func ticking(_ now: Binding<Date>) -> some View {
-        task {
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(10))
-                now.wrappedValue = .now
-            }
-        }
+        modifier(Ticking(now: now))
     }
 
     /// Runs `load` now and every minute (restarting when `id` changes), and after
@@ -981,6 +1452,31 @@ extension View {
     fileprivate func updatingTrains<ID: Equatable>(_ live: LiveTrains, id: ID, refreshing: @escaping () -> Void = {},
                                                    load: @escaping () async -> Void) -> some View {
         modifier(UpdatingTrains(live: live, id: id, refreshing: refreshing, load: load))
+    }
+}
+
+/// What a page's loop of loads runs for: its `id`, and not while the app's in the background.
+/// A walk keeps the app running there, which kept the loop of a page left open going too.
+struct Polling<ID: Equatable>: Equatable {
+    let id: ID
+    let inForeground: Bool
+}
+
+/// `ticking(_:)`: not while the app's in the background, and caught up at once as it comes back.
+private struct Ticking: ViewModifier {
+    let now: Binding<Date>
+    @Environment(\.scenePhase) private var scenePhase
+
+    func body(content: Content) -> some View {
+        content.task(id: scenePhase != .background) {
+            guard scenePhase != .background else { return }
+            now.wrappedValue = .now
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(10))
+                guard !Task.isCancelled else { return }
+                now.wrappedValue = .now
+            }
+        }
     }
 }
 
@@ -997,7 +1493,9 @@ private struct UpdatingTrains<ID: Equatable>: ViewModifier {
                 refreshing()
                 await load()
             }
-            .task(id: id) {
+            // Restarted as the app comes back, loading then
+            .task(id: Polling(id: id, inForeground: scenePhase != .background)) {
+                guard scenePhase != .background else { return }
                 while !Task.isCancelled {
                     await load()
                     // After a failure, sooner; and as soon as the network's back (a station
@@ -1009,7 +1507,6 @@ private struct UpdatingTrains<ID: Equatable>: ViewModifier {
             .onChange(of: scenePhase) { _, phase in
                 guard phase == .active else { return }
                 refreshing()
-                Task { await load() }
             }
     }
 }
@@ -1083,71 +1580,6 @@ private struct NearbyLineRow: View {
             }
         }
         .padding(.vertical, 6)
-    }
-}
-
-/// A map to tap a place for Nearby to search around.
-private struct DropPinSheet: View {
-    /// The last pin or your location; nil falls back to Prospect Av.
-    let start: CLLocationCoordinate2D?
-    let drop: (CLLocation) -> Void
-    @Environment(\.dismiss) private var dismiss
-    @State private var coordinate: CLLocationCoordinate2D?
-    /// The middle of the map as last moved, for VoiceOver's Drop Pin Here; nil before it's moved.
-    @State private var cameraCenter: CLLocationCoordinate2D?
-
-    private var center: CLLocationCoordinate2D {
-        start ?? Selection.fallback.station.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
-            ?? CLLocationCoordinate2D(latitude: 40.7128, longitude: -74.0060)
-    }
-
-    var body: some View {
-        NavigationStack {
-            MapReader { proxy in
-                Map(initialPosition: .region(MKCoordinateRegion(center: center, latitudinalMeters: 2500, longitudinalMeters: 2500))) {
-                    UserAnnotation()
-                    if let coordinate {
-                        Marker("Pin", systemImage: "mappin", coordinate: coordinate)
-                            .tint(.red)
-                    }
-                }
-                .onTapGesture { point in
-                    coordinate = proxy.convert(point, from: .local)
-                }
-                .onMapCameraChange(frequency: .onEnd) { context in
-                    cameraCenter = context.region.center
-                }
-                // Without tapping a point: the pin goes in the middle of the map
-                .accessibilityAction(named: "Drop Pin Here") {
-                    coordinate = cameraCenter ?? center
-                }
-            }
-            // A glass capsule floating over the map
-            .safeAreaInset(edge: .bottom) {
-                Text(coordinate == nil ? "Tap the map to drop a pin." : "Tap elsewhere to move it.")
-                    .font(.footnote)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .glassEffect()
-                    .padding(.bottom, 8)
-            }
-            .navigationTitle("Drop Pin")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button(role: .cancel) { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button(role: .confirm) {
-                        if let coordinate {
-                            drop(CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude))
-                        }
-                        dismiss()
-                    }
-                    .disabled(coordinate == nil)
-                }
-            }
-        }
     }
 }
 
@@ -1239,7 +1671,7 @@ private struct Minutes: View {
 }
 
 #Preview {
-    LiveView(allowingLocation: .constant(false))
+    LiveView(allowingLocation: .constant(false), recenterRequests: 0)
         .environment(WidgetStore())
         .environment(SettingsStore())
 }

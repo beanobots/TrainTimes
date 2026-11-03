@@ -5,12 +5,47 @@ import Foundation
 /// Trip's rides along the track rather than straight from station to station.
 enum TrackShapes {
     /// Each GTFS route id's shapes, the longest first.
-    static let byRoute: [String: [[CLLocationCoordinate2D]]] = {
-        guard let url = Bundle.main.url(forResource: "shapes", withExtension: "json"),
+    static let byRoute = load("shapes")
+
+    /// Each bus line's streets (bus_shapes.json, made by tools/make_bus_shapes.py), by its name
+    /// as `busKey` has it, the longest first: both ways once where they run the same street.
+    static let byBusLine = load("bus_shapes")
+
+    /// A bus stop and the lines stopping there, named as `busKey` has them.
+    struct BusStop {
+        let coordinate: CLLocationCoordinate2D
+        let lines: [String]
+    }
+
+    /// Every bus stop (bus_stops.json, made by tools/make_bus_stops.py).
+    static let busStops: [BusStop] = {
+        struct File: Decodable {
+            var lines: [String]
+            var stops: [[Int]]
+        }
+        guard let url = Bundle.main.url(forResource: "bus_stops", withExtension: "json"),
+              let data = try? Data(contentsOf: url),
+              let file = try? JSONDecoder().decode(File.self, from: data) else { return [] }
+        return file.stops.compactMap { row in
+            guard row.count > 2 else { return nil }
+            return BusStop(coordinate: CLLocationCoordinate2D(latitude: Double(row[0]) / 1e5, longitude: Double(row[1]) / 1e5),
+                           lines: row.dropFirst(2).compactMap { file.lines.indices.contains($0) ? file.lines[$0] : nil })
+        }
+    }()
+
+    /// A bus line's name as bus_shapes.json is keyed: "M15-SBS" and "M15 SBS" are "M15+".
+    static func busKey(_ line: String) -> String {
+        var name = line.uppercased().filter { !$0.isWhitespace && $0 != "-" }
+        if name.hasSuffix("SBS") { name = String(name.dropLast(3)) + "+" }
+        return name
+    }
+
+    private static func load(_ name: String) -> [String: [[CLLocationCoordinate2D]]] {
+        guard let url = Bundle.main.url(forResource: name, withExtension: "json"),
               let data = try? Data(contentsOf: url),
               let encoded = try? JSONDecoder().decode([String: [[Int]]].self, from: data) else { return [:] }
         return encoded.mapValues { $0.map(decode) }
-    }()
+    }
 
     /// Meters a station may be from a shape that's taken to pass it.
     private static let reach: CLLocationDistance = 250
@@ -100,10 +135,11 @@ enum TrackShapes {
 
     /// Where on `shape` is closest to `coordinate`: the segment, how far along it (0 to 1), the
     /// point, and how many meters away.
-    private static func nearest(_ coordinate: CLLocationCoordinate2D, on shape: [CLLocationCoordinate2D])
+    static func nearest(_ coordinate: CLLocationCoordinate2D, on shape: [CLLocationCoordinate2D])
         -> (segment: Int, along: Double, point: CLLocationCoordinate2D, meters: Double)? {
+        guard shape.count > 1 else { return nil }
         // Meters east and north of `coordinate`, near enough on a flat map at this scale
-        let perDegree = 111_320.0
+        let perDegree = Earth.metresPerDegree
         let eastPerDegree = perDegree * cos(coordinate.latitude * .pi / 180)
         func flat(_ point: CLLocationCoordinate2D) -> (x: Double, y: Double) {
             ((point.longitude - coordinate.longitude) * eastPerDegree, (point.latitude - coordinate.latitude) * perDegree)

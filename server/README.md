@@ -74,8 +74,6 @@ only for rate limits, and logs it only as a keyed hash.
 | `RATE_LIMIT_BURST` | same as per minute | the deploy plist leaves it out, so it follows `RATE_LIMIT_PER_MINUTE` |
 | `FEED_RATE_LIMIT_PER_MINUTE` | `240` | per client address, on `GET /feeds` only, which uses none of the limit above |
 | `FEED_RATE_LIMIT_BURST` | `120` | |
-| `MAX_CHALLENGES` | `10000` | outstanding challenges, in all |
-| `MAX_CHALLENGES_PER_IP` | `10` | outstanding challenges per client address |
 | `MAX_KEYS_PER_IP_PER_DAY` | `10` | keys attested per client address per UTC day; attestations that fail don't count |
 | `GOOGLE_ROUTES_API_KEY` | | Google's Routes API key, for `GET /routes`; without it, that route isn't offered |
 | `ROUTES_PER_IP_PER_DAY` | `30` | `GET /routes` requests to Google per client address per UTC day |
@@ -83,6 +81,8 @@ only for rate limits, and logs it only as a keyed hash.
 | `BUS_TIME_API_KEY` | | MTA Bus Time's API key ([free](https://register.developer.obanyc.com)), for `GET /buses`; without it, that route isn't offered |
 | `BUS_TIME_PER_IP_PER_DAY` | `2000` | requests to Bus Time per client address per UTC day, for `GET /buses` and `GET /buses/nearby`; what's kept, or already being asked for, doesn't count |
 | `BUS_TIME_PER_DAY` | `100000` | the same for everyone together |
+| `DIAGNOSTICS_PER_KEY_PER_DAY` | `20` | `POST /diagnostics` reports per attest key per UTC day; `0` takes none |
+| `MAX_DIAGNOSTICS` | `1000` | reports kept in all; past that, the oldest go |
 | `LOG_PUSHES` | `0` | `1` logs every push; otherwise each pass logs its totals |
 | `LOG_FILE` | | the plist's `StandardOutPath`: once newsyslog has rotated it, the server writes to the new file within a minute |
 
@@ -136,10 +136,13 @@ use the app's App Attest key, so Google is asked at most
 isn't logged or stored.
 
 With `bus=1`, Google is asked for routes by bus as well, and their bus rides
-are kept too. Each ride's `mode` is `subway` or `bus`, and `seconds`, where Google
-gives the times, how long the ride takes by its timetable. Without it, bus rides
-are left out, as an app that predates them can't match them to stations;
-`GET /buses` gives the next buses for a bus ride.
+are kept too. Each ride's `mode` is `subway` or `bus`, and `seconds` and `leaves`,
+where Google gives the times, how long the ride takes and when it leaves (in
+seconds since 1970) by its timetable. Without it, routes with a bus ride are
+left out, as an app that predates them can't match them to stations;
+`GET /buses` gives the next buses for a bus ride. So are routes with a ride the
+app can't show, the LIRR, Metro-North, a ferry or a tram, which would leave a
+gap; the Staten Island Railway (`SIR`) is a `subway` ride.
 
 ```json
 {"routes": [{"legs": [
@@ -222,11 +225,16 @@ for a day, and each stop's buses for 30 seconds.
 
 ### `GET /attest/challenge`
 
-`200` with `{"challenge":"<43 characters, base64url>","expiresIn":300}`, and
-`Cache-Control: no-store`. Each challenge can be used once, within 5 minutes.
-A client with `MAX_CHALLENGES_PER_IP` outstanding gets `429`, with
-`Retry-After` the seconds until the first of them expires. The server answers
-`503` when `MAX_CHALLENGES` are outstanding in all.
+`200` with `{"challenge":"<54 characters, base64url>","expiresIn":300}`, and
+`Cache-Control: no-store`. A challenge is good for 5 minutes. The server keeps
+nothing for one it issues: it's 16 random bytes and its expiry, with an
+HMAC-SHA256 of both under a key made at start, so asking for any number of
+them, from any number of addresses, fills nothing and refuses no one (only the
+rate limit applies). A signed request's challenge isn't used up, as its
+assertion's counter already stops it being sent again; an attestation's is
+used once, noted only after the attestation checks out. A restart makes a new
+key, so challenges from before it are refused with `401`, and the app asks for
+another.
 
 ### `POST /attest`: once per App Attest key
 
@@ -340,6 +348,38 @@ and the body is empty, so its hash is
 | `204` | deleted, or already gone |
 | `403` | another key registered it |
 
+### `POST /diagnostics`: a crash or hang report, from a phone sharing diagnostics
+
+Sent by the app (`ios/App/Diagnostics.swift`) only once Share Diagnostics is on
+in its Settings: a MetricKit report from the launch after a crash, hang, CPU or
+disk-write exception, or slow launch, with the app's own recent log lines. It's
+signed like `POST /activities`, with the path `/diagnostics`, and is at most
+512 KB:
+
+```json
+{
+  "kind": "crash",
+  "app": "1.0 (3)",
+  "os": "iOS Version 27.1 (Build 24B5)",
+  "device": "iPhone17,1",
+  "metricKit": { "crashDiagnostics": [ … ] },
+  "log": "2026-11-01T14:03:22Z notice PushServer: …\n…"
+}
+```
+
+`kind` is `crash`, `hang`, `cpu`, `disk` or `launch`; `metricKit` is
+`MXDiagnosticPayload.jsonRepresentation()`. Each is saved, as sent, to
+`DATA_DIR/diagnostics/<UTC time>-<kind>-<random>.json`, readable only by the
+server's user, and deleted after 30 days. There's no route to read them: look
+in that folder.
+
+| Status | Meaning |
+|---|---|
+| `204` | saved |
+| `400` | not a report as above |
+| `413` | over 512 KB |
+| `429` | over `DIAGNOSTICS_PER_KEY_PER_DAY`, with `Retry-After` until midnight UTC |
+
 ### In the app, in order
 
 1. **Once per install:**
@@ -388,6 +428,12 @@ The database holds only what pushing needs:
   was made and last used. It's deleted after 90 days unused, along with
   anything it registered.
 
+Crash and hang reports, from people who turn on Share Diagnostics, are files
+in `DATA_DIR/diagnostics/` beside the database, deleted after 30 days. Each
+holds the app's version, the iOS version, the iPhone model, MetricKit's report
+(call stacks and the like) and the app's last log lines, which never say where
+someone is or is going. Nothing in a report says which phone or key sent it.
+
 `GET /routes` passes a trip's start and end to Google and keeps neither.
 `GET /buses` passes the stop's place and line to MTA Bus Time, and keeps the
 stop it finds for a day and its buses for 30 seconds, with nothing about who
@@ -434,7 +480,7 @@ rotation needs `LOG_FILE` added (the script reminds you). Delete its
   (and how many attest keys there are), and a line for each registration,
   drop and error.
   Refused requests get at most 20 lines a minute, and the errors of a full
-  server (`MAX_CHALLENGES` or `MAX_REGISTRATIONS` reached) 20 more; the count
+  server (`MAX_REGISTRATIONS` reached) 20 more; the count
   of the rest is logged with the next one.
   newsyslog rotates the log once it's over 10 MB, keeping 7 old ones
   (`server.log.0` is the newest).

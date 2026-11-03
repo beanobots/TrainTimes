@@ -44,6 +44,9 @@ enum CitiBike {
 
     /// Fewer bikes or docks than this, and a trip says so: they may be gone by the time you're there.
     static let few = 4
+    /// A member's minutes a ride, included: past them Citi Bike charges by the minute (a single
+    /// ride's 30).
+    static let includedMinutes = 45
 
     private static let base = URL(string: "https://gbfs.citibikenyc.com/gbfs/en/")!
 
@@ -64,8 +67,20 @@ enum CitiBike {
         /// Counts this recent are used again rather than fetched.
         private static let fresh: TimeInterval = 60
 
+        /// The load under way, for any asking meanwhile to wait for rather than fetch again: the
+        /// actor lets another in at each `await`.
+        private var loading: Task<[Dock]?, Never>?
+
         func docks() async -> [Dock]? {
             if let status, Date.now.timeIntervalSince(status.at) < Self.fresh { return status.docks }
+            if let loading { return await loading.value }
+            let load = Task { await self.load() }
+            loading = load
+            defer { loading = nil }
+            return await load.value
+        }
+
+        private func load() async -> [Dock]? {
             async let placesLoad = places == nil ? Self.loadPlaces() : nil
             async let statusLoad = Self.loadStatus()
             if let loaded = await placesLoad { places = loaded }
@@ -137,11 +152,14 @@ struct BikeTrip: Codable, Hashable, Sendable {
     /// Where the bike's taken from, and left.
     var pickup: CitiBike.Dock
     var dropoff: CitiBike.Dock
-    /// The ride along the streets, dock to dock: Apple Maps' cycling route, or straight across
-    /// where it had none.
+    /// The ride along the streets, dock to dock: Apple Maps' cycling route (a trip it had none
+    /// for isn't planned).
     var path: [Walk.Point]
     /// The ride's minutes, unlocking and docking included.
     var rideMinutes: Int
+    /// How much of `path` runs on a protected bike lane or path, 0 to 1 (`BikeLanes`); nil if
+    /// it's not known.
+    var protectedShare: Double? = nil
     /// The train ridden after the bike, or before it; nil riding all the way.
     var train: SharedTrip.Option?
     var bikeFirst: Bool
@@ -152,6 +170,23 @@ struct BikeTrip: Codable, Hashable, Sendable {
     /// change's stations; whichever's switched to carries them all. Empty where it's not short,
     /// or there's no fuller dock.
     var dockChoices: [BikeTrip] = []
+    /// Your own bike rather than a Citi Bike: `pickup` and `dropoff` are then where it's ridden
+    /// from and to (`CitiBike.Dock.place`), with nothing to count, and `dockChoices` is empty.
+    var owned = false
+    /// With a train, your own bike taken on it with you, rather than locked at the station it's
+    /// ridden to.
+    var carried = false
+    /// A carried bike's ride after the train, from its last station to the end; nil where
+    /// there's none.
+    var rideAfter: Ride? = nil
+
+    /// A carried bike's second ride, after the train.
+    struct Ride: Codable, Hashable, Sendable {
+        var from: CitiBike.Dock
+        var to: CitiBike.Dock
+        var path: [Walk.Point]
+        var minutes: Int
+    }
 
     /// Whether `other` is this trip from and to the same docks: which of `dockChoices` it is.
     func sameDocks(as other: BikeTrip) -> Bool {
@@ -162,5 +197,17 @@ struct BikeTrip: Codable, Hashable, Sendable {
     var bikes: Int { pickup.available(kind) }
     var docks: Int { dropoff.free }
     /// Whether either's few enough that they may be gone (`CitiBike.few`).
-    var isShort: Bool { bikes < CitiBike.few || docks < CitiBike.few }
+    var isShort: Bool { !owned && (bikes < CitiBike.few || docks < CitiBike.few) }
+    /// Whether its ride's longer than a member's included (`CitiBike.includedMinutes`).
+    var isOverIncluded: Bool { !owned && rideMinutes > CitiBike.includedMinutes }
+}
+
+extension CitiBike.Dock {
+    /// A place your own bike's ridden from or to, as a dock with nothing to count: where you
+    /// start, a station, or where you're going.
+    static func place(_ name: String, _ location: CLLocation) -> CitiBike.Dock {
+        let (lat, lon) = (location.coordinate.latitude, location.coordinate.longitude)
+        return CitiBike.Dock(id: String(format: "place %.5f %.5f", lat, lon), name: name, lat: lat, lon: lon,
+                             bikes: 0, eBikes: 0, docks: 0, renting: true, returning: true)
+    }
 }

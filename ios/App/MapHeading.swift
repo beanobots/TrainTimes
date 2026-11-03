@@ -43,7 +43,9 @@ final class CompassHeading: NSObject, CLLocationManagerDelegate {
     /// Called on appear, not in `init`, as `NearbyLocation` is.
     func start() {
         manager.delegate = self
-        manager.headingFilter = 1
+        // No finer than the map turns for (`MapHeading.still`): every degree was a wake-up and
+        // a redraw for nothing
+        manager.headingFilter = MapHeading.still
         manager.startUpdatingHeading()
     }
 

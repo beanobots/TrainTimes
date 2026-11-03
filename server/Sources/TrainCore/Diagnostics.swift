@@ -16,6 +16,13 @@ actor DiagnosticStore {
     private let retention: TimeInterval
     private var inMemory: [(name: String, saved: Date, body: [UInt8])] = []
 
+    /// In memory, for tests.
+    init(maxReports: Int = 1000, retention: TimeInterval = 30 * 86400) {
+        self.maxReports = maxReports
+        self.retention = retention
+        directory = nil
+    }
+
     init(directory: URL?, maxReports: Int = 1000, retention: TimeInterval = 30 * 86400) throws {
         self.maxReports = maxReports
         self.retention = retention

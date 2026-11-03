@@ -57,6 +57,51 @@ import Testing
         #expect(!found("34th street").contains("Prospect Av"))
     }
 
+    /// The names of the stations `text` finds with near spellings, in order, each once.
+    func near(_ text: String) -> [String] {
+        var seen = Set<String>()
+        return StationSearch(text).filter(StationDirectory.all).map(\.name).filter { seen.insert($0).inserted }
+    }
+
+    @Test func misspellingsFindWhatTheyreNear() {
+        #expect(near("brodway junction") == ["Broadway Junction"])
+        #expect(near("lexinton av").starts(with: ["Lexington Av/53 St"]))
+        #expect(Set(near("lexinton av")) == found("lexington av"))
+        #expect(near("fultn st") == near("fulton st"))
+        #expect(near("barcalys").contains("Atlantic Av-Barclays Ctr"))
+        #expect(near("jamaica cntr").contains("Jamaica Center-Parsons/Archer"))
+        // A swapped pair of letters is one typo
+        #expect(near("bedfrod av").contains("Bedford Av"))
+        // Partly typed, with a typo
+        #expect(near("brodw").contains("Broadway Junction"))
+    }
+
+    @Test func accentsAndWordsRunTogetherFindTheStation() {
+        #expect(found("timessq") == ["Times Sq-42 St"])
+        #expect(found("Prospéct park") == found("prospect park"))
+    }
+
+    @Test func nearSpellingsOnlyWhenNothingMatchesExactly() {
+        // "Grand" finds Grand St and Grand Central, not Grant Av a typo away
+        #expect(!near("grand").contains("Grant Av"))
+        #expect(Set(near("grand")) == found("grand"))
+        // Short words and numbers have to be right: "87 st" isn't 86 St
+        #expect(near("87 st").isEmpty)
+        #expect(near("qx").isEmpty)
+        // Too far off finds nothing
+        #expect(near("zzzzzz").isEmpty)
+    }
+
+    @Test func typosAreCounted() {
+        #expect(Typos.count(from: "brodway", toStartOf: "broadway", upTo: 2) == 1)
+        #expect(Typos.count(from: "borad", toStartOf: "broadway", upTo: 2) == 1)
+        #expect(Typos.count(from: "broad", toStartOf: "broadway", upTo: 2) == 0)
+        #expect(Typos.count(from: "xyzzy", toStartOf: "broadway", upTo: 2) == 3)
+        #expect(Typos.allowed(in: "fultn") == 1)
+        #expect(Typos.allowed(in: "lexinton") == 2)
+        #expect(Typos.allowed(in: "86th") == 0)
+    }
+
     @Test func nothingSearchedForFindsEveryStation() {
         #expect(StationDirectory.all.allSatisfy(StationSearch("").matches))
         #expect(StationDirectory.all.allSatisfy(StationSearch(" - ").matches))

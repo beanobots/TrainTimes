@@ -79,7 +79,7 @@ struct StopQuery: EntityStringQuery {
     /// Station and borough search, as in the app's picker, e.g. "86 st brooklyn".
     func entities(matching string: String) async throws -> [StopEntity] {
         let search = StationSearch(string)
-        let stations = Set(StationDirectory.all.filter(search.matches).map(\.id))
+        let stations = Set(search.filter(StationDirectory.all).map(\.id))
         let matches = StopEntity.all.filter { stations.contains($0.stationID) }
         return Array(matches.prefix(60))
     }

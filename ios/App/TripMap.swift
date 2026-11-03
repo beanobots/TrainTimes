@@ -152,8 +152,7 @@ struct TripMap: View {
         return trip
     }
 
-    /// A dock's pin: how many bikes there (or e-bikes), or free docks, Citi Bike blue, orange
-    /// where they're few.
+    /// A dock's pin: how many bikes there (or e-bikes), or free docks, Citi Bike blue.
     private static func dockPin(_ count: Int, symbol: String) -> some View {
         HStack(spacing: 3) {
             Image(systemName: symbol).font(.system(size: 9, weight: .bold))
@@ -162,7 +161,7 @@ struct TripMap: View {
         .foregroundStyle(.white)
         .padding(.horizontal, 6)
         .frame(height: 20)
-        .background(RoundedRectangle(cornerRadius: 6).fill(count < CitiBike.few ? Color.orange : .citiBike))
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.citiBike))
         .overlay(RoundedRectangle(cornerRadius: 6).stroke(.white, lineWidth: 1.5))
         .shadow(radius: 1)
     }
@@ -438,7 +437,7 @@ struct TripMap: View {
                 if let bullet = bullets.indices.contains(index) ? bullets[index] : nil {
                     Annotation("", coordinate: Self.place(of: bullet, mapPointsPerPoint: mapPointsPerPoint)) {
                         if ride.isBike {
-                            BikeBullet(size: 20, electric: ride.route == CitiBike.Kind.eBike.rawValue)
+                            BikeBullet(size: 20, electric: ride.route == CitiBike.Kind.eBike.rawValue, own: ride.isOwnBike)
                                 .overlay(Circle().stroke(.white, lineWidth: 2))
                                 .shadow(radius: 1)
                         } else if ride.isBus {
@@ -457,8 +456,9 @@ struct TripMap: View {
                     }
                 }
             }
-            // A bike trip's docks: the bikes to take where it starts, the free docks where it ends
-            if let bike = pickedBike {
+            // A Citi Bike trip's docks: the bikes to take where it starts, the free docks where it
+            // ends. Your own bike has none
+            if let bike = pickedBike, !bike.owned {
                 Annotation("", coordinate: bike.pickup.coordinate, anchor: .trailing) {
                     Self.dockPin(bike.bikes, symbol: bike.kind == .eBike ? "bolt.fill" : "bicycle")
                         .padding(.trailing, 6)
@@ -793,7 +793,7 @@ struct TripMap: View {
 
     /// `line` with each point moved its own distance in `distances` (as many as its points) to
     /// its right, as `offset(_:by:)`.
-    private static func offset(_ line: [CLLocationCoordinate2D], by distances: [Double]) -> [CLLocationCoordinate2D] {
+    static func offset(_ line: [CLLocationCoordinate2D], by distances: [Double]) -> [CLLocationCoordinate2D] {
         guard distances.count == line.count, distances.contains(where: { $0 != 0 }),
               distances.allSatisfy(\.isFinite) else { return line }
         // Without repeated points, which have no direction
@@ -1044,6 +1044,8 @@ extension SharedTrip.Option {
         var isBus = false
         /// A Citi Bike's ride, dock to dock along the streets; `route` is "bike" or "eBike".
         var isBike = false
+        /// With `isBike`, your own bike's rather than a Citi Bike's: the tint, not Citi blue.
+        var isOwnBike = false
         /// With more than one line, each's own track, the first's first: the N over the
         /// Manhattan Bridge and the R through the Montague St tunnel, side by side where they run
         /// together. Empty with one.
@@ -1119,7 +1121,7 @@ extension SharedTrip.Option {
 
         /// `route`'s colour, the bus's blue, or Citi Bike's.
         func color(of route: String) -> Color {
-            if isBike { return .citiBike }
+            if isBike { return isOwnBike ? .accentColor : .citiBike }
             return isBus ? (BusBadge.isSBS(route) ? BusBadge.sbsBlue : BusBadge.blue) : LineStyle.of(route).swiftUIColor
         }
     }
@@ -1224,25 +1226,32 @@ extension SharedTrip.Option {
 
 extension ServerRoutes.Choice {
     /// The trip's rides, in order: a train trip's (`SharedTrip.Option.rides`), or a bus trip's
-    /// bus, straight from stop to stop, and its train before or after it.
+    /// bus, straight from stop to stop, and its train before or after it, or its second bus.
     var rides: [SharedTrip.Option.Ride] {
         switch self {
         case .train(let option):
             return option.rides
         case .bus(let trip):
-            let stops = [trip.bus.from, trip.bus.to].map { CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude) }
-            let bus = SharedTrip.Option.Ride(routes: [trip.bus.line], coordinates: stops, stops: stops, isBus: true)
-            let train = trip.train?.rides ?? []
-            return trip.busFirst ? [bus] + train : train + [bus]
+            let ride = { (bus: BusRide) in
+                let stops = [bus.from, bus.to].map { CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude) }
+                return SharedTrip.Option.Ride(routes: [bus.line], coordinates: stops, stops: stops, isBus: true)
+            }
+            // A second bus after the first, or the train
+            let after = trip.onward.map { [ride($0)] } ?? trip.train?.rides ?? []
+            return trip.busFirst ? [ride(trip.bus)] + after : after + [ride(trip.bus)]
         case .walk:
             // Nothing to ride: its walk is drawn on its own
             return []
         case .bike(let trip):
-            // Along the streets, with no stops: its docks are marked on their own
-            let path = trip.path.map(\.coordinate)
-            let bike = SharedTrip.Option.Ride(routes: [trip.kind.rawValue], coordinates: path, stops: [], isBike: true)
+            // Along the streets, with no stops: its docks are marked on their own. Your own bike
+            // carried on the train may be ridden again after it
+            let ride = { (path: [Walk.Point]) in
+                SharedTrip.Option.Ride(routes: [trip.kind.rawValue], coordinates: path.map(\.coordinate), stops: [],
+                                       isBike: true, isOwnBike: trip.owned)
+            }
             let train = trip.train?.rides ?? []
-            return trip.bikeFirst ? [bike] + train : train + [bike]
+            let after = trip.rideAfter.map { [ride($0.path)] } ?? []
+            return trip.bikeFirst ? [ride(trip.path)] + train + after : train + [ride(trip.path)]
         }
     }
 
@@ -1251,8 +1260,4 @@ extension ServerRoutes.Choice {
         guard case .train(let option) = self else { return [] }
         return option.otherChanges
     }
-}
-
-private extension Station {
-    var coordinate: CLLocationCoordinate2D { CLLocationCoordinate2D(latitude: lat, longitude: lon) }
 }

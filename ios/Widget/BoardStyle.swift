@@ -90,20 +90,26 @@ struct BoardCountdown: View {
     let marks: TimeMarks
     let size: CGFloat
     let walking: Bool
+    /// "At Station" in place of 0:00, for a train just due (`TimelinePlan.atStation`).
+    let atStation: Bool
 
-    /// To `train` on `entry`'s board, or to leaving for it with a walking time.
+    /// To `train` on `entry`'s board, or to leaving for it with a walking time; at the station
+    /// once it's due, without one.
     init(_ train: Arrival, on entry: TrainEntry, marks: TimeMarks, size: CGFloat) {
         self.init(start: entry.date, end: entry.selection.leaveTime(for: train), isLive: train.isLive, marks: marks,
-                  size: size, walking: entry.selection.walkMinutes > 0)
+                  size: size, walking: entry.selection.walkMinutes > 0,
+                  atStation: TimelinePlan.atStation(train, at: entry.date, selection: entry.selection))
     }
 
-    init(start: Date, end: Date, isLive: Bool, marks: TimeMarks, size: CGFloat, walking: Bool = false) {
+    init(start: Date, end: Date, isLive: Bool, marks: TimeMarks, size: CGFloat, walking: Bool = false,
+         atStation: Bool = false) {
         self.start = start
         self.end = end
         self.isLive = isLive
         self.marks = marks
         self.size = size
         self.walking = walking
+        self.atStation = atStation
     }
 
     var body: some View {
@@ -116,11 +122,15 @@ struct BoardCountdown: View {
                     .accessibilityLabel("Leave in")
             }
             // A live timer takes all the width it's offered, so the placeholder sizes it
-            Text(TimerText.placeholder(seconds: end.timeIntervalSince(start)))
+            Text(atStation ? AtStation.label : TimerText.placeholder(seconds: end.timeIntervalSince(start)))
                 .hidden()
                 .overlay(alignment: .leading) {
-                    CountdownTimer(start: start, end: end)
-                        .lineLimit(1)
+                    if atStation {
+                        Text(AtStation.label).lineLimit(1)
+                    } else {
+                        CountdownTimer(start: start, end: end)
+                            .lineLimit(1)
+                    }
                 }
                 .font(.system(size: size, weight: .bold, design: .rounded))
                 .monospacedDigit()

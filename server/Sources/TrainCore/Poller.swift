@@ -32,12 +32,42 @@ final class Poller: Service {
     }
 
     func run() async throws {
+        // The feeds read before the first pass, then every tick by themselves, countdowns or
+        // not (the app and widgets read them too), so a pass that overruns doesn't leave the
+        // relay's copies to expire (`FeedRelay.maxAge`) with `GET /feeds` failing meanwhile
+        guard let feeds else { return await passes() }
+        await feeds.refresh()
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await Self.refreshing(feeds, every: self.interval) }
+            group.addTask { await self.passes() }
+            await group.next()
+            group.cancelAll()
+        }
+    }
+
+    /// Reads the feeds every `interval` (the first tick's already read) until shut down.
+    private static func refreshing(_ feeds: FeedRelay, every interval: TimeInterval) async {
+        let clock = ContinuousClock()
+        var next = clock.now.advanced(by: .seconds(interval))
+        while !Task.isCancelled && !Task.isShuttingDownGracefully {
+            let wake = next
+            do {
+                try await cancelWhenGracefulShutdown { try await Task.sleep(until: wake, clock: clock) }
+            } catch {
+                return
+            }
+            await feeds.refresh()
+            // On the next tick not yet begun, as a slow read skips those it ran over
+            next = next.advanced(by: .seconds(interval))
+            while next < clock.now { next = next.advanced(by: .seconds(interval)) }
+        }
+    }
+
+    private func passes() async {
         let clock = ContinuousClock()
         var lastPurge = Date.distantPast
         while !Task.isCancelled && !Task.isShuttingDownGracefully {
             let start = clock.now
-            // Every tick, countdowns or not: the app and widgets read them too
-            await feeds?.refresh()
             await pass(at: .now)
             if Date.now.timeIntervalSince(lastPurge) >= 60 * 60 {
                 await purge(now: .now)
@@ -288,18 +318,19 @@ final class Poller: Service {
 
     // MARK: - Trains due between passes
 
-    /// When the soonest countdown's train is due after `now`, if it has a next train to move on
-    /// to: when `pushDue(at:)` should push it, rather than leave it at 0:00 until the next pass.
+    /// When the soonest countdown's train has been at the station (`AtStation`) after `now`, if
+    /// it has a next train to move on to: when `pushDue(at:)` should push it, rather than leave
+    /// it at the station until the next pass.
     func nextDue(after now: Date) async -> Date? {
         await store.all.compactMap { registration -> Date? in
-            guard let train = registration.lastState?.train, train > now,
+            guard let train = registration.lastState?.train.addingTimeInterval(AtStation.seconds), train > now,
                   Self.movedOn(registration, at: train) != nil else { return nil }
             return train
         }.min()
     }
 
-    /// Pushes each countdown whose train is due at `now` on to its next train, so it counts down
-    /// to that from 0:00, out of date in turn as that's due (`CountdownState.movedOn(at:)`, as the
+    /// Pushes each countdown whose train has been at the station (`AtStation`) at `now` on to its
+    /// next train, so it counts down to that, out of date in turn as that's due (`CountdownState.movedOn(at:)`, as the
     /// Lock Screen draws it), with as many trains after it as before. Without reading the feeds,
     /// it's the next train as the last push had it, then the last pass's later ones; the next
     /// pass brings its trip and new times. Logged only when there were any.
@@ -318,11 +349,12 @@ final class Poller: Service {
         return stats
     }
 
-    /// `registration`'s last state moved on to the next train once its own is due at `now`; nil
-    /// if it isn't due yet, there's no next train, or the countdown has ended.
+    /// `registration`'s last state moved on to the next train once its own has been at the
+    /// station (`AtStation`) at `now`; nil if it hasn't yet, there's no next train, or the
+    /// countdown has ended.
     static func movedOn(_ registration: Registration, at now: Date) -> ContentState? {
         guard now < registration.ends, let last = registration.lastState else { return nil }
-        var moved = last.movedOn(at: now)
+        var moved = last.movedOn(at: now, holding: AtStation.seconds)
         guard moved != last else { return nil }
         // Back to as many trains after it as it had, from the last pass's later ones
         let after = moved.following.last ?? moved.train

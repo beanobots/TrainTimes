@@ -263,6 +263,16 @@ import Testing
         #expect(SubwayFeed.isStale(made: time(-3.5), newest: time(60), now: now))
         // Nor does a clock that's slow
         #expect(!SubwayFeed.isStale(made: time(1), newest: time(2), now: now))
+        // But on a clock five minutes slow, a feed four minutes behind the others has stopped
+        #expect(SubwayFeed.isStale(made: time(1), newest: time(5), now: now))
+    }
+
+    @Test func oneFeedAheadOfTheOthersIsTakenAtTheirTime() {
+        let feeds = [GTFSFeed.feed(made: 0, []), GTFSFeed.feed(made: 0.5, []), GTFSFeed.feed(made: 5, [])]
+        // The middle one's time and a minute, not the one five minutes on
+        #expect(SubwayFeed.newest(feeds) == time(1.5))
+        // Two can't tell which is out: the newer
+        #expect(SubwayFeed.newest(Array(feeds.prefix(1)) + [feeds[2]]) == time(5))
     }
 
     @Test func aTimeOutOfRangeIsNone() throws {

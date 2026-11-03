@@ -104,8 +104,11 @@ struct WidgetPreview: View {
     private static let margins = EdgeInsets(top: 16, leading: 16, bottom: 16, trailing: 16)
     private static let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
 
+    /// The timeline's minute, for `shown` and the times fetched for it to move on together.
+    @State private var minute = Date.now
+
     /// What the widget shows now, with commuting hours.
-    private var shown: SavedWidget { widget.shown(at: .now) }
+    private var shown: SavedWidget { widget.shown(at: minute) }
     /// Transfers and medium Next train show the change.
     private var change: Change? { look == .small ? nil : shown.change }
     /// Drawn as Transfers: large, or medium with a change.
@@ -134,6 +137,8 @@ struct WidgetPreview: View {
     var body: some View {
         TimelineView(.everyMinute) { context in
             TrainWidgetView(entry: entry(at: context.date))
+                // Into commuting hours or out, the other trip's times fetched for it
+                .onChange(of: context.date, initial: true) { _, date in minute = date }
         }
         .environment(\.boardFamily, look.family)
         .environment(\.boardMargins, Self.margins)

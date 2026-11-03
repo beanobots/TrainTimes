@@ -102,8 +102,6 @@ final class NearbyLocator: NSObject, CLLocationManagerDelegate {
 
     // MARK: Saved fix
 
-    private nonisolated static let fixFile = SharedStore.url(named: "nearby-fix.json")
-
     /// The last new fix either widget found, if taken within `life` (`savedFixLife`) of `date`.
     nonisolated static func savedFix(at date: Date, within life: TimeInterval = savedFixLife) -> CLLocation? {
         guard let fix = SharedStore.loadNearbyFix(at: date, within: life) else { return nil }
@@ -114,8 +112,7 @@ final class NearbyLocator: NSObject, CLLocationManagerDelegate {
     private static func save(_ location: CLLocation) {
         let fix = SharedStore.NearbyFix(latitude: location.coordinate.latitude, longitude: location.coordinate.longitude,
                                         accuracy: location.horizontalAccuracy, taken: location.timestamp)
-        guard let fixFile, let data = try? JSONEncoder().encode(fix) else { return }
-        try? data.write(to: fixFile, options: .atomic)
+        SharedStore.saveNearbyFix(fix)
     }
 
     private func finish(_ location: CLLocation?) {

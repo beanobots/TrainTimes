@@ -20,16 +20,33 @@ enum TimelinePlan {
     static let extrasWait: TimeInterval = 5
 
     /// Entry dates after `now`, sorted: each of the next `trainsAhead` trains' leave time and last
-    /// leave time (a held train can be caught until it leaves), so the widget moves on without
-    /// fetching. With `everyMinute` (medium/large widgets' minutes and maps), also every minute
-    /// until the last leave time, at most an hour.
+    /// leave time (a held train can be caught until it leaves), and without a walk, when it's
+    /// been at the station (`AtStation`), so the widget moves on without fetching. With
+    /// `everyMinute` (medium/large widgets' minutes and maps), also every minute until the last
+    /// leave time, at most an hour: on the minute of the train after the next where there is one.
     static func dates(after now: Date, toCatch: [Arrival], selection: Selection, everyMinute: Bool) -> [Date] {
         let trains = toCatch.prefix(trainsAhead)
         let leaveTimes = trains.map(selection.leaveTime(for:))
         var dates = Set(leaveTimes + trains.map(selection.lastLeaveTime(for:)))
+        if selection.walkMinutes == 0 { dates.formUnion(trains.map { $0.time.addingTimeInterval(AtStation.seconds) }) }
         if everyMinute, let lastLeave = leaveTimes.last {
             let end = min(lastLeave, now.addingTimeInterval(60 * 60))
-            var minute = now.addingTimeInterval(60)
+            // Each minute on the minute of the train after the next, while it is that, so its
+            // "then 3 min" changes as it should, not up to a minute late: `MinutesToGo` to its leave
+            // time from the entry's date
+            for later in leaveTimes.indices.dropFirst() {
+                let from = later >= 2 ? max(leaveTimes[later - 2], now) : now
+                let to = min(leaveTimes[later - 1], end)
+                let leave = leaveTimes[later]
+                var minute = leave.addingTimeInterval(-60 * (leave.timeIntervalSince(from) / 60).rounded(.down))
+                while minute < to {
+                    dates.insert(minute)
+                    minute.addTimeInterval(60)
+                }
+            }
+            // Once there's none after the next: every minute still, for the maps' trains
+            let last = leaveTimes.count >= 2 ? max(leaveTimes[leaveTimes.count - 2], now) : now
+            var minute = last.addingTimeInterval(60)
             while minute < end {
                 dates.insert(minute)
                 minute.addTimeInterval(60)
@@ -43,13 +60,14 @@ enum TimelinePlan {
         toCatch.prefix(trainsAhead).map(selection.lastLeaveTime(for:)).max()
     }
 
-    /// The catchable `trains` for the entry at `date`. Stops are stripped to save the widget's
+    /// The catchable `trains` for the entry at `date`, and without a walk, one still at the
+    /// station (`atStation(_:at:selection:)`). Stops are stripped to save the widget's
     /// limited memory, except the next train's with `keepsStops` (medium/large widgets, whose map
     /// button shows them before a reload). Positions are dropped after `positionLife`.
     static func trains(_ trains: [Arrival], at date: Date, selection: Selection, fetched: Date,
                        keepsStops: Bool) -> [Arrival] {
         let positionStale = !fetched.isWithin(positionLife, before: date)
-        return selection.catchable(trains, now: date).enumerated().map { index, train in
+        return shown(trains, at: date, selection: selection).enumerated().map { index, train in
             var train = train
             if !keepsStops || index > 0 { train.approach = [] }
             if positionStale { train.position = nil }
@@ -57,11 +75,27 @@ enum TimelinePlan {
         }
     }
 
+    /// `trains` a board shows at `date`: those still to catch, and one still at the station.
+    static func shown(_ trains: [Arrival], at date: Date, selection: Selection) -> [Arrival] {
+        trains.filter { selection.lastLeaveTime(for: $0) > date || atStation($0, at: date, selection: selection) }
+    }
+
+    /// As above, for a board with a change, by each connection's first train.
+    static func shown(_ connections: [Connection], at date: Date, selection: Selection) -> [Connection] {
+        connections.filter { selection.lastLeaveTime(for: $0.first) > date || atStation($0.first, at: date, selection: selection) }
+    }
+
+    /// Whether `train` is shown at the station at `date`: due a moment ago (`AtStation`), on a
+    /// board without a walk, whose countdown is to the train rather than to leaving for it.
+    static func atStation(_ train: Arrival, at date: Date, selection: Selection) -> Bool {
+        selection.walkMinutes == 0 && AtStation.covers(train.time, at: date)
+    }
+
     /// As `trains(...)`, for a widget with a change.
     static func connections(_ connections: [Connection], at date: Date, selection: Selection, fetched: Date,
                             keepsStops: Bool) -> [Connection] {
         let positionStale = !fetched.isWithin(positionLife, before: date)
-        return selection.catchable(connections, now: date).enumerated().map { index, connection in
+        return shown(connections, at: date, selection: selection).enumerated().map { index, connection in
             var connection = connection
             if !keepsStops || index > 0 {
                 connection.first.approach = []

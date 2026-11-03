@@ -59,13 +59,21 @@ actor FeedRelay {
             }
             return read
         }
-        for (url, data) in read {
+        // A read that isn't a feed (an empty or cut-off 200) keeps the last copy too, rather than
+        // telling every phone and countdown there are no trains
+        for (url, data) in read where Self.isUsable(data, from: url) {
             copies[url] = (data, now)
         }
         made = [:]
         madeBytes = 0
         making = [:]
         generation += 1
+    }
+
+    /// Whether `data` read from `url` is a feed (`TrainService.isUsable`); checked here too for
+    /// a `fetch` other than `TrainService`'s.
+    static func isUsable(_ data: Data, from url: URL) -> Bool {
+        TrainService.isUsable(data, from: url)
     }
 
     /// What `GET /feeds` sends: the feed `ask` names as last read, cut to what the phone reads

@@ -9,13 +9,9 @@ enum CountdownLookup {
     /// Info.plist's TrainTimesServerURL, as the app's `PushServer` uses.
     private static var serverURL: URL? { ServerRoutes.baseURL }
 
-    private static let session: URLSession = {
-        let configuration = URLSessionConfiguration.ephemeral
-        // A widget has seconds to draw; without it, the other copies do
-        configuration.timeoutIntervalForRequest = 3
-        configuration.waitsForConnectivity = false
-        return URLSession(configuration: configuration)
-    }()
+    /// Seconds to wait for the push server: a widget has seconds to draw; without it, the other
+    /// copies do.
+    private static let timeout: TimeInterval = 3
 
     /// The countdown's state for `trainID` (a `Selection.trainID`), not yet moved on to `now`;
     /// nil if no countdown for it is running. With `localOnly`, without asking the push server, for
@@ -36,13 +32,40 @@ enum CountdownLookup {
     }
 
     /// The state the push server last pushed to the countdown with push token `token`; nil if it
-    /// has none, or can't be reached in time.
+    /// has none, or can't be reached in time. Asked once for all the widgets showing its train,
+    /// as they reload together (`Pushed`).
     private static func pushedState(token: String) async -> CountdownState? {
-        guard let serverURL, let url = URL(string: serverURL.absoluteString + "/activities/\(token)/state"),
-              let (data, response) = try? await session.data(from: url),
-              (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
-        // Dates as ActivityKit decodes them
-        return try? JSONDecoder().decode(CountdownState.self, from: data)
+        await Pushed.shared.state(token: token)
+    }
+
+    /// The push server's states lately asked for, and those being asked for, by token.
+    private actor Pushed {
+        static let shared = Pushed()
+        /// Seconds an answer's used again: as long as widgets reloading together take.
+        private static let life: TimeInterval = 20
+
+        private var recent: [String: (state: CountdownState?, at: Date)] = [:]
+        private var asking: [String: Task<CountdownState?, Never>] = [:]
+
+        func state(token: String) async -> CountdownState? {
+            if let known = recent[token], Date.now.timeIntervalSince(known.at) < Self.life { return known.state }
+            if let asked = asking[token] { return await asked.value }
+            let ask = Task { await CountdownLookup.askServer(token: token) }
+            asking[token] = ask
+            let state = await ask.value
+            asking[token] = nil
+            recent = recent.filter { Date.now.timeIntervalSince($0.value.at) < Self.life }
+            recent[token] = (state, .now)
+            return state
+        }
+    }
+
+    private static func askServer(token: String) async -> CountdownState? {
+        guard let serverURL else { return nil }
+        let url = serverURL.appendingPathComponent("activities").appendingPathComponent(token).appendingPathComponent("state")
+        // Dates as ActivityKit decodes them: JSONDecoder's own
+        return await ServerRoutes.fetch(CountdownState.self, with: URLRequest(
+            url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout))
     }
 
     /// Lowercase hex, as the push server has tokens.

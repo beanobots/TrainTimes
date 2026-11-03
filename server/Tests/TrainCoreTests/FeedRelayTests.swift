@@ -5,15 +5,22 @@ import NIOCore
 import Testing
 @testable import TrainCore
 
-/// Counts reads of the MTA, answering each with the feed's address, or nothing when `failing`.
+/// Counts reads of the MTA, answering each with a feed naming its address (a trip with it as
+/// id, or a JSON list of it), or nothing when `failing`, or an empty body when `empty`.
 private actor FakeMTA {
     var reads = 0
     var failing = false
+    var empty = false
 
     func read(_ url: URL) -> Data? {
         reads += 1
-        return failing ? nil : Data(url.absoluteString.utf8)
+        if failing { return nil }
+        if empty { return Data() }
+        if url == AlertsFeed.url || url == OutagesFeed.url { return Data("[\"\(url.absoluteString)\"]".utf8) }
+        return GTFSFeed.feed([GTFSFeed.trip(url.absoluteString, stops: [])])
     }
+
+    func answerEmpty(_ empty: Bool) { self.empty = empty }
 
     func fail(_ failing: Bool) { self.failing = failing }
 }
@@ -75,6 +82,34 @@ private actor FakeMTA {
         #expect(await relay.feed(named: "../etc/passwd", now: start) == nil)
     }
 
+    @Test func onlyAFeedIsTakenAsOne() throws {
+        let nqrw = try #require(FeedRelay.feeds["nyct/gtfs-nqrw"])
+        // A 200 with nothing, or no header, reads as a failed fetch, not as no trains
+        #expect(!TrainService.isUsable(Data(), from: nqrw))
+        #expect(!TrainService.isUsable(GTFSFeed.feed(made: nil, []), from: nqrw))
+        #expect(TrainService.isUsable(GTFSFeed.feed([]), from: nqrw))
+        #expect(!TrainService.isUsable(Data(), from: AlertsFeed.url))
+        #expect(!TrainService.isUsable(Data("{\"entity\": [".utf8), from: AlertsFeed.url))
+        #expect(TrainService.isUsable(Data("[]".utf8), from: OutagesFeed.url))
+        // What isn't an MTA feed is taken as it is
+        #expect(TrainService.isUsable(Data(), from: try #require(URL(string: "https://example.com/x"))))
+    }
+
+    @Test func anEmptyReadKeepsTheLastCopy() async throws {
+        let mta = FakeMTA()
+        let relay = FeedRelay(interval: 20) { await mta.read($0) }
+        let start = Date.now
+        await relay.refresh(now: start)
+        let first = await relay.feed(named: "nyct/gtfs-ace", now: start)
+        #expect(first?.isEmpty == false)
+        // A 200 with nothing in it isn't "no trains"
+        await mta.answerEmpty(true)
+        await relay.refresh(now: start.addingTimeInterval(20))
+        #expect(await relay.feed(named: "nyct/gtfs-ace", now: start.addingTimeInterval(20)) == first)
+        #expect(await relay.feed(named: "camsys/subway-alerts.json", now: start.addingTimeInterval(20))?.isEmpty == false)
+        #expect(await relay.feed(named: "nyct/gtfs-ace", now: start.addingTimeInterval(50)) == nil)
+    }
+
     @Test func countdownsUseTheSameCopies() async throws {
         let nqrw = try #require(FeedRelay.feeds["nyct/gtfs-nqrw"])
         let feed = GTFSFeed.feed([GTFSFeed.trip("R1", stops: [FeedStop("R34N", at: 3), FeedStop("G08N", arrival: 40)])])
@@ -108,7 +143,7 @@ private actor FakeMTA {
             await relay.refresh()
             try await client.execute(uri: "/feeds?name=nyct/gtfs-nqrw", method: .get) { response in
                 #expect(response.status == .ok)
-                #expect(text(response) == "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs-nqrw")
+                #expect(text(response).contains("https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs-nqrw"))
                 #expect(response.headers[.cacheControl] == "no-store")
             }
             try await client.execute(uri: "/feeds?name=nyct%2Fgtfs-nqrw", method: .get) { #expect($0.status == .ok) }
@@ -124,7 +159,7 @@ private actor FakeMTA {
         limits.requestBurst = 1
         limits.feedRequestsPerMinute = 3
         limits.feedRequestBurst = 3
-        let relay = FeedRelay(interval: 20) { _ in Data() }
+        let relay = FeedRelay(interval: 20) { _ in GTFSFeed.feed([]) }
         await relay.refresh()
         try await withApp(limits: limits, relay: relay) { client in
             for _ in 0..<3 {
