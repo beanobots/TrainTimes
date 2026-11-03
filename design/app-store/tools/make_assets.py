@@ -2,8 +2,8 @@
 """Leeway's App Store artwork: banners, and screenshots framed in the icon's platform edge.
 
     python3 make_assets.py banners
-        Writes the banners (5244x2950, 1200x630, 1500x500) and the search results image
-        (2950x5244) into ../banners/.
+        Writes the banners (5244x2950, 1200x630, 1500x500) and the search results images
+        (5244x2950 and 2950x5244) into ../banners/.
 
     python3 make_assets.py screenshots RAW_DIR CAPTIONS_JSON OUT_DIR [--size 1320x2868]
         Frames each raw screenshot named in CAPTIONS_JSON ({"file.png": "Headline", ...}, in
@@ -239,7 +239,8 @@ def main(argv):
     if len(argv) >= 2 and argv[1] == "banners":
         out = os.path.join(ROOT, "banners")
         os.makedirs(out, exist_ok=True)
-        for w, h, name in [(5244, 2950, "leeway-banner-5244x2950.png"), (2950, 5244, "leeway-search-results-2950x5244.png"),
+        for w, h, name in [(5244, 2950, "leeway-banner-5244x2950.png"), (5244, 2950, "leeway-search-results-5244x2950.png"),
+                           (2950, 5244, "leeway-search-results-2950x5244.png"),
                            (1200, 630, "leeway-banner-1200x630.png"), (1500, 500, "leeway-banner-1500x500.png")]:
             banner(w, h, os.path.join(out, name))
     elif len(argv) >= 5 and argv[1] == "screenshots":
