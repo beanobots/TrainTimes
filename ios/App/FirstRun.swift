@@ -1,16 +1,8 @@
+import Contacts
 import CoreLocation
+import MapKit
 import SwiftUI
 import UserNotifications
-
-/// How you use the subway: first-run setup's first question, which picks the screens after it.
-enum RiderKind: Hashable {
-    /// Mostly the same trip: Home and Work, one train toward Work, a reminder to leave.
-    case commute
-    /// All over the city: Home and the places you go, the lines you ride.
-    case city
-    /// Here for a few days: a hotel, the sights, and the day you leave.
-    case visit
-}
 
 /// A sight a visitor can keep as a one-tap trip, under the neighborhood it's in.
 struct Sight: Hashable, Identifiable {
@@ -167,8 +159,8 @@ struct SightseeingList: View {
     }
 }
 
-/// A commuter's weekday reminder to leave, from first-run setup; tapping it starts the home
-/// station's countdown.
+/// A weekday reminder to leave, which first-run setup used to offer; tapping it starts the home
+/// station's countdown. Setup no longer sets one, and running it again clears one from before.
 final class LeaveReminder: NSObject, UNUserNotificationCenterDelegate {
     static let shared = LeaveReminder()
     private static let prefix = "leaveReminder."
@@ -176,35 +168,6 @@ final class LeaveReminder: NSObject, UNUserNotificationCenterDelegate {
     /// Set at launch, so a tap that launched the app is handled.
     static func install() {
         UNUserNotificationCenter.current().delegate = shared
-    }
-
-    static func requestPermission() async -> Bool {
-        (try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])) ?? false
-    }
-
-    static var isAllowed: Bool {
-        get async {
-            let status = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
-            return status == .authorized || status == .provisional
-        }
-    }
-
-    /// Repeats Monday to Friday at `time`'s hour and minute, naming `train`.
-    static func schedule(at time: Date, train: Selection) async {
-        cancel()
-        let center = UNUserNotificationCenter.current()
-        let clock = Calendar.current.dateComponents([.hour, .minute], from: time)
-        let content = UNMutableNotificationContent()
-        content.title = "Time to leave for work"
-        content.body = "\(train.caption) from \(train.station?.name ?? "your station"). Tap to start your countdown."
-        content.sound = .default
-        // Sunday is 1
-        for weekday in 2...6 {
-            var when = clock
-            when.weekday = weekday
-            let trigger = UNCalendarNotificationTrigger(dateMatching: when, repeats: true)
-            try? await center.add(UNNotificationRequest(identifier: "\(prefix)\(weekday)", content: content, trigger: trigger))
-        }
     }
 
     static func cancel() {
@@ -223,179 +186,230 @@ final class LeaveReminder: NSObject, UNUserNotificationCenterDelegate {
     }
 }
 
-/// First-run setup's answers, kept until Start Riding saves them.
+/// First-run setup's answers, kept until Start Riding saves them. Walking, biking and step-free
+/// start as Settings has them, for setup run again.
 @MainActor
 @Observable
 final class FirstRunAnswers {
-    /// A place added beside Home on the city path; Work goes to its own slot.
-    struct Added: Identifiable {
-        let id = UUID()
-        var name: String
-        var place: TripPlace
-        var isWork: Bool { name == "Work" }
-    }
-
-    private(set) var kind: RiderKind?
-    var home: TripPlace?
-    var work: TripPlace?
-    var added: [Added] = []
-    var remindsToLeave = true
-    var leaveTime = Calendar.current.date(bySettingHour: 8, minute: 15, second: 0, of: .now) ?? .now
-    /// The home station, as suggested or picked.
-    var train: Selection?
-    /// The commute's other suggestions, after `train`.
-    private(set) var otherTrains: [Selection] = []
-    var lines: Set<String> = []
-    var hotel: TripPlace?
+    /// Home, or while `visiting`, the hotel.
+    private(set) var home: TripPlace?
+    /// Whether `home` is a hotel, as MapKit has it: a visit, until the end of `until`.
+    var visiting = false
     var until = Calendar.current.date(byAdding: .day, value: 3, to: .now) ?? .now
-    var sights: Set<String> = []
-    var walkMinutes = 15
-    var bike: CitiBike.Kind?
-    var buses = false
-    var stepFree = false
+    /// The stations nearest Home, nearest first: the map's, the first suggested.
+    private(set) var nearby: [Nearby.Result] = []
+    /// The home station, as suggested or picked; nil before Home's set.
+    var train: Selection?
+    /// Whether the widget shows `train` both ways (`AppSettings.defaultBothWays`).
+    var bothWays = false
+    /// No primary stop: no default train.
+    var noStop = false
+    var walkPreference = UserDefaults.standard.string(forKey: WalkRouting.preferenceKey)
+        .flatMap(WalkPreference.init(rawValue:)) ?? .balanced
+    var walkMinutes = UserDefaults.standard.object(forKey: NewTripView.walkMinutesKey) as? Int ?? NewTripView.defaultWalkMinutes
+    var stepFree = SharedStore.loadSettings().stepFree
+    var bikeKinds = UserDefaults.standard.string(forKey: BikeKinds.key).flatMap(BikeKinds.init(rawValue:)) ?? BikeKinds.saved
+    var citiBikeOff = UserDefaults.standard.bool(forKey: BikeKinds.offKey)
+    var ownBike = UserDefaults.standard.string(forKey: OwnBike.key).flatMap(OwnBike.init(rawValue:)) ?? OwnBike.none
+    var bikeCarry = UserDefaults.standard.string(forKey: BikeCarry.key).flatMap(BikeCarry.init(rawValue:)) ?? BikeCarry.all
 
-    /// Picks the path, and its defaults for getting around: a commute's shortest walk, no bikes
-    /// or buses; the city's 20 minutes, e-bikes and buses; a visitor's 30.
-    func choose(_ kind: RiderKind) {
-        guard kind != self.kind else { return }
-        self.kind = kind
-        walkMinutes = kind == .commute ? 15 : kind == .city ? 20 : 30
-        bike = kind == .commute ? nil : .eBike
-        buses = kind != .commute
+    /// Sets Home from setup's search, a hotel making it a visit, and suggests the station
+    /// nearest it.
+    func setHome(_ place: TripPlace, isHotel: Bool) {
+        home = place
+        visiting = isHotel
+        nearby = place.location.map { Nearby.stations(near: $0, limit: 3) } ?? []
+        train = nearby.first.map { Self.towardManhattan(at: $0.station) }
+        bothWays = false
+        noStop = false
     }
 
-    /// The commute's trains: the trips planned from Home to Work, by their first station; or,
-    /// with no Work or no trip, the stations nearest Home, toward Manhattan. The first is picked.
-    func suggestCommute() {
-        guard let start = home?.location else { return }
-        var found: [Selection] = []
-        if let end = work?.location {
-            let range = NewTripView.walkChoices.first { $0.minutes == walkMinutes }?.meters ?? TripPlanner.walkRange
-            found = TripPlanner.byWalking(from: start, to: end, walkRange: max(range, TripPlanner.walkRange)).map(\.selection)
-        }
-        if found.isEmpty {
-            found = Nearby.stations(near: start, limit: 3).map { Self.towardManhattan(at: $0.station, routes: $0.station.routes) }
-        }
-        var seen = Set<String>()
-        found = found.filter { seen.insert($0.stationID).inserted }
-        train = found.first
-        otherTrains = Array(found.dropFirst().prefix(2))
+    /// Picks `station`, all its lines, toward Manhattan.
+    func choose(_ station: Station) {
+        train = Self.towardManhattan(at: station)
+        bothWays = false
+        noStop = false
     }
 
-    /// The city's home station: the nearest to Home with one of `lines` (any, with none picked),
-    /// those of its lines, toward Manhattan.
-    func suggestCityTrain() {
-        guard let start = home?.location else { return }
-        let near = Nearby.stations(near: start, limit: 60)
-        guard let station = (near.first { lines.isEmpty || !lines.isDisjoint(with: $0.station.routes) } ?? near.first)?.station
-        else { return }
-        let routes = station.routes.filter { lines.isEmpty || lines.contains($0) }
-        train = Self.towardManhattan(at: station, routes: routes.isEmpty ? station.routes : routes)
+    /// `station`'s lines the way named for Manhattan, else north (Uptown, in Manhattan).
+    private static func towardManhattan(at station: Station) -> Selection {
+        let direction = Direction.allCases.first {
+            station.directionLabel($0, routes: station.routes).contains("Manhattan")
+        } ?? .north
+        return Selection(stationID: station.id, routes: station.routes, direction: direction)
     }
 
-    /// `routes` at `station` the way named for Manhattan, else north (Uptown, in Manhattan).
-    private static func towardManhattan(at station: Station, routes: [String]) -> Selection {
-        let direction = Direction.allCases.first { station.directionLabel($0, routes: routes).contains("Manhattan") } ?? .north
-        return Selection(stationID: station.id, routes: routes, direction: direction)
+    /// The ways `train`'s lines go on from its station, as the train picker offers them: not one
+    /// where they all end.
+    var ways: [Direction] {
+        guard let train, let station = train.station else { return [] }
+        let onward = station.onwardDirections(of: train.routes)
+        return station.directions(of: train.routes).filter { $0 == train.direction || onward.contains($0) }
     }
 
-    /// Minutes walking from Home (or the hotel) to `selection`'s station.
-    func walk(to selection: Selection) -> Int? {
-        guard let from = (home ?? hotel)?.location, let station = selection.station else { return nil }
-        let meters = from.distance(from: station.location)
-        return TripPlanner.walkMinutes(meters)
+    /// Minutes walking from Home (or the hotel) to `station`: as Nearby walks it, if it's one of
+    /// `nearby`.
+    func walk(to station: Station) -> Int? {
+        if let near = nearby.first(where: { $0.station.id == station.id }) { return near.walkMinutes }
+        guard let from = home?.location else { return nil }
+        return TripPlanner.walkMinutes(from.distance(from: station.location))
     }
 
-    /// Saves it all where the app keeps it: the places, the home station, how you'll go, the
-    /// reminder, and a visit's stay.
-    func save(to settings: SettingsStore) async {
+    /// Saves it all where the app keeps it: Home or the hotel, your stop and which way, and how
+    /// you walk and bike.
+    func save(to settings: SettingsStore) {
         let saved = SavedPlaces.shared
         // Set up again (Settings' Run Setup Again): the places from before, and a visit's hotel
         // and sights, forgotten for these, only now it's finished, so setup left part way
         // through keeps them
         VisitStay.clear()
         saved.clear()
-        switch kind {
-        case .commute:
-            if let home { saved.set(.home, to: home) }
-            if let work { saved.set(.work, to: work) }
-        case .city:
-            if let home { saved.set(.home, to: home) }
-            for place in added {
-                saved.set(place.isWork ? .work : .new(place.name), to: place.place)
-            }
-        case .visit:
-            saved.setVisiting(true, hotel: hotel)
-            VisitStay.save(until: until, picks: sights)
-        case nil:
-            break
+        if let home, visiting {
+            saved.setVisiting(true, hotel: home)
+            VisitStay.save(until: until, picks: [])
+        } else if let home {
+            saved.set(.home, to: home)
         }
-        if kind != .visit, let train { settings.settings.defaultTrain = train }
-        settings.settings.includesBuses = buses
-        settings.settings.stepFree = stepFree
-        UserDefaults.standard.set(walkMinutes, forKey: NewTripView.walkMinutesKey)
-        UserDefaults.standard.set(bike != nil, forKey: NewTripView.bikeKey)
-        if let bike {
-            UserDefaults.standard.set(bike == .eBike ? BikeKinds.eBike.rawValue : BikeKinds.bike.rawValue, forKey: BikeKinds.key)
-            // A Citi Bike picked here turns Citi Bike back on, if Settings had it off
-            UserDefaults.standard.set(false, forKey: BikeKinds.offKey)
+        // Once, so the widgets reload once
+        var app = settings.settings
+        if noStop {
+            app.defaultTrain = nil
+            app.defaultBothWays = false
+        } else if let train {
+            app.defaultTrain = train
+            app.defaultBothWays = bothWays
         }
-        // Asked here if it wasn't on the summary, as the summary says the reminder's set; once
-        // allowed or turned down, iOS answers without asking again
-        if kind == .commute, remindsToLeave, let train, await LeaveReminder.requestPermission() {
-            await LeaveReminder.schedule(at: leaveTime, train: train)
-        } else {
-            LeaveReminder.cancel()
-        }
+        app.stepFree = stepFree
+        settings.settings = app
+        let defaults = UserDefaults.standard
+        defaults.set(walkPreference.rawValue, forKey: WalkRouting.preferenceKey)
+        defaults.set(walkMinutes, forKey: NewTripView.walkMinutesKey)
+        defaults.set(bikeKinds.rawValue, forKey: BikeKinds.key)
+        defaults.set(citiBikeOff, forKey: BikeKinds.offKey)
+        defaults.set(ownBike.rawValue, forKey: OwnBike.key)
+        defaults.set(bikeCarry.rawValue, forKey: BikeCarry.key)
+        // New Trip's bike toggle on while there's a bike to ride
+        defaults.set(!citiBikeOff || ownBike != OwnBike.none, forKey: NewTripView.bikeKey)
+        // Setup no longer offers a reminder to leave: one it set before goes with the rest
+        LeaveReminder.cancel()
     }
 }
 
-/// First-run setup, shown once on a new install: how you use the subway, then your places, your
-/// station (or lines, or sights), how you'll get around, and permissions, each path its own.
+/// Setup's search for Home: the addresses and places MapKit suggests near the subway, as New
+/// Trip's search has them, without its stations and contacts.
+@MainActor
+@Observable
+private final class HomeSearch: NSObject, MKLocalSearchCompleterDelegate {
+    /// How far from a station Home may be: 5 miles, as New Trip's places.
+    static let reach: CLLocationDistance = 8_047
+
+    /// Every station and `reach` around them, the only area places are suggested in.
+    static let served: MKCoordinateRegion = {
+        let stations = StationDirectory.all
+        let latitudes = stations.map(\.lat)
+        let longitudes = stations.map(\.lon)
+        guard let south = latitudes.min(), let north = latitudes.max(),
+              let west = longitudes.min(), let east = longitudes.max() else {
+            return MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: 40.73, longitude: -73.94),
+                                      latitudinalMeters: 60_000, longitudinalMeters: 60_000)
+        }
+        let center = CLLocationCoordinate2D(latitude: (south + north) / 2, longitude: (west + east) / 2)
+        let latitudePad = reach / Earth.metresPerDegree
+        let longitudePad = reach / (Earth.metresPerDegree * cos(center.latitude * .pi / 180))
+        return MKCoordinateRegion(center: center,
+                                  span: MKCoordinateSpan(latitudeDelta: north - south + 2 * latitudePad,
+                                                         longitudeDelta: east - west + 2 * longitudePad))
+    }()
+
+    private(set) var results: [MKLocalSearchCompletion] = []
+    @ObservationIgnored private let completer = MKLocalSearchCompleter()
+
+    var query = "" {
+        didSet {
+            guard query != oldValue else { return }
+            if isBlank { results = [] }
+            completer.queryFragment = query
+        }
+    }
+
+    /// Nothing typed but spaces: no suggestions, and Home shows again.
+    var isBlank: Bool { query.trimmingCharacters(in: .whitespaces).isEmpty }
+
+    override init() {
+        super.init()
+        completer.delegate = self
+        completer.resultTypes = [.address, .pointOfInterest]
+        completer.region = Self.served
+        completer.regionPriority = .required
+    }
+
+    // The completer calls back on the main thread
+    nonisolated func completerDidUpdateResults(_ completer: MKLocalSearchCompleter) {
+        MainActor.assumeIsolated {
+            results = isBlank ? [] : completer.results
+        }
+    }
+
+    nonisolated func completer(_ completer: MKLocalSearchCompleter, didFailWithError error: Error) {
+        MainActor.assumeIsolated {
+            results = []
+        }
+    }
+
+    /// Where `result` is, and whether it's a hotel; nil if it can't be found, or is further than
+    /// `reach` from a station.
+    static func place(for result: MKLocalSearchCompletion) async -> (place: TripPlace, isHotel: Bool)? {
+        let request = MKLocalSearch.Request(completion: result)
+        request.region = served
+        request.regionPriority = .required
+        guard let item = try? await MKLocalSearch(request: request).start().mapItems.first,
+              let nearest = Nearby.nearest(to: item.location), nearest.meters <= reach else { return nil }
+        let coordinate = item.location.coordinate
+        let place = TripPlace(name: result.title, detail: shortened(result.subtitle),
+                              point: TripPlace.Point(latitude: coordinate.latitude, longitude: coordinate.longitude))
+        return (place, item.pointOfInterestCategory == .hotel)
+    }
+
+    /// A suggestion's line under its name, without the country: "Brooklyn, NY 11215".
+    static func shortened(_ subtitle: String) -> String {
+        subtitle.replacingOccurrences(of: ", United States", with: "")
+    }
+}
+
+/// First-run setup, shown once on a new install: what stays on the phone and what's sent, then
+/// Home's address, your stop and which way, walking, biking, and a look over it all with the
+/// permissions.
 struct FirstRunView: View {
     let done: () -> Void
 
     @Environment(SettingsStore.self) private var settings
     @State private var answers = FirstRunAnswers()
+    /// 0 is the privacy page, before the numbered steps.
     @State private var step = 0
     @State private var location = NearbyLocation()
-    /// The place being searched for, in a sheet.
-    @State private var searching: Searching?
+    @State private var contacts = ContactSearch()
+    @State private var search = HomeSearch()
+    @FocusState private var searching: Bool
+    /// The suggestion being looked up after a tap.
+    @State private var looking: MKLocalSearchCompletion?
+    /// Suggestions looked up and not found near the subway.
+    @State private var notFound: Set<MKLocalSearchCompletion> = []
+    /// A visit's last day picked past the three offered.
+    @State private var laterDay = false
     @State private var choosingTrain = false
-    @State private var namingPlace = false
-    @State private var newPlaceName = ""
-    @State private var notificationsAllowed = false
-    @State private var saving = false
+    /// Each way's next trains from the stop shown, once fetched.
+    @State private var trains: [Direction: [Arrival]] = [:]
 
+    /// The numbered steps, after the privacy page.
     private static let steps = 5
     private static let card = RoundedRectangle(cornerRadius: 26, style: .continuous)
     private static let faint = Color.primary.opacity(0.05)
 
-    private enum Searching: Identifiable {
-        case home, work, hotel, added(String)
-
-        var id: String {
-            switch self {
-            case .home: "home"
-            case .work: "work"
-            case .hotel: "hotel"
-            case .added(let name): "added \(name)"
-            }
-        }
-
-        var title: String {
-            switch self {
-            case .home: "Home"
-            case .work: "Work"
-            case .hotel: "Your Hotel"
-            case .added(let name): name
-            }
-        }
-    }
-
     var body: some View {
         VStack(spacing: 0) {
-            topBar
+            if step > 0 {
+                topBar
+            }
             page
                 .id(step)
                 .transition(.asymmetric(insertion: .move(edge: .trailing).combined(with: .opacity),
@@ -404,36 +418,21 @@ struct FirstRunView: View {
         .animation(.smooth, value: step)
         .background(Color(uiColor: .systemBackground))
         .onAppear { location.start() }
-        .sheet(item: $searching) { searching in
-            PlaceSearch(title: searching.title) { place in
-                set(searching, to: place)
-            }
-        }
         .sheet(isPresented: $choosingTrain) {
             TrainPicker(selection: Binding {
                 answers.train ?? SharedStore.load()
             } set: {
                 answers.train = $0
-            })
-        }
-        .alert("New Place", isPresented: $namingPlace) {
-            TextField("Name", text: $newPlaceName)
-                .textInputAutocapitalization(.words)
-            Button("Cancel", role: .cancel) {}
-            Button("Next") {
-                let name = newPlaceName.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !name.isEmpty { searching = .added(name) }
-            }
-        } message: {
-            Text("Name it, then pick where it is.")
+                answers.noStop = false
+            }, bothWays: $answers.bothWays)
         }
     }
 
     /// Back, the step dots, and Skip, which goes straight to the last screen.
     private var topBar: some View {
         HStack(spacing: 12) {
-            // Its room kept on the first screen too, so the dots stay put
             Button {
+                searching = false
                 step -= 1
             } label: {
                 Image(systemName: "chevron.left")
@@ -443,22 +442,23 @@ struct FirstRunView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Back")
-            .opacity(step > 0 ? 1 : 0)
-            .disabled(step == 0)
             HStack(spacing: 6) {
-                ForEach(0..<Self.steps, id: \.self) { index in
+                ForEach(1...Self.steps, id: \.self) { index in
                     Capsule()
                         .fill(index <= step ? AnyShapeStyle(.tint) : AnyShapeStyle(.quaternary))
                         .frame(width: index == step ? 22 : 8, height: 8)
                 }
             }
             .accessibilityElement()
-            .accessibilityLabel("Step \(step + 1) of \(Self.steps)")
+            .accessibilityLabel("Step \(step) of \(Self.steps)")
             Spacer()
-            if step > 0 && step < Self.steps - 1 {
-                Button("Skip") { step = Self.steps - 1 }
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.secondary)
+            if step < Self.steps {
+                Button("Skip") {
+                    searching = false
+                    step = Self.steps
+                }
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
             }
         }
         .frame(height: 44)
@@ -468,232 +468,127 @@ struct FirstRunView: View {
 
     @ViewBuilder
     private var page: some View {
-        switch (step, answers.kind) {
-        case (0, _), (_, nil): usage
-        case (1, .commute): commutePlaces
-        case (1, .city): cityPlaces
-        case (1, .visit): hotelPage
-        case (2, .commute): commuteTrain
-        case (2, .city): linesPage
-        case (2, .visit): sightsPage
-        case (3, _): gettingAround
+        switch step {
+        case 0: privacyPage
+        case 1: homePage
+        case 2: stopPage
+        case 3: walkingPage
+        case 4: bikingPage
         default: summary
         }
     }
 
     // MARK: - Pages
 
-    private var usage: some View {
-        Page(title: "How do you use the subway?", subtitle: "Leeway sets itself up around the trips you take.",
-             canContinue: answers.kind != nil, next: next) {
-            VStack(spacing: 10) {
-                choiceCard(.commute, "briefcase.fill", "Getting to work or school", "Mostly the same trip, most days")
-                choiceCard(.city, "map.fill", "Getting around the city", "I live here, I go all over")
-                choiceCard(.visit, "suitcase.rolling.fill", "Just visiting", "Here for a few days")
-            }
-        }
-    }
-
-    private var commutePlaces: some View {
-        Page(title: "Your commute", subtitle: "Where you start and where you're headed most days.", next: next) {
+    private var privacyPage: some View {
+        Page(title: "Your privacy", subtitle: "No account and no sign-in.", primary: "Get Started", opening: true,
+             next: next) {
             VStack(spacing: 8) {
+                cardLabel("Kept on this iPhone", symbol: "iphone")
                 VStack(spacing: 0) {
-                    placeRow("house.fill", "Home", answers.home) { searching = .home }
-                    Divider().padding(.leading, 60)
-                    placeRow("briefcase.fill", "Work", answers.work) { searching = .work }
+                    infoRow("house.fill", "Saved places", "Home, Work, and any other saved locations")
+                    Divider().padding(.leading, 52)
+                    infoRow("location.fill", "Your location",
+                            "Leeway looks up the address if it's used as the start or end point, but it doesn't "
+                                + "know it's your current location")
+                    Divider().padding(.leading, 52)
+                    infoRow("person.crop.circle.fill", "Your contacts",
+                            "Leeway looks up the address if it's used as the start or end point, but it doesn't "
+                                + "see your contacts")
                 }
                 .background(Self.faint, in: Self.card)
                 .padding(.bottom, 14)
 
-                cardLabel("Usually leave for work")
+                cardLabel("Sent off your iPhone", symbol: "icloud")
                 VStack(spacing: 0) {
-                    switchRow("bell.fill", "Remind me to leave", "Weekdays. Tap the reminder to start your countdown.",
-                              isOn: $answers.remindsToLeave)
-                    if answers.remindsToLeave {
-                        Divider().padding(.leading, 52)
-                        DatePicker(selection: $answers.leaveTime, displayedComponents: .hourAndMinute) {
-                            Label {
-                                Text("Leave at")
-                            } icon: {
-                                Image(systemName: "clock").foregroundStyle(.tint)
-                            }
-                        }
-                        .padding(.horizontal, 16)
-                        .frame(minHeight: 52)
-                    }
+                    infoRow("server.rack", "Leeway's server",
+                            "A trip's start and end, to find routes, and your countdown's train, to keep it current")
+                    Divider().padding(.leading, 52)
+                    infoRow("map.fill", "Apple Maps", "Addresses you search, and some walking and bike directions")
+                    Divider().padding(.leading, 52)
+                    infoRow("tram.fill", "Train, bus and bike times",
+                            "From the MTA and Citi Bike, some through Leeway's server. Nothing about you")
                 }
                 .background(Self.faint, in: Self.card)
+                footnote("Crash reports are sent only if you turn on Share Diagnostics in Settings.")
             }
         }
     }
 
-    private var cityPlaces: some View {
-        Page(title: "Where do you go?", subtitle: "Each becomes a one-tap trip in New Trip.", next: next) {
+    private var homePage: some View {
+        Page(title: "Where's home?", subtitle: "Your address. Leeway finds the stops near it and times your walk to them.",
+             primary: answers.home == nil || !search.isBlank ? nil : "Continue", next: next) {
             VStack(spacing: 8) {
-                VStack(spacing: 0) {
-                    placeRow("house.fill", "Home", answers.home) { searching = .home }
-                    ForEach(answers.added) { added in
-                        Divider().padding(.leading, 60)
-                        placeRow(added.isWork ? "briefcase.fill" : "mappin", added.name, added.place,
-                                 remove: { answers.added.removeAll { $0.id == added.id } }) {
-                            searching = .added(added.name)
-                        }
+                searchField
+                    .padding(.bottom, 6)
+                if !search.isBlank {
+                    if !search.results.isEmpty {
+                        results
+                    }
+                } else if let home = answers.home {
+                    placeCard(home)
+                    if answers.visiting {
+                        visitDays
                     }
                 }
-                .background(Self.faint, in: Self.card)
-                .padding(.bottom, 14)
-
-                cardLabel("Add more")
-                ScrollView(.horizontal) {
-                    HStack(spacing: 8) {
-                        ForEach(["Work", "School", "Gym"].filter { name in !answers.added.contains { $0.name == name } },
-                                id: \.self) { name in
-                            Button {
-                                searching = .added(name)
-                            } label: {
-                                chip(name, symbol: "plus")
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        Button {
-                            newPlaceName = ""
-                            namingPlace = true
-                        } label: {
-                            chip("Other", symbol: "plus")
-                        }
-                        .buttonStyle(.plain)
-                    }
+                if !answers.visiting {
+                    footnote("Visiting? Search for your hotel by name.")
                 }
-                .scrollIndicators(.hidden)
-                .scrollClipDisabled()
             }
+        }
+        .task {
+            // Once the page has slid in
+            guard answers.home == nil else { return }
+            try? await Task.sleep(for: .seconds(0.4))
+            searching = true
         }
     }
 
-    private var hotelPage: some View {
-        Page(title: "Where are you staying?", subtitle: "Every trip can start or end at your hotel.", next: next) {
+    private var stopPage: some View {
+        Page(title: "This your stop?", subtitle: "The closest to home. Siri, the countdown and your first widget show it.",
+             next: next) {
             VStack(spacing: 8) {
-                VStack(spacing: 0) {
-                    placeRow("bed.double.fill", "Hotel", answers.hotel, prompt: "Search for your hotel or address") {
-                        searching = .hotel
-                    }
+                if !answers.nearby.isEmpty {
+                    stopsMap
+                        .padding(.bottom, 6)
                 }
-                .background(Self.faint, in: Self.card)
-                .padding(.bottom, 14)
-
-                cardLabel("Here until")
-                DatePicker(selection: $answers.until, in: Date.now..., displayedComponents: .date) {
-                    Label {
-                        Text("Leaving on")
-                    } icon: {
-                        Image(systemName: "calendar").foregroundStyle(.tint)
-                    }
-                }
-                .padding(.horizontal, 16)
-                .frame(minHeight: 52)
-                .background(Self.faint, in: Self.card)
-                footnote("After that, Leeway asks before clearing your hotel and sights.")
-            }
-        }
-    }
-
-    private var commuteTrain: some View {
-        Page(title: "Your train", subtitle: "Siri, the countdown and your first widget show it.", next: next) {
-            VStack(spacing: 8) {
-                if let train = answers.train {
-                    cardLabel(answers.work == nil ? "Closest to Home" : "On your way to Work")
-                    trainCard(train, picked: true)
+                if let train = answers.train, let station = train.station {
+                    stopCard(train, at: station)
                         .padding(.bottom, 14)
                 }
-                cardLabel(answers.train == nil ? "Pick a train" : "Or another")
                 VStack(spacing: 0) {
-                    ForEach(answers.otherTrains, id: \.trainID) { other in
-                        Button {
-                            answers.train = other
-                        } label: {
-                            stationRow(other)
-                        }
-                        .buttonStyle(.plain)
-                        Divider().padding(.leading, 64)
+                    anotherStop
+                    Divider().padding(.leading, 52)
+                    choiceRow("mappin.slash", "No primary stop", "Nearby shows the stations closest to wherever you are",
+                              on: answers.noStop) {
+                        answers.noStop = true
                     }
-                    Button {
-                        choosingTrain = true
-                    } label: {
-                        HStack(spacing: 12) {
-                            Image(systemName: "magnifyingglass").frame(width: 36)
-                            Text("Choose a station, line or direction")
-                            Spacer()
-                        }
-                        .foregroundStyle(.tint)
-                        .padding(.horizontal, 14)
-                        .frame(minHeight: 52)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
                 }
                 .background(Self.faint, in: Self.card)
             }
         }
-        // Planned for Home and Work as they are now; changing either clears the train for this
-        .onAppear { if answers.train == nil { answers.suggestCommute() } }
+        // Again for another station or its lines, not for another way
+        .task(id: answers.train.map { "\($0.stationID) \($0.routes)" }) { await fetchTrains() }
     }
 
-    private var linesPage: some View {
-        Page(title: "Lines you ride", subtitle: "Pick as many as you like. Your home station follows them.", next: next) {
+    private var walkingPage: some View {
+        Page(title: "Walking Preferences", subtitle: "How New Trip plans your walks to and from the train.", next: next) {
             VStack(spacing: 8) {
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 6), spacing: 10) {
-                    ForEach(Lines.filterRoutes, id: \.self) { line in
-                        let on = answers.lines.contains(line)
-                        Button {
-                            if on { answers.lines.remove(line) } else { answers.lines.insert(line) }
-                            answers.suggestCityTrain()
-                        } label: {
-                            LineBullet(route: line, size: 40)
-                                .opacity(on || answers.lines.isEmpty ? 1 : 0.3)
-                                .overlay(alignment: .bottomTrailing) {
-                                    if on {
-                                        Image(systemName: "checkmark.circle.fill")
-                                            .font(.system(size: 15))
-                                            .foregroundStyle(.white, .tint)
-                                            .offset(x: 3, y: 3)
-                                    }
-                                }
+                cardLabel("Routes")
+                VStack(spacing: 0) {
+                    // Safest first, as Settings has them
+                    ForEach(Array(WalkPreference.allCases.reversed().enumerated()), id: \.element) { index, preference in
+                        if index > 0 { Divider().padding(.leading, 52) }
+                        choiceRow(preference.symbol, preference.name, preference.detail,
+                                  on: answers.walkPreference == preference) {
+                            answers.walkPreference = preference
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(Lines.name(of: line))
-                        .accessibilityAddTraits(on ? .isSelected : [])
                     }
                 }
-                .padding(16)
                 .background(Self.faint, in: Self.card)
                 .padding(.bottom, 14)
 
-                cardLabel(answers.home == nil ? "Your station" : "Your station, nearest Home")
-                if let train = answers.train {
-                    trainCard(train, picked: false)
-                } else {
-                    Button("Choose a Train") { choosingTrain = true }
-                        .frame(maxWidth: .infinity, minHeight: 52)
-                        .background(Self.faint, in: Self.card)
-                }
-            }
-        }
-        .onAppear { if answers.train == nil { answers.suggestCityTrain() } }
-    }
-
-    private var sightsPage: some View {
-        Page(title: "What do you want to see?", subtitle: "Your picks top New Trip's Sightseeing list.", scrolls: false,
-             next: next) {
-            SightPicker(picked: $answers.sights)
-        }
-    }
-
-    private var gettingAround: some View {
-        Page(title: "Getting around",
-             subtitle: answers.kind == .visit ? "Walking is half the fun. Change it on any trip." : "Change any of these on a trip.",
-             next: next) {
-            VStack(spacing: 8) {
-                cardLabel("Walk up to (min)")
+                cardLabel("Comfortable walk to or from a ride")
                 HStack(spacing: 6) {
                     ForEach(NewTripView.walkChoices, id: \.minutes) { choice in
                         let on = choice.minutes == answers.walkMinutes
@@ -715,32 +610,64 @@ struct FirstRunView: View {
                         .accessibilityAddTraits(on ? .isSelected : [])
                     }
                 }
-                .padding(.bottom, 12)
+                footnote("Minutes. New Trip offers rides with a walk up to this long at each end.")
+                    .padding(.bottom, 14)
 
-                cardLabel(answers.kind == .visit ? "Citi Bike · Day Pass" : "Citi Bike")
-                HStack(spacing: 8) {
-                    bikeTile(nil, "xmark", "No bikes")
-                    bikeTile(.bike, "bicycle", "Bike")
-                    bikeTile(.eBike, "bolt.fill", "E-bike")
-                }
-                .padding(.bottom, 12)
-
-                VStack(spacing: 0) {
-                    switchRow("bus.fill", "Include buses",
-                              answers.kind == .visit ? "Fine for short hops, and to the ferry" : "Where a bus beats the walk",
-                              isOn: $answers.buses)
-                    Divider().padding(.leading, 52)
-                    switchRow("figure.roll", "Step-free trips", "Only stations with working elevators",
-                              isOn: $answers.stepFree)
-                }
-                .background(Self.faint, in: Self.card)
+                cardLabel("Accessibility")
+                switchRow("figure.roll", "Step-Free Mode", "Only stations with working elevators", isOn: $answers.stepFree)
+                    .background(Self.faint, in: Self.card)
             }
         }
     }
 
+    private var bikingPage: some View {
+        Page(title: "Biking Preferences",
+             subtitle: "How New Trip fits a bike into your trips. Leave them all off for no biking.", next: next) {
+            VStack(spacing: 8) {
+                cardLabel("Citi Bike")
+                HStack(spacing: 8) {
+                    bikeTile("Citi Bike", electric: false, own: false, on: citiBikeOn(.bike)) { toggleCitiBike(.bike) }
+                    bikeTile("Citi E-Bike", electric: true, own: false, on: citiBikeOn(.eBike)) { toggleCitiBike(.eBike) }
+                }
+                .padding(.vertical, 14)
+                .background(Self.faint, in: Self.card)
+                footnote("Rides from a dock with bikes to one with room, to the train or all the way.")
+                    .padding(.bottom, 14)
+
+                cardLabel("Your own bike")
+                HStack(spacing: 8) {
+                    bikeTile("None", symbol: "xmark", electric: false, own: true, on: answers.ownBike == OwnBike.none) {
+                        answers.ownBike = OwnBike.none
+                    }
+                    bikeTile("My Bike", electric: false, own: true, on: answers.ownBike == .bike) { answers.ownBike = .bike }
+                    bikeTile("My E-Bike", electric: true, own: true, on: answers.ownBike == .eBike) { answers.ownBike = .eBike }
+                }
+                .padding(.vertical, 14)
+                .background(Self.faint, in: Self.card)
+                if answers.citiBikeOff && answers.ownBike == OwnBike.none {
+                    footnote("Biking won't be shown in New Trip.")
+                }
+
+                if answers.ownBike != OwnBike.none {
+                    cardLabel("With a train")
+                        .padding(.top, 14)
+                    VStack(spacing: 0) {
+                        ForEach(Array(BikeCarry.allCases.enumerated()), id: \.element) { index, carry in
+                            if index > 0 { Divider().padding(.leading, 52) }
+                            choiceRow(carry.symbol, carry.name, carry.detail, on: answers.bikeCarry == carry) {
+                                answers.bikeCarry = carry
+                            }
+                        }
+                    }
+                    .background(Self.faint, in: Self.card)
+                }
+            }
+            .animation(.default, value: answers.ownBike)
+        }
+    }
+
     private var summary: some View {
-        Page(title: "You're set", subtitle: "Change any of these in Settings or on a trip.", primary: "Start Riding",
-             canContinue: !saving, next: finish) {
+        Page(title: "You're set", subtitle: "Change any of these in Settings.", primary: "Start Riding", next: finish) {
             VStack(spacing: 8) {
                 VStack(spacing: 0) {
                     ForEach(Array(summaryRows.enumerated()), id: \.offset) { index, row in
@@ -749,6 +676,9 @@ struct FirstRunView: View {
                             Image(systemName: row.symbol).foregroundStyle(.tint).frame(width: 30)
                             Text(row.title)
                             Spacer()
+                            if let routes = row.routes {
+                                LineBullets(routes: routes, size: 20)
+                            }
                             Text(row.value).foregroundStyle(.secondary)
                         }
                         .lineLimit(1)
@@ -762,225 +692,482 @@ struct FirstRunView: View {
 
                 cardLabel("So Leeway can help")
                 VStack(spacing: 0) {
-                    askRow("location.fill", "Location",
-                           answers.kind == .visit ? "Trips from wherever you wander" : "Trips from where you are, and walking turns",
-                           allowed: location.isAllowed, denied: location.status == .denied) {
+                    askRow("location.fill", "Location", "Trains near you, and walking turns",
+                           allowed: location.isAllowed, denied: location.status == .denied || location.status == .restricted) {
                         location.find()
                     }
-                    // Only with a train, as only then is a reminder set (`save`)
-                    if answers.kind == .commute && answers.remindsToLeave && answers.train != nil {
-                        Divider().padding(.leading, 56)
-                        askRow("bell.badge.fill", "Notifications", "Your reminder to leave", allowed: notificationsAllowed,
-                               denied: false) {
-                            Task { notificationsAllowed = await LeaveReminder.requestPermission() }
-                        }
+                    Divider().padding(.leading, 56)
+                    askRow("person.crop.circle.fill", "Contacts", "Their addresses in New Trip",
+                           allowed: contacts.status == .authorized || contacts.status == .limited,
+                           denied: contacts.status == .denied || contacts.status == .restricted) {
+                        Task { await contacts.ask() }
                     }
                 }
                 .background(Self.faint, in: Self.card)
+                footnote("You can allow either later in Settings.")
             }
         }
-        .task { notificationsAllowed = await LeaveReminder.isAllowed }
     }
 
-    /// What's been set, by path.
-    private var summaryRows: [(symbol: String, title: String, value: String)] {
-        var rows: [(String, String, String)] = []
-        let walk = NewTripView.walkLabel(answers.walkMinutes)
-        let bike = answers.bike.map { $0 == .eBike ? "E-bike" : "Bike" } ?? "No bikes"
-        switch answers.kind {
-        case .commute:
-            rows.append(("house.fill", "Home", answers.home?.name ?? "Not set"))
-            rows.append(("briefcase.fill", "Work", answers.work?.name ?? "Not set"))
-            rows.append(("tram.fill", "Your train", answers.train?.station?.name ?? "Not set"))
-            if answers.remindsToLeave, answers.train != nil {
-                rows.append(("clock", "Reminder", "Weekdays \(answers.leaveTime.formatted(date: .omitted, time: .shortened))"))
-            }
-        case .city:
-            rows.append(("house.fill", "Home", answers.home?.name ?? "Not set"))
-            rows.append(("mappin", "Places", answers.added.isEmpty ? "None" : answers.added.map(\.name).formatted(.list(type: .and))))
-            rows.append(("tram.fill", "Your station", answers.train?.station?.name ?? "Not set"))
-        case .visit:
-            rows.append(("bed.double.fill", "Hotel", answers.hotel?.name ?? "Not set"))
-            rows.append(("star.fill", "Sights", answers.sights.isEmpty ? "None" : "\(answers.sights.count) saved"))
-            rows.append(("calendar", "Until", answers.until.formatted(.dateTime.weekday().month().day())))
-        case nil:
-            break
+    /// What's been set, with the stop's lines.
+    private var summaryRows: [(symbol: String, title: String, value: String, routes: [String]?)] {
+        var rows: [(String, String, String, [String]?)] = []
+        if answers.visiting {
+            rows.append(("bed.double.fill", "Hotel", answers.home?.name ?? "Not set", nil))
+            rows.append(("calendar", "Until", answers.until.formatted(.dateTime.weekday().month().day()), nil))
+        } else {
+            rows.append(("house.fill", "Home", answers.home?.name ?? "Not set", nil))
         }
-        rows.append(("figure.walk", "Walk up to", "\(walk) · \(bike)"))
+        if answers.noStop {
+            rows.append(("tram.fill", "Your stop", "None", nil))
+        } else if let train = answers.train {
+            rows.append(("tram.fill", "Your stop", train.station?.name ?? "", train.routes))
+            rows.append(answers.bothWays ? ("arrow.up.arrow.down", "Way", "Both ways", nil)
+                                         : (train.direction == .north ? "arrow.up" : "arrow.down", "Way",
+                                            "Toward \(train.heading)", nil))
+        } else {
+            rows.append(("tram.fill", "Your stop", "Not set", nil))
+        }
+        rows.append(("figure.walk", "Walking",
+                     "\(answers.walkPreference.name) · up to \(NewTripView.walkLabel(answers.walkMinutes))", nil))
+        rows.append(("figure.roll", "Step-free", answers.stepFree ? "On" : "Off", nil))
+        rows.append(("bicycle", "Biking", bikingSummary, nil))
         return rows
+    }
+
+    /// "Citi Bikes · My Bike", or "None".
+    private var bikingSummary: String {
+        var parts: [String] = []
+        if !answers.citiBikeOff {
+            switch answers.bikeKinds {
+            case .both: parts.append("Citi Bikes")
+            case .bike: parts.append("Citi Bike")
+            case .eBike: parts.append("Citi E-Bike")
+            }
+        }
+        switch answers.ownBike {
+        case .none: break
+        case .bike: parts.append("My Bike")
+        case .eBike: parts.append("My E-Bike")
+        }
+        return parts.isEmpty ? "None" : parts.joined(separator: " · ")
     }
 
     // MARK: - Steps
 
     private func next() {
-        step = min(step + 1, Self.steps - 1)
+        searching = false
+        step = min(step + 1, Self.steps)
     }
 
     private func finish() {
-        saving = true
+        answers.save(to: settings)
+        done()
+    }
+
+    /// Looks `result` up and makes it Home, or marks it as not found near the subway.
+    private func pick(_ result: MKLocalSearchCompletion) {
+        guard looking == nil else { return }
+        looking = result
         Task {
-            await answers.save(to: settings)
-            done()
+            defer { looking = nil }
+            guard let found = await HomeSearch.place(for: result) else {
+                notFound.insert(result)
+                return
+            }
+            answers.setHome(found.place, isHotel: found.isHotel)
+            laterDay = false
+            search.query = ""
+            searching = false
         }
     }
 
-    private func set(_ searching: Searching, to place: TripPlace) {
-        switch searching {
-        case .home:
-            answers.home = place
-            answers.train = nil
-        case .work:
-            answers.work = place
-            answers.train = nil
-        case .hotel:
-            answers.hotel = place
-        case .added(let name):
-            if let index = answers.added.firstIndex(where: { $0.name == name }) {
-                answers.added[index].place = place
-            } else {
-                answers.added.append(.init(name: name, place: place))
+    /// The next trains each way from the stop shown, as the train picker's direction step
+    /// fetches them.
+    private func fetchTrains() async {
+        trains = [:]
+        guard let train = answers.train else { return }
+        let ways = answers.ways.map { Selection(stationID: train.stationID, routes: train.routes, direction: $0) }
+        await withTaskGroup(of: (Direction, [Arrival]?).self) { group in
+            for way in ways {
+                group.addTask {
+                    let board = try? await TrainService.board(for: way, includingAlerts: false, includingOutages: false,
+                                                              fillingFrom: { TimetableStore.load() })
+                    return (way.direction, board.map { way.catchable($0.trains, now: .now) })
+                }
+            }
+            for await (direction, found) in group {
+                if let found { trains[direction] = found }
             }
         }
+    }
+
+    /// "Next: 4 min, 11 min", once fetched.
+    private func nextTrains(_ direction: Direction) -> String? {
+        guard let found = trains[direction] else { return nil }
+        guard !found.isEmpty else { return "No trains soon" }
+        let times = found.prefix(2).map { arrival in
+            let minutes = Int(arrival.time.timeIntervalSinceNow / 60)
+            return minutes <= 0 ? "Now" : "\(minutes) min"
+        }
+        return "Next: " + times.joined(separator: ", ")
     }
 
     // MARK: - Parts
 
-    private func choiceCard(_ kind: RiderKind, _ symbol: String, _ title: String, _ detail: String) -> some View {
-        let picked = answers.kind == kind
-        return Button {
-            answers.choose(kind)
-        } label: {
-            HStack(spacing: 14) {
-                Image(systemName: symbol)
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(picked ? AnyShapeStyle(.white) : AnyShapeStyle(.tint))
-                    .frame(width: 48, height: 48)
-                    .background(picked ? AnyShapeStyle(.tint) : AnyShapeStyle(.tint.opacity(0.12)), in: Circle())
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.headline)
-                    Text(detail).font(.subheadline).foregroundStyle(.secondary)
+    private var searchField: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            TextField("Search for your address", text: $search.query)
+                .focused($searching)
+                .textContentType(.fullStreetAddress)
+                .autocorrectionDisabled()
+                .submitLabel(.search)
+                .onSubmit {
+                    if let first = search.results.first { pick(first) }
                 }
-                .multilineTextAlignment(.leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                Image(systemName: picked ? "checkmark.circle.fill" : "circle")
-                    .font(.title3)
-                    .foregroundStyle(picked ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
-            }
-            .padding(16)
-            .background(Self.faint, in: Self.card)
-            .overlay(Self.card.strokeBorder(picked ? AnyShapeStyle(.tint) : AnyShapeStyle(.clear), lineWidth: 2))
-            .contentShape(Self.card)
-        }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(picked ? .isSelected : [])
-    }
-
-    /// A place's row: its icon, name and address once set (or a prompt), a tap to search for it.
-    private func placeRow(_ symbol: String, _ name: String, _ place: TripPlace?, prompt: String = "Search for an address or place",
-                          remove: (() -> Void)? = nil, search: @escaping () -> Void) -> some View {
-        HStack(spacing: 12) {
-            Button(action: search) {
-                HStack(spacing: 12) {
-                    Image(systemName: symbol)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.white)
-                        .frame(width: 34, height: 34)
-                        .background(place == nil ? AnyShapeStyle(.gray) : AnyShapeStyle(.tint), in: Circle())
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(name).font(.headline)
-                        Text(place.map { [$0.name, $0.detail].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", ") }
-                             ?? prompt)
-                            .font(.subheadline)
-                            .foregroundStyle(place == nil ? .tertiary : .secondary)
-                    }
-                    .lineLimit(1)
-                    Spacer(minLength: 0)
-                    Image(systemName: place == nil ? "magnifyingglass" : "pencil")
-                        .font(.body.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            if let remove {
-                Button(action: remove) {
-                    Image(systemName: "xmark.circle.fill").font(.title3).foregroundStyle(.tertiary)
+            if !search.query.isEmpty {
+                Button {
+                    search.query = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Remove \(name)")
+                .accessibilityLabel("Clear")
             }
         }
-        .padding(.horizontal, 14)
-        .frame(minHeight: 64)
+        .padding(.horizontal, 16)
+        .frame(minHeight: 52)
+        .background(Self.faint, in: Capsule())
     }
 
-    /// The home station as a glass card, as Settings' Home Station; a tap picks another.
-    private func trainCard(_ train: Selection, picked: Bool) -> some View {
+    /// MapKit's suggestions for what's typed, each looked up when tapped.
+    private var results: some View {
+        VStack(spacing: 0) {
+            ForEach(Array(search.results.prefix(6).enumerated()), id: \.offset) { index, result in
+                if index > 0 { Divider().padding(.leading, 60) }
+                Button {
+                    pick(result)
+                } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "mappin")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 34, height: 34)
+                            .background(.red, in: Circle())
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(result.title).font(.headline)
+                            Text(notFound.contains(result) ? "Not found near the subway" : HomeSearch.shortened(result.subtitle))
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                        .lineLimit(1)
+                        Spacer(minLength: 0)
+                        if looking == result {
+                            ProgressView()
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                    .frame(minHeight: 64)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(looking != nil)
+            }
+        }
+        .background(Self.faint, in: Self.card)
+    }
+
+    /// Home once it's picked; a tap searches again.
+    private func placeCard(_ home: TripPlace) -> some View {
         Button {
-            choosingTrain = true
+            searching = true
         } label: {
             HStack(spacing: 12) {
-                LineBullets(routes: train.routes, size: 40)
+                Image(systemName: answers.visiting ? "bed.double.fill" : "house.fill")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 34, height: 34)
+                    .background(.tint, in: Circle())
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(train.station?.name ?? "").font(.title3.weight(.semibold)).lineLimit(2)
-                    Text("\(train.linesLabel) toward \(train.heading)").font(.subheadline).foregroundStyle(.secondary)
-                    if let minutes = answers.walk(to: train) {
-                        Label("\(minutes) min walk from \(answers.kind == .visit ? "your hotel" : "Home")",
-                              systemImage: "figure.walk")
-                            .font(.footnote).foregroundStyle(.secondary)
+                    Text(home.name).font(.headline)
+                    if let detail = home.detail, !detail.isEmpty {
+                        Text(detail).font(.subheadline).foregroundStyle(.secondary)
                     }
                 }
-                .multilineTextAlignment(.leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .lineLimit(1)
+                Spacer(minLength: 0)
                 Image(systemName: "pencil")
                     .font(.body.weight(.semibold))
-                    .frame(width: 36, height: 36)
-                    .background(.quaternary, in: Circle())
+                    .foregroundStyle(.secondary)
             }
-            .padding(16)
+            .padding(.horizontal, 14)
+            .frame(minHeight: 64)
             .contentShape(Self.card)
         }
         .buttonStyle(.plain)
-        .glassEffect(.regular.interactive(), in: Self.card)
-        .overlay(Self.card.strokeBorder(picked ? AnyShapeStyle(.tint) : AnyShapeStyle(.clear), lineWidth: 2))
-        .accessibilityHint("Choose another station, line or direction")
+        .background(Self.faint, in: Self.card)
+        .accessibilityHint("Search for another address")
     }
 
-    private func stationRow(_ train: Selection) -> some View {
-        HStack(spacing: 12) {
-            LineBullets(routes: train.routes, size: 28).frame(width: LineBullets.width(count: 2, size: 28))
-            VStack(alignment: .leading, spacing: 1) {
-                Text(train.station?.name ?? "").font(.body.weight(.medium))
-                Text("Toward \(train.heading)").font(.footnote).foregroundStyle(.secondary)
+    /// A hotel's last day: the next three, or a later one picked; or not a visit after all.
+    private var visitDays: some View {
+        let today = Calendar.current.startOfDay(for: .now)
+        let days = (1...3).compactMap { Calendar.current.date(byAdding: .day, value: $0, to: today) }
+        return VStack(spacing: 8) {
+            cardLabel("Looks like a hotel. Here until…")
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
+                ForEach(days, id: \.self) { day in
+                    dayChip(day.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day()),
+                            on: !laterDay && Calendar.current.isDate(answers.until, inSameDayAs: day)) {
+                        laterDay = false
+                        answers.until = day
+                    }
+                }
+                dayChip("Later", on: laterDay) {
+                    laterDay = true
+                    if let last = days.last, answers.until < Calendar.current.date(byAdding: .day, value: 1, to: last) ?? last {
+                        answers.until = Calendar.current.date(byAdding: .day, value: 1, to: last) ?? last
+                    }
+                }
             }
-            .lineLimit(1)
-            Spacer()
-            if let minutes = answers.walk(to: train) {
-                Text("\(minutes) min walk").font(.subheadline).foregroundStyle(.secondary)
+            if laterDay {
+                DatePicker(selection: $answers.until, in: Date.now..., displayedComponents: .date) {
+                    Label {
+                        Text("Leaving on")
+                    } icon: {
+                        Image(systemName: "calendar").foregroundStyle(.tint)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .frame(minHeight: 52)
+                .background(Self.faint, in: Self.card)
             }
+            Button("I live here") {
+                answers.visiting = false
+                laterDay = false
+            }
+            .font(.subheadline.weight(.semibold))
+            .frame(maxWidth: .infinity, minHeight: 44)
+            footnote("Trips start and end at your hotel, and Leeway asks before clearing it once you've gone.")
         }
-        .padding(.horizontal, 14)
-        .frame(minHeight: 56)
-        .contentShape(Rectangle())
+        .padding(.top, 14)
     }
 
-    private func bikeTile(_ kind: CitiBike.Kind?, _ symbol: String, _ name: String) -> some View {
-        let on = answers.bike == kind
-        return Button {
-            answers.bike = kind
-        } label: {
-            VStack(spacing: 4) {
-                Image(systemName: symbol).font(.headline)
-                Text(name).font(.subheadline.weight(.semibold))
-            }
-            .foregroundStyle(on ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
-            .frame(maxWidth: .infinity, minHeight: 66)
-            .background(on ? AnyShapeStyle(.tint) : AnyShapeStyle(Self.faint),
-                        in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-            .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+    private func dayChip(_ title: String, on: Bool, pick: @escaping () -> Void) -> some View {
+        Button(action: pick) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(on ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .background(on ? AnyShapeStyle(.tint) : AnyShapeStyle(.quaternary), in: Capsule())
+                .contentShape(Capsule())
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(on ? .isSelected : [])
+    }
+
+    /// Home and the stations nearest it; a tap on one picks it.
+    private var stopsMap: some View {
+        Map(initialPosition: .automatic, interactionModes: []) {
+            if let point = answers.home?.point {
+                Annotation(answers.visiting ? "Hotel" : "Home",
+                           coordinate: CLLocationCoordinate2D(latitude: point.latitude, longitude: point.longitude)) {
+                    Image(systemName: answers.visiting ? "bed.double.fill" : "house.fill")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 30, height: 30)
+                        .background(.tint, in: Circle())
+                        .overlay(Circle().stroke(.white, lineWidth: 2))
+                }
+            }
+            ForEach(answers.nearby) { near in
+                let chosen = !answers.noStop && answers.train?.station?.id == near.station.id
+                Annotation(near.station.name, coordinate: near.station.coordinate) {
+                    Button {
+                        answers.choose(near.station)
+                    } label: {
+                        LineBullets(routes: near.station.routes, size: chosen ? 26 : 20)
+                            .padding(chosen ? 3 : 0)
+                            .background(chosen ? Color.white : Color.clear, in: Capsule())
+                            .overlay(Capsule().stroke(chosen ? Color.accentColor : Color.clear, lineWidth: 3))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(near.station.name)
+                }
+            }
+        }
+        .mapStyle(.standard(pointsOfInterest: .excludingAll))
+        .frame(height: 140)
+        .clipShape(Self.card)
+    }
+
+    /// The stop: its lines and name, the walk there, then which way you ride, or both.
+    private func stopCard(_ train: Selection, at station: Station) -> some View {
+        let picked = !answers.noStop
+        let ways = answers.ways
+        return VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                LineBullets(routes: train.routes, size: 40)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(station.name).font(.title3.weight(.semibold)).lineLimit(2)
+                    if let minutes = answers.walk(to: station) {
+                        Label("\(minutes) min walk from \(answers.visiting ? "your hotel" : "home")", systemImage: "figure.walk")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(16)
+            .accessibilityElement(children: .combine)
+            Divider().padding(.leading, 16)
+            cardLabel("Which way do you ride?")
+                .padding(.horizontal, 12)
+                .padding(.top, 12)
+                .padding(.bottom, 2)
+            ForEach(Array(ways.enumerated()), id: \.element) { index, direction in
+                if index > 0 { Divider().padding(.leading, 52) }
+                choiceRow(direction == .north ? "arrow.up" : "arrow.down",
+                          "Toward \(station.directionLabel(direction, routes: train.routes))", nextTrains(direction),
+                          on: picked && !answers.bothWays && train.direction == direction) {
+                    var way = train
+                    way.direction = direction
+                    answers.train = way
+                    answers.bothWays = false
+                    answers.noStop = false
+                }
+            }
+            if ways.count == 2 {
+                Divider().padding(.leading, 52)
+                choiceRow("arrow.up.arrow.down", "Both ways", "The medium widget shows the next train each way",
+                          on: picked && answers.bothWays) {
+                    answers.bothWays = true
+                    answers.noStop = false
+                }
+            }
+        }
+        .glassEffect(.regular, in: Self.card)
+        .overlay(Self.card.strokeBorder(picked ? AnyShapeStyle(.tint) : AnyShapeStyle(.clear), lineWidth: 2))
+    }
+
+    /// The train picker, for a stop that isn't on the map.
+    private var anotherStop: some View {
+        let others = answers.nearby.map(\.station).filter { $0.id != answers.train?.stationID }.map(\.name)
+        return Button {
+            choosingTrain = true
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "magnifyingglass").frame(width: 24).accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(answers.train == nil ? "Choose a stop" : "Another stop")
+                    Text(others.isEmpty ? "Any station, line or direction" : "\(others.joined(separator: ", ")), or any station")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .foregroundStyle(.tint)
+            .padding(.horizontal, 16)
+            .frame(minHeight: 56)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// One of a few choices, ticked while it's the one picked.
+    private func choiceRow(_ symbol: String, _ title: String, _ detail: String?, on: Bool,
+                           pick: @escaping () -> Void) -> some View {
+        Button(action: pick) {
+            HStack(spacing: 12) {
+                Image(systemName: symbol).foregroundStyle(.tint).frame(width: 24).accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).foregroundStyle(.primary)
+                    if let detail {
+                        Text(detail).font(.footnote).foregroundStyle(.secondary)
+                    }
+                }
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Image(systemName: on ? "checkmark.circle.fill" : "circle")
+                    .font(.title3)
+                    .foregroundStyle(on ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .frame(minHeight: 52)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(on ? .isSelected : [])
+    }
+
+    /// A row of the privacy page: its icon, what it is, and what happens to it.
+    private func infoRow(_ symbol: String, _ title: String, _ detail: String) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: symbol).foregroundStyle(.tint).frame(width: 24).accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                Text(detail).font(.footnote).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .frame(minHeight: 52)
+        .accessibilityElement(children: .combine)
+    }
+
+    /// A bike as Settings' Biking draws it: Citi Bike blue while on for Citi Bike's, the tint for
+    /// your own; a bolt on e-bikes; its name under it.
+    private func bikeTile(_ name: String, symbol: String = "bicycle", electric: Bool, own: Bool, on: Bool,
+                          tap: @escaping () -> Void) -> some View {
+        Button(action: tap) {
+            VStack(spacing: 6) {
+                Image(systemName: symbol)
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(on ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
+                    .frame(width: 64, height: 46)
+                    .background(on ? (own ? AnyShapeStyle(.tint) : AnyShapeStyle(Color.citiBike)) : AnyShapeStyle(.quaternary),
+                                in: Capsule())
+                    .eBikeBadge(electric)
+                Text(name)
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(on ? .primary : .secondary)
+            }
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(name)
+        .accessibilityAddTraits(on ? .isSelected : [])
+    }
+
+    /// Whether Citi Bike's `kind` is on, as Settings' tiles have it.
+    private func citiBikeOn(_ kind: CitiBike.Kind) -> Bool {
+        !answers.citiBikeOff && (answers.bikeKinds == .both || answers.bikeKinds.kinds == [kind])
+    }
+
+    /// As Settings' tiles: turning the last off turns Citi Bike off, the kinds kept as they were;
+    /// turning one on again picks just it.
+    private func toggleCitiBike(_ kind: CitiBike.Kind) {
+        let this: BikeKinds = kind == .bike ? .bike : .eBike
+        let other: BikeKinds = kind == .bike ? .eBike : .bike
+        if !citiBikeOn(kind) {
+            answers.bikeKinds = answers.citiBikeOff ? this : answers.bikeKinds == other ? .both : answers.bikeKinds
+            answers.citiBikeOff = false
+        } else if answers.bikeKinds == .both {
+            answers.bikeKinds = other
+        } else {
+            answers.citiBikeOff = true
+        }
     }
 
     private func switchRow(_ symbol: String, _ title: String, _ detail: String, isOn: Binding<Bool>) -> some View {
@@ -1027,23 +1214,19 @@ struct FirstRunView: View {
         .frame(minHeight: 60)
     }
 
-    private func chip(_ title: String, symbol: String) -> some View {
-        Label(title, systemImage: symbol)
-            .font(.subheadline.weight(.semibold))
-            .fixedSize()
-            .padding(.horizontal, 14)
-            .frame(height: 38)
-            .background(.quaternary, in: Capsule())
-            .contentShape(Capsule())
-    }
-
-    private func cardLabel(_ title: String) -> some View {
-        Text(title)
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 4)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .accessibilityAddTraits(.isHeader)
+    private func cardLabel(_ title: String, symbol: String? = nil) -> some View {
+        HStack(spacing: 5) {
+            if let symbol {
+                Image(systemName: symbol)
+            }
+            Text(title)
+        }
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isHeader)
     }
 
     private func footnote(_ text: String) -> some View {
@@ -1051,53 +1234,95 @@ struct FirstRunView: View {
             .font(.footnote)
             .foregroundStyle(.secondary)
             .padding(.horizontal, 4)
+            .padding(.top, 4)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
-/// One setup page: a big title and line, its content (scrolling, unless it scrolls itself), and
-/// Continue at the foot.
+/// How each walk preference is offered: its name and icon, and how much it gives for safety.
+private extension WalkPreference {
+    var name: String {
+        switch self {
+        case .fastest: "Fastest"
+        case .balanced: "Balanced"
+        case .safest: "Safest"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .fastest: "hare.fill"
+        case .balanced: "scale.3d"
+        case .safest: "checkmark.shield.fill"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .fastest: "The quickest way"
+        case .balanced: "A little longer, for safer crossings"
+        case .safest: "Goes well out of its way for lights and quieter streets"
+        }
+    }
+}
+
+/// What your own bike does on a trip with a train, said in full.
+private extension BikeCarry {
+    var symbol: String {
+        switch self {
+        case .none: "nosign"
+        case .bring: "tram.fill"
+        case .leave: "lock.fill"
+        case .all: "arrow.triangle.branch"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .none: "Ride it only on trips without a train"
+        case .bring: "Take it on the train, and ride on after"
+        case .leave: "Lock it at the station you ride to"
+        case .all: "Any of these, whichever's sooner"
+        }
+    }
+}
+
+/// One setup page: a big title and line, its content, scrolling, and its button at the foot, if
+/// it has one.
 private struct Page<Content: View>: View {
     let title: String
     let subtitle: String
-    var primary = "Continue"
-    var scrolls = true
-    var canContinue = true
+    var primary: String? = "Continue"
+    /// The privacy page, before the steps: no top bar over it, so its title sits lower.
+    var opening = false
     let next: () -> Void
     @ViewBuilder let content: Content
 
     var body: some View {
         VStack(spacing: 0) {
-            if scrolls {
-                ScrollView {
-                    VStack(spacing: 0) {
-                        header
-                        content
-                    }
-                    .padding(.horizontal, 20)
-                    .padding(.bottom, 20)
-                }
-                .scrollBounceBehavior(.basedOnSize)
-            } else {
+            ScrollView {
                 VStack(spacing: 0) {
                     header
                     content
                 }
                 .padding(.horizontal, 20)
-                .frame(maxHeight: .infinity, alignment: .top)
+                .padding(.bottom, 20)
             }
-            Button(action: next) {
-                Text(primary)
-                    .font(.headline)
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity, minHeight: 54)
-                    .contentShape(Capsule())
+            .scrollBounceBehavior(.basedOnSize)
+            .scrollDismissesKeyboard(.interactively)
+            if let primary {
+                Button(action: next) {
+                    Text(primary)
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity, minHeight: 54)
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .glassEffect(.regular.tint(.accentColor).interactive(), in: Capsule())
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
             }
-            .buttonStyle(.plain)
-            .glassEffect(.regular.tint(canContinue ? .accentColor : .gray).interactive(), in: Capsule())
-            .disabled(!canContinue)
-            .padding(.horizontal, 20)
-            .padding(.vertical, 12)
         }
     }
 
@@ -1107,151 +1332,8 @@ private struct Page<Content: View>: View {
             Text(subtitle).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.top, 12)
+        .padding(.top, opening ? 40 : 12)
         .padding(.bottom, 20)
-    }
-}
-
-/// The sights in their sections, a chip bar over them that jumps to each, the one in view tinted.
-private struct SightPicker: View {
-    @Binding var picked: Set<String>
-    @State private var inView = SightSection.all.first?.id
-    /// The section a chip jumped to, tinted while it's in view, even if it can't scroll to the top.
-    @State private var jumped: String?
-
-    var body: some View {
-        ScrollViewReader { proxy in
-            VStack(spacing: 12) {
-                ScrollView(.horizontal) {
-                    HStack(spacing: 5) {
-                        // Their own ids, so `scrollTo` finds the section, not its chip
-                        ForEach(SightSection.all, id: \.chipID) { section in
-                            let on = section.id == inView
-                            Button {
-                                inView = section.id
-                                jumped = section.id
-                                withAnimation { proxy.scrollTo(section.id, anchor: .top) }
-                            } label: {
-                                Text(section.jump)
-                                    .font(.footnote.weight(.semibold))
-                                    .fixedSize()
-                                    .foregroundStyle(on ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
-                                    .padding(.horizontal, 9)
-                                    .frame(height: 32)
-                                    .background(on ? AnyShapeStyle(.tint) : AnyShapeStyle(.quaternary), in: Capsule())
-                                    .contentShape(Capsule())
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Jump to \(section.title)")
-                        }
-                    }
-                }
-                .scrollIndicators(.hidden)
-                .scrollClipDisabled()
-
-                ScrollView {
-                    LazyVStack(spacing: 18) {
-                        ForEach(SightSection.all) { section in
-                            sectionView(section)
-                        }
-                    }
-                    .scrollTargetLayout()
-                    .padding(.bottom, 12)
-                }
-                .scrollIndicators(.hidden)
-                .onScrollTargetVisibilityChange(idType: String.self) { visible in
-                    if let jumped, visible.contains(jumped) {
-                        inView = jumped
-                    } else if let first = visible.first {
-                        jumped = nil
-                        inView = first
-                    }
-                }
-            }
-        }
-    }
-
-    private func sectionView(_ section: SightSection) -> some View {
-        VStack(spacing: 8) {
-            HStack {
-                Text(section.title)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .accessibilityAddTraits(.isHeader)
-                Spacer()
-                let count = section.sights.filter { picked.contains($0.id) }.count
-                if count > 0 {
-                    Text("\(count) picked").font(.caption.weight(.semibold)).foregroundStyle(.tint)
-                }
-            }
-            .padding(.horizontal, 4)
-            LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
-                ForEach(section.sights) { sight in
-                    tile(sight)
-                }
-            }
-        }
-    }
-
-    private func tile(_ sight: Sight) -> some View {
-        let on = picked.contains(sight.id)
-        let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
-        return Button {
-            if on { picked.remove(sight.id) } else { picked.insert(sight.id) }
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: sight.symbol)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(on ? AnyShapeStyle(.white) : AnyShapeStyle(.tint))
-                    .frame(width: 32, height: 32)
-                    .background(on ? AnyShapeStyle(.tint) : AnyShapeStyle(.tint.opacity(0.12)), in: Circle())
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(sight.name).font(.subheadline.weight(.semibold)).lineLimit(2)
-                    Text(sight.area).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                }
-                .multilineTextAlignment(.leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .padding(10)
-            .frame(maxHeight: .infinity)
-            .frame(minHeight: 72)
-            .background(Color.primary.opacity(0.05), in: shape)
-            .overlay(shape.strokeBorder(on ? AnyShapeStyle(.tint) : AnyShapeStyle(.clear), lineWidth: 2))
-            .contentShape(shape)
-        }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(on ? .isSelected : [])
-    }
-}
-
-/// Searching for a place to save: an address, a place or a station, as New Trip's search.
-private struct PlaceSearch: View {
-    let title: String
-    let pick: (TripPlace) -> Void
-    @Environment(\.dismiss) private var dismiss
-    @State private var search = ""
-    /// Bumped by Return, for the list to pick its first result.
-    @State private var submits = 0
-    @FocusState private var focused: Bool
-
-    var body: some View {
-        NavigationStack {
-            TripPlaceList(search: search, submits: submits) { place in
-                pick(place)
-                dismiss()
-            }
-            .searchable(text: $search, placement: .navigationBarDrawer(displayMode: .always), prompt: "Address or place")
-            .searchFocused($focused)
-            .onSubmit(of: .search) { submits += 1 }
-            .onAppear { focused = true }
-            .navigationTitle(title)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel", role: .cancel) { dismiss() }
-                }
-            }
-        }
     }
 }
 

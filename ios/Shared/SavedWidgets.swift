@@ -23,9 +23,10 @@ struct SavedWidget: Codable, Hashable, Identifiable, Sendable {
     /// Id of `default(_:)`, which isn't saved.
     static let defaultID = UUID(uuidString: "0B7E4C2A-93D1-4F6E-A8B5-2C9D1E3F4A70")!
 
-    /// What widgets show until they pick a saved one: Settings' default train, unnamed.
-    static func `default`(_ selection: Selection) -> SavedWidget {
-        SavedWidget(id: defaultID, selection: selection)
+    /// What widgets show until they pick a saved one: Settings' default train, unnamed, both
+    /// ways if Settings has it so.
+    static func `default`(_ selection: Selection, bothWays: Bool = false) -> SavedWidget {
+        SavedWidget(id: defaultID, selection: selection, bothWays: bothWays)
     }
 
     init(id: UUID = UUID(), name: String = "", selection: Selection, change: Change? = nil,

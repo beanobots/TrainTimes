@@ -126,9 +126,19 @@ struct NewTripView: View {
         case failed(title: String, message: String, fix: Fix)
     }
 
-    /// What a failed plan offers: trying again, or Settings to turn on Location Services.
+    /// What a failed plan offers: trying again, Settings to turn on Location Services, or
+    /// nothing, fading after `fadeAfter` back to From and To to change the trip (No Trip Found).
     private enum Fix: Equatable {
-        case retry, settings
+        case retry, settings, fades
+    }
+
+    /// How long No Trip Found shows before fading back to From and To.
+    private static let fadeAfter: Duration = .seconds(1.5)
+
+    /// No Trip Found showing over the map, to fade (`Fix.fades`).
+    private var fading: Bool {
+        guard collapsed, case .failed(_, _, .fades) = state else { return false }
+        return true
     }
 
     @State private var from: TripPlace? = .here
@@ -244,6 +254,9 @@ struct NewTripView: View {
 
     private var bike: BikeKinds? { biking ? bikeKinds : nil }
 
+    /// Whether any way to go is on: with none, Plan Trip is greyed and there's nothing to plan.
+    private var hasMode: Bool { subway || settings.settings.includesBuses || biking || walkAll }
+
     /// How far you'll walk to and from a ride, as offered: its minutes, miles at 20 minutes a
     /// mile, and meters. 15 minutes first, as far as the planner looked before you could choose.
     static let walkChoices: [(minutes: Int, miles: String, meters: Double)] = [
@@ -300,6 +313,9 @@ struct NewTripView: View {
     @State private var tripsContentHeight: CGFloat = 0
     /// From and To moving between their card and the line atop the trips.
     @Namespace private var endsSpace
+    /// The longer walk to and from a ride the trips were planned with, there being none within
+    /// yours (`walkChoice`); nil when they're within it.
+    @State private var longerWalk: Int?
     /// Go's walks being asked for.
     @State private var startingWalk = false
     /// Apple Maps couldn't give Go its walks.
@@ -365,6 +381,10 @@ struct NewTripView: View {
             .overlay(alignment: .bottom) {
                 if endsOpen {
                     VStack(spacing: 10) {
+                        if !hasMode {
+                            noModeCallout
+                                .transition(.move(edge: .bottom).combined(with: .opacity))
+                        }
                         savedChips()
                         VStack(spacing: 0) {
                             endsCard
@@ -377,6 +397,7 @@ struct NewTripView: View {
                     }
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { bottomCardsHeight = $0 }
                     .padding(.bottom, 8)
+                    .animation(.smooth(duration: 0.3), value: hasMode)
                 }
             }
             // The tab bar's room, but not the keyboard's, which would leave the map no room to
@@ -410,6 +431,13 @@ struct NewTripView: View {
         // Planned once both ends are picked, the fastest drawn on the map behind From and To, and
         // again as what it waits on changes, such as the ways you'll go
         .task(id: hasEnds ? planKey : nil) { await plan() }
+        // No Trip Found fades after a moment, back to From and To to change the trip
+        .task(id: fading) {
+            guard fading else { return }
+            try? await Task.sleep(for: Self.fadeAfter)
+            guard !Task.isCancelled, fading else { return }
+            withAnimation(Self.endsAnimation) { collapsed = false }
+        }
         // A walk isn't for the widget, nor a ride all the way
         .onChange(of: pickedOption, initial: true) { _, option in
             switch option {
@@ -622,6 +650,8 @@ struct NewTripView: View {
                                     Button("Open Settings") {
                                         if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
                                     }
+                                case .fades:
+                                    EmptyView()
                                 }
                             }
                         default:
@@ -635,6 +665,7 @@ struct NewTripView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .glassEffect(.regular, in: RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
                     .padding(.horizontal, 40)
+                    .transition(.opacity)
                 }
             }
         }
@@ -904,6 +935,16 @@ struct NewTripView: View {
         ScrollView {
             VStack(spacing: 0) {
                 if state == .ready {
+                    if let longerWalk, !stationsOpen {
+                        Label("No trip within your \(walkChoice.minutes) min walk. These walk up to \(Self.walkLabel(longerWalk)).",
+                              systemImage: "figure.walk")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, Self.margin)
+                            .padding(.vertical, 8)
+                        Divider()
+                    }
                     ForEach(options.indices.filter { !stationsOpen || $0 == picked }, id: \.self) { index in
                         if index > 0, !stationsOpen {
                             // Under the text, past the bullets
@@ -1218,22 +1259,36 @@ struct NewTripView: View {
     }
 
     /// Shrinks From and To to a line atop the trips, planned for them the ways picked as soon as
-    /// both were.
+    /// both were. Greyed until both are, and while every way to go is off.
     private var planTripButton: some View {
-        Button {
+        let canPlan = hasEnds && hasMode
+        return Button {
             closeStations()
+            // After No Trip Found, planned again: back online, or the timetable caught up
+            if case .failed = state { retry() }
             withAnimation(Self.endsAnimation) { collapsed = true }
         } label: {
             Label("Plan Trip", systemImage: "arrow.right")
                 .labelStyle(.iconOnly)
                 .font(.body.weight(.bold))
-                .foregroundStyle(hasEnds ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
+                .foregroundStyle(canPlan ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
                 .frame(width: 44, height: 44)
-                .background(hasEnds ? AnyShapeStyle(.tint) : AnyShapeStyle(.quaternary), in: Circle())
+                .background(canPlan ? AnyShapeStyle(.tint) : AnyShapeStyle(.quaternary), in: Circle())
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .disabled(!hasEnds)
+        .disabled(!canPlan)
+    }
+
+    /// Over From and To while every way to go is off, gone as soon as one's back on.
+    private var noModeCallout: some View {
+        Label("Select a mode of transportation to continue", systemImage: "hand.tap.fill")
+            .font(.subheadline.weight(.semibold))
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .glassEffect(.regular, in: Capsule())
+            .padding(.horizontal, Self.margin)
     }
 
     /// Sets the end being picked, then moves From and To back down, or to a line atop the trips once both
@@ -1437,7 +1492,9 @@ struct NewTripView: View {
         stationsOpen = false
         picked = 0
         ends = nil
-        guard let from, let to else {
+        longerWalk = nil
+        // Every way to go off: nothing to plan, Plan Trip greyed and a word over From and To
+        guard let from, let to, hasMode else {
             state = .waiting
             return
         }
@@ -1472,39 +1529,32 @@ struct NewTripView: View {
         async let walking = Self.walkAll(walkAll, from: start, to: end)
         async let biking = Self.bikeTrips(bike, own: biking ? ownBike.kind : nil, carry: bikeCarry, endName: to.name,
                                           from: start, to: end, subway: subway, walkRange: walkRange)
-        var planned: [ServerRoutes.Planned] = []
-        // Why the subway planner found none, for No Trip Found to say
-        var none: TripPlanner.NoTrip?
-        if buses {
-            planned = await ServerRoutes.planWithBuses(from: start, to: end, walkRange: walkRange)
-            // By bus only: no train on the way
-            if !subway {
-                planned.removeAll {
-                    guard case .bus(let trip) = $0.choice else { return true }
-                    return trip.train != nil
-                }
-            }
-        } else if subway {
-            let trains = await ServerRoutes.planned(from: start, to: end, walkRange: walkRange)
-            planned = trains.trips.map { ServerRoutes.Planned(choice: .train($0.option), trip: $0) }
-            none = trains.none
-        }
+        // Google's routes, asked for once: each walk tried below picks from the same ones. Nil
+        // if the server couldn't be reached
+        let routes: [ServerRoutes.Route]? = buses || subway
+            ? await ServerRoutes.routes(from: start, to: end, buses: buses) : []
+        guard !Task.isCancelled else { return }
+        var rides = await Self.rides(routes, buses: buses, subway: subway, from: start, to: end, walkRange: walkRange)
         guard !Task.isCancelled else { return }
         let walk = await walking
         let bikeTrips = await biking
         guard !Task.isCancelled else { return }
+        // No ride within your walk to and from it, nor any bike trip: the trips of the shortest
+        // longer walk offered that has some, rather than none at all
+        var walked = walkChoice.minutes
+        if rides.planned.isEmpty, bikeTrips.isEmpty, buses || subway {
+            for choice in Self.walkChoices where choice.meters > walkRange {
+                rides = await Self.rides(routes, buses: buses, subway: subway, from: start, to: end,
+                                         walkRange: choice.meters)
+                guard !Task.isCancelled else { return }
+                walked = choice.minutes
+                if !rides.planned.isEmpty { break }
+            }
+        }
+        let planned = rides.planned
         guard !planned.isEmpty || walk != nil || !bikeTrips.isEmpty else {
-            let by = [subway ? "subway" : nil, buses ? "bus" : nil, bike != nil ? "bike" : nil].compactMap { $0 }
-                .joined(separator: " or ")
-            // By subway alone, why, as the planner found: no station a walk from an end, or none
-            // but across the water, or walking's as quick
-            let why = by == "subway" ? none?.message(walk: "\(walkChoice.minutes) min", walkOn: walkAll) : nil
-            // Walking only, with Subway, Bus and Citi Bike all off; or nothing on at all
-            let message = by.isEmpty
-                ? walkAll ? "Leeway couldn't find a walk between these places."
-                          : "Turn on Subway, Bus, Citi Bike or Walk to plan a trip."
-                : why ?? "Leeway couldn't find a \(by) trip between these places with up to a \(walkChoice.minutes) min walk."
-            state = .failed(title: "No Trip Found", message: message, fix: .retry)
+            state = noTripFound(buses: buses, subway: subway, none: rides.none, walked: walked,
+                                offline: buses && routes == nil)
             return
         }
         options = planned.map(\.choice)
@@ -1563,8 +1613,63 @@ struct NewTripView: View {
             minutes.append(trip.minutes)
         }
         sortByMinutes()
+        // Said over the trips while a ride's among them that walks past your choice
+        let riding = options.contains { if case .walk = $0 { false } else { true } }
+        longerWalk = walked > walkChoice.minutes && riding ? walked : nil
         plannedKey = planKey
         state = .ready
+    }
+
+    /// The rides by subway and bus from `start` to `end` with up to `walkRange` to and from them,
+    /// of Google's `routes` (nil if the server couldn't be reached) and the app's own, and where
+    /// there are none by subway, why. Off the main thread.
+    private nonisolated static func rides(_ routes: [ServerRoutes.Route]?, buses: Bool, subway: Bool,
+                                          from start: CLLocation, to end: CLLocation,
+                                          walkRange: Double) async -> (planned: [ServerRoutes.Planned],
+                                                                       none: TripPlanner.NoTrip?) {
+        if buses {
+            var planned = ServerRoutes.planWithBuses(routes ?? [], from: start, to: end, walkRange: walkRange)
+            guard subway else {
+                // By bus only: no train on the way
+                planned.removeAll {
+                    guard case .bus(let trip) = $0.choice else { return true }
+                    return trip.train != nil
+                }
+                return (planned, nil)
+            }
+            // Why there's no subway trip either, as the app's planner finds it
+            let none = planned.isEmpty ? TripPlanner.planned(from: start, to: end, walkRange: walkRange).none : nil
+            return (planned, none)
+        }
+        guard subway else { return ([], nil) }
+        let trains = ServerRoutes.planned(routes ?? [], from: start, to: end, walkRange: walkRange)
+        return (trains.trips.map { ServerRoutes.Planned(choice: .train($0.option), trip: $0) }, trains.none)
+    }
+
+    /// No Trip Found, saying why: with only Walk on, no walk; by subway, why the planner found
+    /// none (`none`) with up to a `walked` minutes' walk, and that there's nothing by bus or bike
+    /// either; and, `offline`, that bus trips need the server, which couldn't be reached.
+    private func noTripFound(buses: Bool, subway: Bool, none: TripPlanner.NoTrip?, walked: Int,
+                             offline: Bool) -> PlanState {
+        let others = [buses ? "bus" : nil, bike != nil ? "bike" : nil].compactMap { $0 }
+        let by = ((subway ? ["subway"] : []) + others).joined(separator: " or ")
+        guard !by.isEmpty else {
+            return .failed(title: "No Trip Found", message: "Leeway couldn't find a walk between these places.", fix: .fades)
+        }
+        let unreachable = "Bus trips need a connection, and Leeway couldn't reach its server."
+        // By bus alone, with no server: nothing to say but that
+        if offline, by == "bus" {
+            return .failed(title: "Couldn't Get Bus Trips", message: "\(unreachable) Check your connection and try again.",
+                           fix: .fades)
+        }
+        let walk = Self.walkLabel(walked)
+        // By subway, why, as the planner found: no station a walk from an end, or none but
+        // across the water, or walking's as quick; and that the other ways found none either
+        let why = subway ? none?.message(walk: walk, walkOn: walkAll) : nil
+        var message = why.map { others.isEmpty ? $0 : "\($0) Leeway couldn't find a \(others.joined(separator: " or ")) trip either." }
+            ?? "Leeway couldn't find a \(by) trip between these places with up to a \(walk) walk."
+        if offline { message += " \(unreachable)" }
+        return .failed(title: "No Trip Found", message: message, fix: .fades)
     }
 
     /// Longest ride all the way offered beside quicker trips.

@@ -34,8 +34,9 @@ struct TrainWidgetIntent: WidgetConfigurationIntent {
 
     /// The picked saved widget, or Settings' default train (`SavedWidget.default(_:)`) if none is
     /// picked or it was deleted. Nil for a legacy widget, which shows its own train.
-    func savedWidget(in saved: SavedWidgets, defaultTrain: Selection = SharedStore.defaultTrain) -> SavedWidget? {
-        let fallback = SavedWidget.default(defaultTrain)
+    func savedWidget(in saved: SavedWidgets, defaultTrain: Selection = SharedStore.defaultTrain,
+                     defaultBothWays: Bool = SharedStore.defaultBothWays) -> SavedWidget? {
+        let fallback = SavedWidget.default(defaultTrain, bothWays: defaultBothWays)
         // Once one's picked, the legacy train is ignored, even if the pick is deleted
         if let widget {
             return UUID(uuidString: widget.id).flatMap(saved.widget) ?? fallback

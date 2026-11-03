@@ -10,13 +10,15 @@ final class SettingsStore {
             guard settings != oldValue else { return }
             SharedStore.saveSettings(settings)
             // Reload only if widgets read what changed: none read step-free mode or New Trip's
-            // buses, and Nearby reads neither the stop card's style nor the default train
+            // buses, and Nearby reads neither the stop card's style nor the default train, either way
             var read = settings
             read.stepFree = oldValue.stepFree
             read.includesBuses = oldValue.includesBuses
             read.favoriteCard = oldValue.favoriteCard
             read.defaultTrain = oldValue.defaultTrain
-            if settings.favoriteCard != oldValue.favoriteCard || settings.defaultTrain != oldValue.defaultTrain {
+            read.defaultBothWays = oldValue.defaultBothWays
+            if settings.favoriteCard != oldValue.favoriteCard || settings.defaultTrain != oldValue.defaultTrain
+                || settings.defaultBothWays != oldValue.defaultBothWays {
                 WidgetCenter.shared.reloadTrainWidgets()
             }
             if read != oldValue {
@@ -153,7 +155,7 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(selection.station?.name ?? "Choose a Train").font(.headline)
                     if selection.station != nil {
-                        Text("Toward \(selection.heading)")
+                        Text(store.settings.defaultBothWays ? "Both ways" : "Toward \(selection.heading)")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
@@ -173,7 +175,7 @@ struct SettingsView: View {
         .accessibilityElement(children: .combine)
         .accessibilityHint("Choose another station, line or direction")
         .sheet(isPresented: $choosingDefaultTrain) {
-            TrainPicker(selection: $store.defaultTrain)
+            TrainPicker(selection: $store.defaultTrain, bothWays: $store.settings.defaultBothWays)
         }
     }
 

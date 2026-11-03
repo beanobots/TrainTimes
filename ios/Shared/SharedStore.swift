@@ -402,6 +402,11 @@ enum SharedStore {
         loadSettings().defaultTrain?.validatedIfKnown() ?? load()
     }
 
+    /// Whether unconfigured widgets show `defaultTrain` both ways (`AppSettings.defaultBothWays`).
+    static var defaultBothWays: Bool {
+        loadSettings().defaultBothWays
+    }
+
     static func saveWidgets(_ saved: SavedWidgets) {
         write(saved, to: widgetsFile)
     }
@@ -445,13 +450,17 @@ struct AppSettings: Codable, Hashable, Sendable {
     /// The station, lines and direction Siri, the countdown, Favorite Stop and unconfigured
     /// widgets use. Nil until chosen; see `SharedStore.defaultTrain`.
     var defaultTrain: Selection?
+    /// Whether unconfigured medium Next train widgets show `defaultTrain`'s other direction
+    /// beside it, as a saved widget's Both ways (`SavedWidget.bothWays`).
+    var defaultBothWays = false
     /// New Trip offers trips with a bus ride too, from the push server's `GET /routes?bus=1`.
     var includesBuses = false
 
     init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case alertKinds, stepFree, marksLiveTimes, marksScheduledTimes, favoriteCard, defaultTrain, includesBuses
+        case alertKinds, stepFree, marksLiveTimes, marksScheduledTimes, favoriteCard, defaultTrain, defaultBothWays
+        case includesBuses
     }
 
     /// Older saves missing any field still load, with defaults.
@@ -466,6 +475,7 @@ struct AppSettings: Codable, Hashable, Sendable {
         favoriteCard = (try? container.decodeIfPresent(FavoriteCardStyle.self, forKey: .favoriteCard)) ?? defaults.favoriteCard
         // An unreadable train falls back to selection.json's
         defaultTrain = (try? container.decodeIfPresent(Selection.self, forKey: .defaultTrain))?.droppingSavedWalk
+        defaultBothWays = try container.decodeIfPresent(Bool.self, forKey: .defaultBothWays) ?? defaults.defaultBothWays
         includesBuses = try container.decodeIfPresent(Bool.self, forKey: .includesBuses) ?? defaults.includesBuses
     }
 }

@@ -19,6 +19,8 @@ struct NearbyLines {
     let tracks: [Track]
     /// Each bus line's streets, both ways once where they run the same street.
     let buses: [[CLLocationCoordinate2D]]
+    /// Those of the bus lines not stopping at a stop opened on Nearby's map, drawn fainter.
+    var fadedBuses: [[CLLocationCoordinate2D]] = []
 
     static let none = NearbyLines(tracks: [], buses: [])
 
@@ -41,8 +43,9 @@ struct NearbyLines {
         self.buses = buses
     }
 
-    /// `routes`' tracks and `busLines`' streets within `reach` of `points`.
-    init(routes: [String], busLines: [String], around points: [CLLocationCoordinate2D]) {
+    /// `routes`' tracks and `busLines`' streets within `reach` of `points`; with `brightBusLines`
+    /// (as `TrackShapes.busKey` has them), the other bus lines' streets faded.
+    init(routes: [String], busLines: [String], brightBusLines: Set<String>? = nil, around points: [CLLocationCoordinate2D]) {
         guard let box = Self.box(around: points) else {
             self = .none
             return
@@ -56,8 +59,13 @@ struct NearbyLines {
         }
         // A street once however many lines run along it, as two pale lines over each other
         // read darker
-        buses = Self.runs(of: busLines.map(TrackShapes.busKey), in: TrackShapes.byBusLine, box: box, acrossRoutes: true)
-            .map { $0.points.map(\.coordinate) }
+        // The bright ones first, for a street they share with faded ones to be drawn bright
+        let keys = busLines.map(TrackShapes.busKey)
+        let ordered = brightBusLines.map { bright in keys.filter(bright.contains) + keys.filter { !bright.contains($0) } } ?? keys
+        let busRuns = Self.runs(of: ordered, in: TrackShapes.byBusLine, box: box, acrossRoutes: true)
+        let isBright = { (route: String) in brightBusLines?.contains(route) ?? true }
+        buses = busRuns.filter { isBright($0.route) }.map { $0.points.map(\.coordinate) }
+        fadedBuses = busRuns.filter { !isBright($0.route) }.map { $0.points.map(\.coordinate) }
     }
 
     /// The bus lines stopping within `meters` of `point`, nearest stop first: those a few
@@ -189,6 +197,7 @@ struct NearbyLinesLayer: MapContent {
     private static let besideWidth: CGFloat = 4
     private static let busWidth: CGFloat = 3
     private static let busColor = BusBadge.blue.opacity(0.35)
+    private static let fadedBusColor = BusBadge.blue.opacity(0.1)
 
     private struct Drawn: Identifiable {
         let id: String
@@ -217,6 +226,10 @@ struct NearbyLinesLayer: MapContent {
         let buses = lines.buses.indices.map { index in
             Drawn(id: "bus-\(version)-\(index)", coordinates: lines.buses[index], color: Self.busColor, width: Self.busWidth)
         }
+        let faded = lines.fadedBuses.indices.map { index in
+            Drawn(id: "faded-bus-\(version)-\(index)", coordinates: lines.fadedBuses[index], color: Self.fadedBusColor,
+                  width: Self.busWidth)
+        }
         let subway = lines.tracks.indices.map { index in
             let track = lines.tracks[index]
             return Drawn(id: "line-\(version)-\(zoom)-\(index)",
@@ -224,6 +237,6 @@ struct NearbyLinesLayer: MapContent {
                          color: LineStyle.of(track.route).swiftUIColor,
                          width: track.isBeside ? Self.besideWidth : Self.lineWidth)
         }
-        return buses + subway
+        return faded + buses + subway
     }
 }
