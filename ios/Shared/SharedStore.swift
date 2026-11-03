@@ -31,6 +31,10 @@ enum SharedStore {
         savedSelection()?.validated() ?? .fallback
     }
 
+    /// Whether older versions saved a train, which stands in for Settings' default train until
+    /// one's chosen. Without either, `load()` is `Selection.fallback`.
+    static var hasSavedSelection: Bool { savedSelection() != nil }
+
     /// The saved selection, unvalidated.
     private static func savedSelection() -> Selection? {
         read(Selection.self, from: file)?.droppingSavedWalk
