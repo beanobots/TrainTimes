@@ -97,7 +97,7 @@ def icon_tile(size):
 
 # Banners -------------------------------------------------------------------------------------
 
-TAGLINE = "The next train, and when to leave for it."
+TAGLINE = "For the New Yorker without a car"
 
 
 def banner(w, h, path):
