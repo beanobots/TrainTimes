@@ -13,8 +13,8 @@ The new icon, Close-up Tonal, and the artwork and text for the App Store listing
 | `banners/leeway-banner-5244x2950.png` | Icon, LEEWAY and "For the New Yorker without a car" over the platform's edge | 5244×2950 | The banner |
 | `banners/leeway-search-results-5244x2950.png` | The banner's layout: icon, LEEWAY and the subhead over the platform's edge | 5244×2950 | Search results, landscape |
 | `banners/leeway-search-results-2950x5244.png` | The same, upright: icon, LEEWAY and the subhead stacked, the platform's edge below | 2950×5244 | Search results, portrait |
-| `banners/leeway-banner-1200x630.png` | The same, for link previews | 1200×630 | A website's Open Graph image |
-| `banners/leeway-banner-1500x500.png` | The same, wide | 1500×500 | A social header |
+| `banners/leeway-banner-1200x630.png` | The banner, for link previews | 1200×630 | A website's Open Graph image |
+| `banners/leeway-banner-1500x500.png` | The banner, wide | 1500×500 | A social header |
 | `screenshots/iphone-6.9-drafts/` | Six framed screenshots of first-run setup | 1320×2868 | **Drafts**: see below |
 | `metadata.md` | Name, subtitle, promotional text, keywords, description, What's New, categories | — | App Store Connect, field by field |
 | `tools/make_assets.py` | Draws the banners and frames screenshots | — | Run it to remake either |
