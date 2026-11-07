@@ -29,7 +29,10 @@ struct LeewayApp: App {
             }
         }
         // Every station in Spotlight, once per build
-        Task(priority: .utility) { await SpotlightStation.indexIfNeeded() }
+        Task(priority: .utility) {
+            await SpotlightStation.indexIfNeeded()
+            await SpotlightBusStop.indexHome()
+        }
         // The bundled maps' data decoded now, off the main thread, rather than by the first map
         // to draw it, holding up its screen. Each is decoded once whoever's first. Not when iOS
         // launches the app in the background (a walk's location, a refresh, a push token), with
@@ -49,12 +52,6 @@ struct LeewayApp: App {
     var body: some Scene {
         WindowGroup {
             AppTabs()
-                // DEMO HOOK: remove with WalkDemos.swift
-                #if DEBUG
-                .task {
-                    await WalkDemos.watch()
-                }
-                #endif
         }
         .onChange(of: scenePhase) { _, phase in
             // One of the few chances a countdown has to get new times
@@ -91,5 +88,11 @@ struct LeewayApp: App {
 final class AppDelegate: NSObject, UIApplicationDelegate {
     func applicationWillTerminate(_ application: UIApplication) {
         MainActor.assumeIsolated { ActiveWalk.shared.quit() }
+    }
+
+    /// Upright under a walk, else on its side too (`Sideways`).
+    func application(_ application: UIApplication,
+                     supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
+        MainActor.assumeIsolated { Sideways.orientations }
     }
 }

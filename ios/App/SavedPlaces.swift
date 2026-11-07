@@ -121,6 +121,13 @@ final class SavedPlaces {
         return slot
     }
 
+    /// Renames a place added with +; Home and Work keep theirs.
+    func rename(_ slot: Slot, to name: String) {
+        guard case .added(let id) = slot, let index = added.firstIndex(where: { $0.id == id }) else { return }
+        added[index].name = name
+        save()
+    }
+
     /// Forgets every place: Home, Work and those added, and a visitor's hotel, Home a home again.
     func clear() {
         places = [:]

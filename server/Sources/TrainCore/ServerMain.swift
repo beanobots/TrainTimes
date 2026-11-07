@@ -45,19 +45,20 @@ public enum ServerMain {
         let pusher = try APNSPusher(config: config.apns)
         // Read once each tick, for the countdowns and for the app and widgets
         let feeds = FeedRelay(interval: config.pollInterval)
+        // Bus Time's next buses, for the bus rides in those routes and bus countdowns, with a key
+        let buses = config.busTimeKey.map { key in
+            BusTime(key: key, perClientPerDay: config.limits.busTimePerIPPerDay, perDay: config.limits.busTimePerDay)
+        }
         let poller = Poller(store: store, pusher: pusher, interval: config.pollInterval, timing: config.pushTiming,
                             concurrency: config.pushConcurrency, keyRetention: config.limits.keyRetention,
-                            logPushes: config.logPushes, feeds: feeds, boards: Poller.liveBoards(from: feeds))
+                            logPushes: config.logPushes, feeds: feeds, buses: buses.map(Poller.liveBuses(from:)),
+                            boards: Poller.liveBoards(from: feeds))
         // Built each day, for the app to fall back on when the MTA can't be reached
         let timetable = TimetableCopy()
         let maker = TimetableMaker(copy: timetable, directory: config.dataDirectory)
         // Google's subway routes, for directions shared to the app, with a key
         let routes = config.googleRoutesKey.map { key in
             TransitRoutes(key: key, perClientPerDay: config.limits.routesPerIPPerDay, perDay: config.limits.routesPerDay)
-        }
-        // Bus Time's next buses, for the bus rides in those routes, with a key
-        let buses = config.busTimeKey.map { key in
-            BusTime(key: key, perClientPerDay: config.limits.busTimePerIPPerDay, perDay: config.limits.busTimePerDay)
         }
         // Crash and hang reports from phones sharing diagnostics
         let diagnostics = try DiagnosticStore(directory: config.dataDirectory, maxReports: config.limits.maxDiagnostics)

@@ -17,6 +17,7 @@ struct StopCard: View {
     /// off, it's cut short, as Transit Directions' Favorite Stop card has it.
     var fitsHeading = true
     @Environment(\.widgetRenderingMode) private var renderingMode
+    @Environment(\.routeLook) private var routeLook
 
     var body: some View {
         switch style {
@@ -35,35 +36,35 @@ struct StopCard: View {
             VStack(alignment: .leading, spacing: 0) {
                 Text(station)
                     .font(.headline)
-                    .foregroundStyle(Color.boardText)
+                    .foregroundStyle(BoardInk.text)
                     .lineLimit(2)
                     .minimumScaleFactor(0.7)
                 Text(heading)
                     .font(.caption)
-                    .foregroundStyle(Color.boardGray)
+                    .foregroundStyle(BoardInk.gray)
                     .lineLimit(fitsHeading ? 2 : 1)
                 Spacer(minLength: 4)
                 bulletLine(upTo: size, spacing: { -$0 * 0.14 }, arrow: .boardGray) {
                     LineBullet(route: $0, size: $1)
                         // Ringed in the widget's background, to part the overlapping bullets
-                        .overlay(Circle().stroke(Color.boardBackground, lineWidth: 2))
+                        .overlay(Circle().stroke(routeLook ? Color.routeBackground : Color.boardBackground, lineWidth: 2))
                 }
             }
         }
         .padding(12)
         .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 16)
+        .background(RoundedRectangle(cornerRadius: corner, style: .continuous)
             .fill(fullColor
                   ? LineStyle.of(routes.first ?? "").swiftUIColor.opacity(0.14)
-                  : Color.boardText.opacity(0.07)))
-        .contentShape(RoundedRectangle(cornerRadius: 16))
+                  : BoardInk.color(.tile, route: routeLook)))
+        .contentShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
     }
 
     /// Like a station's sign: a white rule along the top, the station in white on black, its
     /// lines in a row as big as there's room for, the way in capitals. Outlined, so it shows on a
     /// dark home screen.
     private var stationSignCard: some View {
-        let ink = fullColor ? Color.white : Color.boardText
+        let ink = fullColor ? Color.white : BoardInk.color(.text, route: routeLook)
         return roomyBullets { size in
             VStack(alignment: .leading, spacing: 0) {
                 Rectangle().fill(ink).frame(height: 2).padding(.top, 10)
@@ -88,12 +89,15 @@ struct StopCard: View {
         }
         .padding(.horizontal, 12)
         .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 16)
-            .fill(fullColor ? Color(white: 0.08) : Color.boardText.opacity(0.07)))
-        .overlay(RoundedRectangle(cornerRadius: 16)
+        .background(RoundedRectangle(cornerRadius: corner, style: .continuous)
+            .fill(fullColor ? Color(white: 0.08) : BoardInk.color(.tile, route: routeLook)))
+        .overlay(RoundedRectangle(cornerRadius: corner, style: .continuous)
             .strokeBorder(Color.white.opacity(fullColor ? 0.14 : 0), lineWidth: 1))
-        .contentShape(RoundedRectangle(cornerRadius: 16))
+        .contentShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
     }
+
+    /// Today's 16 pt corners, or the app's 18 drawn as the Saved Route.
+    private var corner: CGFloat { routeLook ? 18 : 16 }
 
     /// Sizes the card's bullets can be, biggest first: up to Transit Directions' Nearby and Trip
     /// circles.

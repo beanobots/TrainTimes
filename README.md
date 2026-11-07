@@ -144,16 +144,10 @@ readable. Where a widget is drawn in one colour (tinted and clear Home Screens,
 StandBy at night), live times keep their mark, as their green doesn't show. The
 Lock Screen countdown is always dark.
 
-There are two versions:
-
-- `ios/`: a native app and widget. You pick any station and line in the app, and
-  the widget moves on to the next train by itself and has refresh and walk
-  buttons, and a stop card that shows the times when you tap it. Each button
-  flashes in the line's colour when you tap it. You build and install it from Xcode on a Mac.
-- `scriptable/`: a script for the free Scriptable app, set up for the R train at
-  Prospect Av. For another stop or line, change the settings at the top: the
-  stop, the lines, the station and direction names, and the line's feed, colour
-  and terminals. No computer needed.
+The app and widget are in `ios/`. You pick any station and line in the app, and
+the widget moves on to the next train by itself and has refresh and walk
+buttons, and a stop card that shows the times when you tap it. Each button
+flashes in the line's colour when you tap it. You build and install it from Xcode on a Mac.
 
 ## Install the native version (Mac with Xcode)
 
@@ -228,13 +222,29 @@ keeps only the stops `stations.json` lists, so then run
 six files: the three in `ios/Shared` and the server's copies of them in
 `server/Sources/TrainResources/Resources`, which the server's CI checks match.
 
+The bus data comes from the MTA's bus GTFS schedules (one per borough, and MTA
+Bus), with lines named by `route_short_name` as Bus Time names them ("Q6", "M15+"):
+`ios/Shared/bus_routes.json`, `ios/App/bus_shapes.json`, `ios/App/bus_stops.json`,
+and the server's `bus_stop_lines.json`, which it checks a bus countdown's stop
+and lines against. Refresh them whenever the MTA publishes new bus schedules
+(a few times a year, at each pick): a stop new in them isn't in
+`bus_stop_lines.json` until then, and the server refuses countdowns there with
+a 400, logging "bus countdown refused: stop … not in bus_stop_lines.json". Download
+and unzip the six feeds as the top of `tools/make_bus_shapes.py` says, then, in
+the folder with them:
+
+    python3 <repo>/tools/make_bus_shapes.py <repo>/ios/App gtfs_b gtfs_bx gtfs_m gtfs_q gtfs_si gtfs_busco
+    python3 <repo>/tools/make_bus_stops.py <repo>/ios/App gtfs_b gtfs_bx gtfs_m gtfs_q gtfs_si gtfs_busco
+    python3 <repo>/tools/make_bus_routes.py <repo>/ios/Shared gtfs_b gtfs_bx gtfs_m gtfs_q gtfs_si gtfs_busco
+
+The last also writes `server/Sources/TrainResources/Resources/bus_stop_lines.json`.
+Push all four and update the server (`server/README.md`, "Update").
+
 ## How it stays fresh
 
 iOS decides when widgets fetch new data, usually every 5 to 15 minutes. The
-countdown ticks every second in between. The native version steps to the next
-train when one leaves (a train held at the platform waits at 0:00) and has a
-refresh button (↻); the Scriptable one counts back up from 0:00 until iOS next
-refreshes it.
+countdown ticks every second in between. It steps to the next train when one
+leaves (a train held at the platform waits at 0:00) and has a refresh button (↻).
 
 When the MTA can't be reached, or its feed has stopped updating (3 minutes
 behind the other lines' feeds read with it; for a line read from its own feed

@@ -17,8 +17,15 @@ final class SettingsStore {
             read.favoriteCard = oldValue.favoriteCard
             read.defaultTrain = oldValue.defaultTrain
             read.defaultBothWays = oldValue.defaultBothWays
+            read.defaultBus = oldValue.defaultBus
+            if settings.defaultBus != oldValue.defaultBus {
+                Task { await SpotlightBusStop.indexHome() }
+            }
+            if settings.bikeKinds != oldValue.bikeKinds {
+                WidgetCenter.shared.reloadTimelines(ofKind: WidgetKind.train)
+            }
             if settings.favoriteCard != oldValue.favoriteCard || settings.defaultTrain != oldValue.defaultTrain
-                || settings.defaultBothWays != oldValue.defaultBothWays {
+                || settings.defaultBothWays != oldValue.defaultBothWays || settings.defaultBus != oldValue.defaultBus {
                 WidgetCenter.shared.reloadTrainWidgets()
             }
             if read != oldValue {
@@ -49,7 +56,13 @@ final class SettingsStore {
 
     /// No default train, nor one older versions saved, as setup's No Primary Stop leaves it:
     /// `defaultTrain` is then only `Selection.fallback`, which Siri and new widgets still use.
-    var hasNoStop: Bool { settings.defaultTrain == nil && !hasSavedSelection }
+    var hasNoStop: Bool { settings.defaultTrain == nil && settings.defaultBus == nil && !hasSavedSelection }
+
+    /// Copies the app's Citi Bike kinds (Settings → Biking) for the widgets to read.
+    func shareBikeKinds() {
+        let kinds = UserDefaults.standard.string(forKey: BikeKinds.key).flatMap(BikeKinds.init(rawValue:)) ?? BikeKinds.saved
+        if settings.bikeKinds != kinds.shared { settings.bikeKinds = kinds.shared }
+    }
 
     /// Which times get a symbol; live ones always do with Differentiate Without Color.
     func timeMarks(withoutColor: Bool) -> TimeMarks {
@@ -58,8 +71,8 @@ final class SettingsStore {
 }
 
 /// The Settings tab, in New Trip's look: a plain page under its title, faint rounded cards. The
-/// home station, walking and biking, accessibility, which alerts every widget mentions as icon
-/// toggles, diagnostics and the data sources.
+/// home station, General (vibrating on walks, NY North), walking and biking, accessibility, which
+/// alerts every widget mentions as icon toggles, diagnostics, and the data sources.
 struct SettingsView: View {
     @Environment(SettingsStore.self) private var store
     @Environment(WidgetStore.self) private var widgets
@@ -73,6 +86,14 @@ struct SettingsView: View {
     @AppStorage(OwnBike.key) private var ownBike = OwnBike.none
     @AppStorage(BikeCarry.key) private var bikeCarry = BikeCarry.all
     @AppStorage(BikeKinds.offKey) private var citiBikeOff = false
+    /// The no-bikes warning and With Transit, unrolled or not, and the bike With Transit's for, kept
+    /// in step with the settings in an animation: a change to `@AppStorage` drops the one it was
+    /// made in, so they'd snap open and shut.
+    @State private var warnsNoBikes = false
+    @State private var transitBike: OwnBike?
+    @State private var lastTransitBike = OwnBike.bike
+    @AppStorage(WalkSession.vibratesKey) private var vibratesOnInstruction = true
+    @AppStorage(MapNorth.key) private var nyNorth = false
 
     /// The page's side margin and its cards' corners, as New Trip's.
     private static let margin: CGFloat = 16
@@ -88,6 +109,23 @@ struct SettingsView: View {
     }
 
     var body: some View {
+        settingsPage
+            // On its side, a card down the left over the map, as Nearby's
+            .sidewaysCard()
+            // For the Citi Bike and Nearby widgets, which can't read the app's own defaults
+            .onChange(of: bikeKinds) { store.shareBikeKinds() }
+            .onChange(of: citiBikeOff && ownBike == .none, initial: true) { old, none in
+                withAnimation(old == none ? nil : .smooth(duration: 0.3)) { warnsNoBikes = none }
+            }
+            .onChange(of: ownBike, initial: true) { old, bike in
+                if bike != .none { lastTransitBike = bike }
+                withAnimation(old == bike ? nil : .smooth(duration: 0.3)) {
+                    transitBike = bike == .none ? nil : bike
+                }
+            }
+    }
+
+    private var settingsPage: some View {
         ScrollView {
             VStack(spacing: 8) {
                 Text("Settings")
@@ -97,8 +135,12 @@ struct SettingsView: View {
                     .padding(.bottom, 6)
                     .accessibilityAddTraits(.isHeader)
 
-                cardLabel("Home Station")
+                cardLabel(store.settings.defaultBus == nil ? "Home Station" : "Home Stop")
                 homeStation
+                    .padding(.bottom, 14)
+
+                cardLabel("General")
+                general
                     .padding(.bottom, 14)
 
                 cardLabel("Walking", symbol: "figure.walk")
@@ -148,8 +190,9 @@ struct SettingsView: View {
             .accessibilityAddTraits(.isHeader)
     }
 
-    /// The default train as a faint card, as the others; a tap picks another. Or, with none
-    /// chosen, No Primary Stop and the train used meanwhile.
+    /// The home stop as a faint card, as the others: the default train, or its bus when it's one
+    /// (Home Stop); a tap picks another (`HomeStopPicker`). Or, with none chosen, No Primary Stop
+    /// and the train used meanwhile.
     private var homeStation: some View {
         @Bindable var store = store
         let selection = store.defaultTrain
@@ -171,6 +214,17 @@ struct SettingsView: View {
                             .foregroundStyle(.secondary)
                     }
                     .lineLimit(2)
+                } else if let bus = store.settings.defaultBus {
+                    HStack(spacing: 2) {
+                        ForEach(bus.allLines.prefix(3), id: \.self) { BusBadge(line: $0, size: bus.allLines.count > 1 ? 28 : 36) }
+                    }
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(bus.stopName).font(.headline)
+                        Text(bus.bothWays && bus.otherStop != nil ? "Both ways" : "Toward \(bus.shortWayName)")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .lineLimit(1)
                 } else {
                     LineBullets(routes: selection.routes, size: 36)
                     VStack(alignment: .leading, spacing: 1) {
@@ -195,15 +249,30 @@ struct SettingsView: View {
         .buttonStyle(.plain)
         .background(Self.faint, in: Self.card)
         .accessibilityElement(children: .combine)
-        .accessibilityHint(store.hasNoStop ? "Choose a station, line and direction"
-                                           : "Choose another station, line or direction")
+        .accessibilityHint(store.hasNoStop ? "Choose a station or bus stop, and its direction"
+                                           : "Choose another station or bus stop, or direction")
         .sheet(isPresented: $choosingDefaultTrain) {
-            TrainPicker(selection: $store.defaultTrain, bothWays: $store.settings.defaultBothWays)
+            HomeStopPicker(train: $store.defaultTrain, bothWays: $store.settings.defaultBothWays,
+                           bus: $store.settings.defaultBus)
         }
     }
 
-    /// Safety, unlabelled: how much longer a safer walk may take (`WalkRouting`). Comfortable Walk: how far
-    /// New Trip's rides may have you walk to and from them, a pick of its `walkChoices`.
+    /// Vibrate During Navigation: a buzz as each turn's shown on a walk (`WalkSession.vibratesKey`,
+    /// `WalkVibration`). NY North: every map turned the grid's 29°, Manhattan's
+    /// avenues up it (`MapNorth`).
+    private var general: some View {
+        VStack(spacing: 0) {
+            switchRow("Vibrate During Navigation", symbol: "iphone.radiowaves.left.and.right", tint: .accentColor,
+                      isOn: $vibratesOnInstruction)
+            Divider().padding(.leading, 52)
+            switchRow("NY North", detail: "Manhattan avenues become North-South", symbol: "building.2",
+                      tint: .accentColor, isOn: $nyNorth)
+        }
+        .background(Self.faint, in: Self.card)
+    }
+
+    /// Safety, unlabelled: how much longer a safer walk may take (`WalkRouting`). Comfortable Walk:
+    /// how far New Trip's rides may have you walk to and from them (`WalkSlider`).
     private var walking: some View {
         VStack(spacing: 0) {
             // Safest first; VoiceOver reads it as Safety
@@ -216,25 +285,9 @@ struct SettingsView: View {
             .padding(.horizontal, Self.margin)
             .padding(.vertical, 12)
             Divider().padding(.leading, Self.margin)
-            HStack(spacing: 12) {
-                Text("Comfortable Walk")
-                    .accessibilityHidden(true)
-                Spacer(minLength: 8)
-                // The button shows just the time; the menu each choice's distance too
-                Menu {
-                    Picker("Comfortable Walk", selection: $walkMinutes) {
-                        ForEach(NewTripView.walkChoices, id: \.minutes) { choice in
-                            Text("\(NewTripView.walkLabel(choice.minutes)) · \(choice.miles)").tag(choice.minutes)
-                        }
-                    }
-                } label: {
-                    menuLabel(NewTripView.walkLabel(walkMinutes))
-                }
-                .accessibilityLabel("Comfortable Walk")
-                .accessibilityValue(NewTripView.walkLabel(walkMinutes))
-            }
-            .padding(.horizontal, Self.margin)
-            .frame(minHeight: 52)
+            WalkSlider(minutes: $walkMinutes)
+                .padding(.horizontal, Self.margin)
+                .padding(.vertical, 12)
         }
         .background(Self.faint, in: Self.card)
     }
@@ -258,7 +311,8 @@ struct SettingsView: View {
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 12)
-            if citiBikeOff && ownBike == .none {
+            // Both always there, each unrolling down from the tiles as it's needed (`Unroll`)
+            VStack(spacing: 0) {
                 Divider().padding(.leading, 52)
                 HStack(spacing: 12) {
                     Image(systemName: "exclamationmark.triangle.fill")
@@ -275,49 +329,49 @@ struct SettingsView: View {
                 .frame(minHeight: 52)
                 .accessibilityElement(children: .combine)
             }
-            if ownBike != .none {
-                Divider().padding(.leading, 52)
-                HStack(spacing: 12) {
-                    // A plus before the train: the bike, and transit with it
-                    HStack(spacing: 1) {
-                        Image(systemName: "plus").font(.caption.weight(.bold))
-                        Image(systemName: "tram.fill")
-                    }
-                    .foregroundStyle(.tint)
-                    .frame(width: 24)
-                    .accessibilityHidden(true)
-                    Text("With Transit")
-                        .accessibilityHidden(true)
-                    Spacer(minLength: 8)
-                    Menu {
-                        Picker("With Transit", selection: $bikeCarry) {
-                            ForEach(BikeCarry.allCases, id: \.self) { carry in
-                                Text(carry.name).tag(carry)
-                            }
-                        }
-                    } label: {
-                        menuLabel(bikeCarry.name)
-                    }
-                    .accessibilityLabel("With Transit")
-                    .accessibilityValue(bikeCarry.name)
-                    .accessibilityHint("What your bike does on a trip with a train")
-                }
-                .padding(.horizontal, Self.margin)
-                .frame(minHeight: 52)
-            }
+            .modifier(Unroll(shown: warnsNoBikes))
+            withTransit
+                .padding(.horizontal, 8)
+                .padding(.bottom, 8)
+                .modifier(Unroll(shown: transitBike != nil))
         }
-        .animation(.default, value: ownBike)
-        .animation(.default, value: citiBikeOff)
         .background(Self.faint, in: Self.card)
     }
 
-    /// A menu's label: its value and the up-down chevron.
-    private func menuLabel(_ value: String) -> some View {
-        HStack(spacing: 4) {
-            Text(value)
-            Image(systemName: "chevron.up.chevron.down")
-                .font(.footnote.weight(.semibold))
-                .accessibilityHidden(true)
+    /// Your own bike on a trip with a train (`BikeCarry`), as two switches in a panel of your bike's
+    /// tint, so they read as its and not Citi Bike's: taken on the train, and locked at the station.
+    /// Both on is any of these; both off, rides without a train only.
+    private var withTransit: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: "bicycle")
+                    .accessibilityHidden(true)
+                // Your bike kept as it rolls up, its name not changing on the way
+                Text((transitBike ?? lastTransitBike) == .eBike ? "My E-Bike with Transit" : "My Bike with Transit")
+                Spacer(minLength: 0)
+            }
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.tint)
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
+            .accessibilityAddTraits(.isHeader)
+            switchRow("Take it on the train", symbol: "tram.fill", tint: .accentColor, isOn: carries(bring: true))
+                .padding(.horizontal, -4)
+            Divider().padding(.leading, 48)
+            switchRow("Lock it up, then ride", symbol: "lock.fill", tint: .accentColor, isOn: carries(bring: false))
+                .padding(.horizontal, -4)
+        }
+        .background(Color.accentColor.opacity(0.1), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    /// Whether your bike's taken on the train (`bring`), or locked at the station, the other kept.
+    private func carries(bring: Bool) -> Binding<Bool> {
+        Binding {
+            bring ? bikeCarry.brings : bikeCarry.leaves
+        } set: { isOn in
+            let brings = bring ? isOn : bikeCarry.brings
+            let leaves = bring ? bikeCarry.leaves : isOn
+            bikeCarry = brings && leaves ? .all : brings ? .bring : leaves ? .leave : .none
         }
     }
 
@@ -325,7 +379,8 @@ struct SettingsView: View {
     /// your own; a bolt on e-bikes; its name under it.
     private func bikeTile(_ name: String, electric: Bool, own: Bool, on: Binding<Bool>) -> some View {
         Button {
-            on.wrappedValue.toggle()
+            // Animated at the source so the cards below slide with the one that grows
+            withAnimation(.smooth(duration: 0.3)) { on.wrappedValue.toggle() }
         } label: {
             VStack(spacing: 4) {
                 Image(systemName: "bicycle")
@@ -449,7 +504,7 @@ struct SettingsView: View {
     }
 
     /// Share Diagnostics (`Diagnostics`): off until turned on; turned off, reports not yet sent
-    /// are dropped. Under it, Run Setup Again.
+    /// are dropped. Then Run Setup Again.
     private var diagnostics: some View {
         VStack(spacing: 0) {
             switchRow("Share Diagnostics", symbol: "stethoscope", tint: .accentColor, isOn: $sharesDiagnostics)
@@ -537,14 +592,22 @@ struct SettingsView: View {
     }
 
     /// A 52 pt row with its icon and a switch, as New Trip's From and To rows.
-    private func switchRow(_ title: String, symbol: String, tint: Color, isOn: Binding<Bool>) -> some View {
+    private func switchRow(_ title: String, detail: String? = nil, symbol: String, tint: Color,
+                           isOn: Binding<Bool>) -> some View {
         Toggle(isOn: isOn) {
             HStack(spacing: 12) {
                 Image(systemName: symbol)
                     .foregroundStyle(tint)
                     .frame(width: 24)
                     .accessibilityHidden(true)
-                Text(title)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title)
+                    if let detail {
+                        Text(detail)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
         }
         .padding(.horizontal, Self.margin)
@@ -585,6 +648,22 @@ extension ServiceAlert.Kind {
         case .serviceChange: "Service Changes"
         case .notice: "Notices"
         }
+    }
+}
+
+/// A part of a card that unrolls down from what's above it: always laid out at its full height,
+/// shown through a window that grows from nothing, its top kept in place. Hidden, VoiceOver and
+/// taps skip it. For Settings' Biking card and New Trip's change stations and docks.
+struct Unroll: ViewModifier {
+    let shown: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(height: shown ? nil : 0, alignment: .top)
+            .clipped()
+            .allowsHitTesting(shown)
+            .accessibilityHidden(!shown)
     }
 }
 

@@ -151,7 +151,11 @@ struct NewTripView: View {
     /// Bumped by Return in the search field, for the list to pick its first result.
     @State private var submits = 0
     @FocusState private var searchFocused: Bool
-    @State private var location = NearbyLocation()
+    /// Where you are: the one `tripLocation`, not a new one each time the view's made again.
+    @State private var location = NewTripView.tripLocation
+    /// Made once, the first time New Trip is: a `@State`'s first value is made each time the
+    /// view is, and those thrown away each had a location manager.
+    private static let tripLocation = NearbyLocation()
     @State private var state = PlanState.waiting
     @State private var options: [ServerRoutes.Choice] = []
     @State private var picked = 0
@@ -172,12 +176,20 @@ struct NewTripView: View {
     @State private var ends: (start: CLLocation, end: CLLocation)?
     /// The map before there are trips: around you, or the city until you're found.
     @State private var startPosition = MapCameraPosition.userLocation(fallback: .region(Self.cityRegion))
+    /// The start map's size and safe area, to frame it turned NY North.
+    @State private var startRoom = MapRoom()
+    /// Where the start map last came to rest, for a new one to begin there (`holdStart`).
+    @State private var startCamera: MapCamera?
+    /// Started over with no fresh fix (`startOver`): the start map frames you once you're found.
+    @State private var framesNextFix = false
+    @AppStorage(MapNorth.key) private var nyNorth = false
     /// The lines round From on the map before there are trips (`findLines`), a count of each new
     /// set, and the map's height and map points a point is, as Nearby's.
     @State private var lines = NearbyLines.none
     @State private var linesVersion = 0
     @State private var mapHeight: CGFloat = 0
     @State private var mapPointsPerPoint: Double = 0
+    @State private var linesCache = NearbyLinesLayer.Cache()
     private static let cityRegion = MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: 40.73, longitude: -73.97),
                                                        latitudinalMeters: 8_000, longitudinalMeters: 8_000)
     /// Keeps the map before there are trips on the city, rather than out to the continent while
@@ -257,20 +269,56 @@ struct NewTripView: View {
     /// Whether any way to go is on: with none, Plan Trip is greyed and there's nothing to plan.
     private var hasMode: Bool { subway || settings.settings.includesBuses || biking || walkAll }
 
-    /// How far you'll walk to and from a ride, as offered: its minutes, miles at 20 minutes a
-    /// mile, and meters. 15 minutes first, as far as the planner looked before you could choose.
-    static let walkChoices: [(minutes: Int, miles: String, meters: Double)] = [
-        (15, "¾ mi", 1_207), (20, "1 mi", 1_609), (30, "1½ mi", 2_414), (45, "2¼ mi", 3_621), (60, "3+ mi", 4_828),
-    ]
+    /// How far you'll walk to and from a ride, as offered on Settings' slider: its minutes, the
+    /// walk's miles at 20 minutes a mile, and meters as the crow flies a station (stop, dock) may
+    /// be, as far as a walk the app times at those minutes (`reach`): a walk shown is never longer
+    /// than the one picked. 15 to 45 minutes in fives, then No Limit (`noLimitMinutes`), which is
+    /// what older versions' "60+" was saved as, and looks as far as the planner did then.
+    static let walkChoices: [(minutes: Int, miles: String, meters: Double)] = {
+        let walks: [(minutes: Int, miles: String)] = [
+            (15, "¾ mi"), (20, "1 mi"), (25, "1¼ mi"), (30, "1½ mi"), (35, "1¾ mi"), (40, "2 mi"), (45, "2¼ mi"),
+        ]
+        let limited = walks.map { (minutes: $0.minutes, miles: $0.miles, meters: reach($0.minutes)) }
+        return limited + [(minutes: noLimitMinutes, miles: "3½ mi", meters: noLimitReach)]
+    }()
 
-    /// A walk choice as shown: "15 min", the last "60+ min".
-    static func walkLabel(_ minutes: Int) -> String {
-        minutes == 60 ? "60+ min" : "\(minutes) min"
+    /// The last choice, No Limit: walks to and from a ride as far as the planner looks
+    /// (`noLimitReach`), and walking all the way however long.
+    static let noLimitMinutes = 60
+
+    /// Meters as the crow flies No Limit looks for a ride from each end: 3 miles, a walk of about
+    /// 72 min (`noLimitWalk`).
+    private static let noLimitReach: Double = 4_828
+
+    /// Meters as the crow flies a walk of `minutes` reaches, as the app times walks
+    /// (`TripPlanner.walkSeconds`): 1,000 for 15 min.
+    private static func reach(_ minutes: Int) -> Double {
+        Double(minutes) * 60 / TripPlanner.walkSeconds(1)
     }
 
-    /// `walkMinutes`' place in `walkChoices`; the first if it's none of them.
+    /// Minutes the longest walk to or from a ride is with No Limit, as shown.
+    static let noLimitWalk = TripPlanner.walkMinutes(noLimitReach)
+
+    /// A walk choice as shown: "15 min", the last "No Limit".
+    static func walkLabel(_ minutes: Int) -> String {
+        minutes == noLimitMinutes ? "No Limit" : "\(minutes) min"
+    }
+
+    /// The longest walk to or from a ride with walk choice `minutes`, as said: "15 min", or for
+    /// No Limit, as far as it looks (`noLimitWalk`).
+    static func longestWalkLabel(_ minutes: Int) -> String {
+        "\(minutes == noLimitMinutes ? noLimitWalk : minutes) min"
+    }
+
+    /// "your 30 min walk", or with No Limit just "your walk".
+    static func yourWalk(_ minutes: Int) -> String {
+        minutes == noLimitMinutes ? "your walk" : "your \(minutes) min walk"
+    }
+
+    /// `walkMinutes`' place in `walkChoices`: the longest no longer than it, so a time saved that
+    /// isn't offered now lands on the one below.
     private var walkIndex: Int {
-        Self.walkChoices.firstIndex { $0.minutes == walkMinutes } ?? 0
+        Self.walkChoices.lastIndex { $0.minutes <= walkMinutes } ?? 0
     }
 
     private var walkChoice: (minutes: Int, miles: String, meters: Double) { Self.walkChoices[walkIndex] }
@@ -283,6 +331,11 @@ struct NewTripView: View {
     /// before they're planned again: past a fix's wobble, a few blocks.
     private static let movedFar: CLLocationDistance = 250
     @Environment(\.openURL) private var openURL
+    @Environment(\.scenePhase) private var scenePhase
+    /// On its side: the cards down the left over the map, as Nearby's (`Sideways`).
+    @Environment(\.isSideways) private var sideways
+    /// On its side, the room down the left for the trips and Go, for the trips to fill.
+    @State private var sideRoom: CGFloat = 0
     @Environment(SettingsStore.self) private var settings
 
     /// The picked trip, once there are trips.
@@ -309,15 +362,30 @@ struct NewTripView: View {
     /// A visitor's Sightseeing list is open.
     @State private var sightseeing = false
     @State private var newPlaceName = ""
+    /// The saved place held down on, asking how to edit it.
+    @State private var editingPlace: SavedPlaces.Slot?
+    /// The added place being renamed, and its new name as typed.
+    @State private var renamingPlace: SavedPlaces.Slot?
+    @State private var newName = ""
     /// The trips' height, for the card's, which grows to `tripsHeight` with them.
     @State private var tripsContentHeight: CGFloat = 0
+    /// `stationsOpen` as `tripsContentHeight` was last measured, to tell a height that follows them.
+    @State private var heightStationsOpen = false
     /// From and To moving between their card and the line atop the trips.
     @Namespace private var endsSpace
     /// The longer walk to and from a ride the trips were planned with, there being none within
     /// yours (`walkChoice`); nil when they're within it.
     @State private var longerWalk: Int?
+    /// Said over the walk all the way offered with Walk off, there being no trip the ways picked
+    /// and the walk being within yours (`walkChoice`); nil otherwise.
+    @State private var walkInstead: String?
     /// Go's walks being asked for.
     @State private var startingWalk = false
+    /// Go waiting on its walks, let go (`cancelGo`) if the trip's changed or started over
+    /// meanwhile, so an old trip's walk doesn't start over the new one.
+    @State private var goTask: Task<Void, Never>?
+    /// The picked trip's walks, asked for as it's picked so Go needn't wait on them.
+    @State private var walksAhead: WalksAhead?
     /// Apple Maps couldn't give Go its walks.
     @State private var walkFailed = false
     /// Go's walks failed as a station has no entrance listed, not for Apple Maps: trying again
@@ -343,6 +411,30 @@ struct NewTripView: View {
 
     /// Whether Go has a trip to take: by train, walking all the way, or by bike.
     private var canGo: Bool { pickedTrip != nil || pickedWalk != nil || pickedBike != nil }
+
+    /// A trip's walks asked for ahead of Go, from `start`.
+    private struct WalksAhead {
+        let trip: TripPlanner.Trip
+        let start: CLLocation
+        let task: Task<WalkingDirections.TripWalks?, Error>
+    }
+
+    /// Where Go walks from: where you are now, if From's there and you're found, else where
+    /// it was planned from.
+    private var goStart: CLLocation? {
+        guard let ends else { return nil }
+        return from?.isHere == true ? freshHere ?? ends.start : ends.start
+    }
+
+    /// The picked trip's walks asked for now, for Go; those asked for before let go.
+    private func askWalksAhead() {
+        walksAhead?.task.cancel()
+        walksAhead = nil
+        guard let trip = pickedTrip, let start = goStart, let end = ends?.end else { return }
+        walksAhead = WalksAhead(trip: trip, start: start, task: Task {
+            try await WalkingDirections.walks(for: trip, from: start, to: end)
+        })
+    }
 
     /// Longest walk all the way offered beside the trains, unless it's as quick as they are.
     private static let walkOffered = 30
@@ -370,19 +462,23 @@ struct NewTripView: View {
                     tripPage
                 } else {
                     startMap
-                    // Its logo and Legal over From and To, clear of the screen's rounded corner
+                    // Its logo and Legal over From and To, clear of the screen's rounded corner;
+                    // on its side, past the cards down the left
                     .safeAreaPadding(.bottom, attributionRoom)
-                    .safeAreaPadding(.leading, Self.attributionInset)
+                    .safeAreaPadding(.leading, mapLeading)
                     .ignoresSafeArea(.container, edges: [.top, .bottom])
                     // Its size kept as the keyboard goes (`tripPage`)
                     .ignoresSafeArea(.keyboard)
                 }
             }
-            .overlay(alignment: .bottom) {
+            .overlay(alignment: sideways ? .bottomLeading : .bottom) {
                 if endsOpen {
                     VStack(spacing: 10) {
                         if !hasMode {
                             noModeCallout
+                                .transition(.move(edge: .bottom).combined(with: .opacity))
+                        } else if impreciseHere {
+                            impreciseCallout
                                 .transition(.move(edge: .bottom).combined(with: .opacity))
                         }
                         savedChips()
@@ -393,11 +489,14 @@ struct NewTripView: View {
                         }
                         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
                         .matchedGeometryEffect(id: "ends", in: endsSpace)
-                        .padding(.horizontal, Self.margin)
+                        .padding(.horizontal, sideways ? 0 : Self.margin)
                     }
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { bottomCardsHeight = $0 }
+                    .frame(width: sideways ? Sideways.width : nil)
+                    .padding(.leading, sideways ? Sideways.inset : 0)
                     .padding(.bottom, 8)
                     .animation(.smooth(duration: 0.3), value: hasMode)
+                    .animation(.smooth(duration: 0.3), value: impreciseHere)
                 }
             }
             // The tab bar's room, but not the keyboard's, which would leave the map no room to
@@ -420,14 +519,26 @@ struct NewTripView: View {
             // Back on the tab, where you are now, for trips from or to it
             if hasEnds, from?.isHere == true || to?.isHere == true { location.find() }
         }
+        // Back in the app, you may be somewhere else: found again, for an end that's where you are
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active, location.isAllowed, from?.isHere == true || to?.isHere == true { location.find() }
+        }
         .onChange(of: location.location) { _, here in
             saveHere(here)
             relocate(here)
+            // Started over without a fresh fix: the map around you once you're found, unless
+            // it's been moved or a trip's begun since
+            if framesNextFix, let here, to == nil, ends == nil, picking == nil, !startPosition.positionedByUser {
+                framesNextFix = false
+                frameStart(on: [here], animated: true)
+            }
         }
         // A walk over, you're likely somewhere else: found again, to plan from there if so
         .onChange(of: ActiveWalk.shared.session == nil) { _, ended in
             if ended, hasEnds, from?.isHere == true || to?.isHere == true { location.find() }
         }
+        // Ended with End or Done: a clean New Trip from where you are, nothing in To
+        .onChange(of: ActiveWalk.shared.endings) { startOver() }
         // Planned once both ends are picked, the fastest drawn on the map behind From and To, and
         // again as what it waits on changes, such as the ways you'll go
         .task(id: hasEnds ? planKey : nil) { await plan() }
@@ -438,8 +549,12 @@ struct NewTripView: View {
             guard !Task.isCancelled, fading else { return }
             withAnimation(Self.endsAnimation) { collapsed = false }
         }
-        // A walk isn't for the widget, nor a ride all the way
+        // Its walks routed ahead, for Go
+        .onChange(of: pickedTrip, initial: true) { askWalksAhead() }
+        // A walk isn't for the widget, nor a ride all the way. Go, still waiting on the trip
+        // it was tapped for, let go
         .onChange(of: pickedOption, initial: true) { _, option in
+            cancelGo()
             switch option {
             case .walk: showing.option = nil
             case .bike(let trip) where trip.train == nil: showing.option = nil
@@ -471,11 +586,14 @@ struct NewTripView: View {
                     savedChips(here: picking == .from)
                         .padding(.vertical, 6)
                 }
+                // Not on its side, where with the keyboard up there's no room for it
                 VStack(spacing: 6) {
-                    Image(systemName: "magnifyingglass").font(.title2)
-                    Text("Search for a station, address, place or person")
-                        .font(.subheadline)
-                        .multilineTextAlignment(.center)
+                    if !sideways {
+                        Image(systemName: "magnifyingglass").font(.title2)
+                        Text("Search for a station, address, place or person")
+                            .font(.subheadline)
+                            .multilineTextAlignment(.center)
+                    }
                 }
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, Self.margin)
@@ -506,6 +624,7 @@ struct NewTripView: View {
             Button {
                 searchFocused = false
                 setting = nil
+                holdStart()
                 withAnimation(Self.endsAnimation) { picking = nil }
             } label: {
                 Label("Cancel", systemImage: "xmark")
@@ -564,21 +683,27 @@ struct NewTripView: View {
         mapArea
             // The trips framed clear of the status bar, and of the cards and the bar under them;
             // reframed as From and To open and close. Its logo and Legal over the cards.
-            .safeAreaPadding(.top, Self.statusBarRoom)
+            .safeAreaPadding(.top, sideways ? Sideways.top : Self.statusBarRoom)
             .safeAreaPadding(.bottom, attributionRoom)
-            .safeAreaPadding(.leading, Self.attributionInset)
+            .safeAreaPadding(.leading, mapLeading)
             .ignoresSafeArea(.container, edges: [.top, .bottom])
             // The whole screen still while the keyboard's going after picking an end: shrunk
             // by it, the map had no room left to frame the trips in, and zoomed right out,
             // and growing back as it went, MapKit's drawing failed Metal's checks
             .ignoresSafeArea(.keyboard)
-            .overlay(alignment: .bottom) {
+            .overlay(alignment: sideways ? .bottomLeading : .bottom) {
                 if collapsed {
                     VStack(spacing: 10) {
                         list
                         goBar
                     }
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { bottomCardsHeight = $0 }
+                    // On its side, down the left, the trips as tall as there's room for
+                    .frame(width: sideways ? Sideways.width : nil)
+                    .frame(maxHeight: sideways ? .infinity : nil, alignment: .bottom)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { sideRoom = $0 }
+                    .padding(.leading, sideways ? Sideways.inset : 0)
+                    .padding(.top, sideways ? Sideways.top : 0)
                     .padding(.bottom, 4)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
@@ -602,7 +727,7 @@ struct NewTripView: View {
             .accessibilityHint("Clears this trip to plan another")
             goButton
         }
-        .padding(.horizontal, Self.barMargin)
+        .padding(.horizontal, sideways ? 0 : Self.barMargin)
     }
 
     /// The bar's height, as the tab bar's when it shrinks while scrolling: just its tab, in a circle.
@@ -618,12 +743,20 @@ struct NewTripView: View {
 
     /// The trips' height: up to `tripsHeight`, or `openTripsHeight` with the change stations open.
     private var listHeight: CGFloat {
-        min(stationsOpen ? Self.openTripsHeight : Self.tripsHeight, tripsContentHeight)
+        // On its side, down to Go under them
+        let side = sideRoom - Self.barHeight - 10 - (Self.cardMax - Self.tripsHeight)
+        let most = sideways && sideRoom > 0 ? max(Self.tripsHeight / 2, side)
+            : stationsOpen ? Self.openTripsHeight : Self.tripsHeight
+        return min(most, tripsContentHeight)
     }
+
+    /// The map's room on its left: its logo and Legal in from the screen's rounded corner, or on
+    /// its side, past the cards down the left.
+    private var mapLeading: CGFloat { sideways ? Sideways.mapLeading : Self.attributionInset }
 
     /// Under the map's logo and Legal: the tab bar and the cards over the map's bottom, so they
     /// show over the cards and the map frames what's left.
-    private var attributionRoom: CGFloat { bottomRoom + bottomCardsHeight + 12 }
+    private var attributionRoom: CGFloat { bottomRoom + (sideways ? 0 : bottomCardsHeight) + 12 }
 
     /// The trips on the map, or how planning's going.
     @ViewBuilder private var mapArea: some View {
@@ -664,7 +797,8 @@ struct NewTripView: View {
                     .padding(24)
                     .fixedSize(horizontal: false, vertical: true)
                     .glassEffect(.regular, in: RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
-                    .padding(.horizontal, 40)
+                    // On its side, past the cards already, in the map's safe area
+                    .padding(.horizontal, sideways ? 16 : 40)
                     .transition(.opacity)
                 }
             }
@@ -679,14 +813,22 @@ struct NewTripView: View {
     /// The map before there are trips: you, both ends, and the lines round From (`NearbyLines`).
     private var startMap: some View {
         Map(position: $startPosition, bounds: Self.cityBounds) {
-            NearbyLinesLayer(lines: lines, version: linesVersion, mapPointsPerPoint: mapPointsPerPoint)
+            NearbyLinesLayer(lines: lines, version: linesVersion, mapPointsPerPoint: mapPointsPerPoint, cache: linesCache)
             UserAnnotation()
             endPins
         }
         // Muted, as the trip's map: the standard map's yellow main roads read as N/Q/R/W lines
         .mapStyle(.standard(emphasis: .muted, pointsOfInterest: .excludingAll))
+        .measuresRoom($startRoom)
+        .turnsNorth($startPosition)
+        // The lines' zoom followed as it moves, a step at a time (`LineScale`)
+        .onMapCameraChange(frequency: .continuous) { context in
+            guard mapHeight > 0 else { return }
+            let scale = LineScale.step(MapNorth.mapPointsPerPoint(context, height: mapHeight), from: mapPointsPerPoint)
+            if scale != mapPointsPerPoint { mapPointsPerPoint = scale }
+        }
         .onMapCameraChange(frequency: .onEnd) { context in
-            if mapHeight > 0 { mapPointsPerPoint = context.rect.height / Double(mapHeight) }
+            startCamera = context.camera
         }
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { mapHeight = $0 }
         .onChange(of: linesKey, initial: true) { findLines() }
@@ -708,6 +850,7 @@ struct NewTripView: View {
     private func findLines() {
         guard let center = linesCenter else {
             lines = .none
+            linesVersion += 1
             return
         }
         let stations = subway ? Nearby.stations(near: center, limit: 3) : []
@@ -742,6 +885,7 @@ struct NewTripView: View {
 
     /// Clears the trip and its map: From back to where you are, no To, the map around you again.
     private func startOver() {
+        cancelGo()
         closeStations()
         withAnimation(Self.endsAnimation) {
             from = .here
@@ -755,12 +899,18 @@ struct NewTripView: View {
             picked = 0
             plannedKey = nil
             ends = nil
-            startPosition = .userLocation(fallback: .region(Self.cityRegion))
+            // Somewhere to begin for its new map, not following you (`holdStart`): where you
+            // are if just found, else the city until you're found again (`framesNextFix`); the
+            // last fix can be the trip's start, long ago
+            frameStart(on: [freshHere].compactMap { $0 })
+            framesNextFix = freshHere == nil
         }
+        if framesNextFix { location.find() }
     }
 
     /// Opens From and To again in the trips' place.
     private func openEnds() {
+        cancelGo()
         closeStations()
         withAnimation(Self.endsAnimation) { collapsed = false }
     }
@@ -855,18 +1005,21 @@ struct NewTripView: View {
     /// Shows the picked trip on the widget, asks Apple Maps for its walks from where you are (or
     /// From), and opens them.
     private func go() {
-        guard canGo, let ends else { return }
-        // From where you are now, if From's there and you're found, else where it was planned from
-        let start = from?.isHere == true ? location.location ?? ends.start : ends.start
+        guard canGo, let ends, let start = goStart else { return }
+        if from?.isHere == true, freshHere == nil { location.find() }
+        // To's name now: by the time the walks come, To can be cleared or another place
+        let endName = to?.name ?? ""
         // Walking all the way: its walk from where you are now, if you've moved since it was
         // planned, else as planned
         if let planned = pickedWalk {
             startingWalk = true
-            Task {
-                defer { startingWalk = false }
+            goTask = Task {
+                // Let go, `cancelGo` has already turned it off, maybe for another Go since
+                defer { if !Task.isCancelled { startingWalk = false } }
                 let moved = start.distance(from: ends.start) > Self.walkMoved
                 let walk = moved ? (try? await WalkingDirections.walk(from: start, to: ends.end)) ?? planned : planned
-                ActiveWalk.shared.begin(WalkSession(walk: walk, endName: to?.name ?? "", end: ends.end))
+                guard !Task.isCancelled else { return }
+                ActiveWalk.shared.begin(WalkSession(walk: walk, endName: endName, end: ends.end))
             }
             return
         }
@@ -880,24 +1033,39 @@ struct NewTripView: View {
         showing.show()
 
         startingWalk = true
-        Task {
-            defer { startingWalk = false }
+        // Those asked for as the trip was picked, done or under way, unless you've moved since
+        let ahead = walksAhead.flatMap { $0.trip == trip && $0.start.distance(from: start) <= Self.walkMoved ? $0.task : nil }
+        goTask = Task {
+            defer { if !Task.isCancelled { startingWalk = false } }
             let walks: WalkingDirections.TripWalks
             do {
-                guard let found = try await WalkingDirections.walks(for: trip, from: start, to: ends.end) else {
+                let found = if let ahead, let walks = try? await ahead.value { walks }
+                    else { try await WalkingDirections.walks(for: trip, from: start, to: ends.end) }
+                // Let go meanwhile: no walk, and no alert for one that wasn't wanted
+                guard !Task.isCancelled else { return }
+                guard let found else {
                     walkNoEntrance = true
                     walkFailed = true
                     return
                 }
                 walks = found
             } catch {
+                guard !Task.isCancelled else { return }
                 walkNoEntrance = false
                 walkFailed = true
                 return
             }
             // Over the whole app (`AppTabs`), carried on if iOS closes it
-            ActiveWalk.shared.begin(WalkSession(trip: trip, walks: walks, endName: to?.name ?? "", end: ends.end))
+            ActiveWalk.shared.begin(WalkSession(trip: trip, walks: walks, endName: endName, end: ends.end))
         }
+    }
+
+    /// Lets go of Go's walks still being asked for, for a trip changed or started over, and
+    /// lights Go again for the new one.
+    private func cancelGo() {
+        goTask?.cancel()
+        goTask = nil
+        startingWalk = false
     }
 
     /// Apple Maps' cycling directions from one dock to another.
@@ -927,7 +1095,7 @@ struct NewTripView: View {
         }
         .clipShape(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
-        .padding(.horizontal, Self.margin)
+        .padding(.horizontal, sideways ? 0 : Self.margin)
     }
 
     /// The trips in `list`, scrolling within it.
@@ -935,20 +1103,27 @@ struct NewTripView: View {
         ScrollView {
             VStack(spacing: 0) {
                 if state == .ready {
-                    if let longerWalk, !stationsOpen {
-                        Label("No trip within your \(walkChoice.minutes) min walk. These walk up to \(Self.walkLabel(longerWalk)).",
-                              systemImage: "figure.walk")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, Self.margin)
-                            .padding(.vertical, 8)
-                        Divider()
+                    // With the picked trip's stations open, all but it roll up, and its stations
+                    // unroll under it (`Unroll`); everything stays laid out so both move smoothly
+                    if let note = walkInstead ?? longerWalk.map({
+                        "No trip within \(Self.yourWalk(walkChoice.minutes)). These walk up to \(Self.longestWalkLabel($0))."
+                    }) {
+                        VStack(spacing: 0) {
+                            Label(note, systemImage: "figure.walk")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, Self.margin)
+                                .padding(.vertical, 8)
+                            Divider()
+                        }
+                        .modifier(Unroll(shown: !stationsOpen))
                     }
-                    ForEach(options.indices.filter { !stationsOpen || $0 == picked }, id: \.self) { index in
-                        if index > 0, !stationsOpen {
+                    ForEach(options.indices, id: \.self) { index in
+                        if index > 0 {
                             // Under the text, past the bullets
                             Divider().padding(.leading, Self.margin + 64)
+                                .modifier(Unroll(shown: !stationsOpen))
                         }
                         Button {
                             if index == picked, changeStations[index] != nil || dockChoices(index) != nil {
@@ -983,19 +1158,24 @@ struct NewTripView: View {
                                 .background(index == picked ? Self.pickedBackground : .clear)
                         }
                         .buttonStyle(.plain)
+                        .modifier(Unroll(shown: !stationsOpen || index == picked))
                     }
-                    if stationsOpen {
-                        Group {
-                            changeStationList
-                            dockChoiceList
-                        }
-                        .transition(.opacity)
+                    VStack(spacing: 0) {
+                        changeStationList
+                        dockChoiceList
                     }
+                    .modifier(Unroll(shown: stationsOpen))
                 }
             }
         }
         .onScrollGeometryChange(for: CGFloat.self) { $0.contentSize.height } action: { _, height in
-            tripsContentHeight = height
+            // Measured after the stations open or close, so the card grows or shrinks with them
+            if heightStationsOpen != stationsOpen {
+                heightStationsOpen = stationsOpen
+                withAnimation(Self.stationsAnimation) { tripsContentHeight = height }
+            } else {
+                tripsContentHeight = height
+            }
         }
         .frame(height: listHeight)
         .scrollBounceBehavior(.basedOnSize)
@@ -1291,6 +1471,21 @@ struct NewTripView: View {
             .padding(.horizontal, Self.margin)
     }
 
+    /// An end is where you are, but Leeway may only know it to a few miles.
+    private var impreciseHere: Bool {
+        location.isAllowed && !location.isPrecise && (from?.isHere == true || to?.isHere == true)
+    }
+
+    /// Over From and To while an end is where you are and Precise Location is off.
+    private var impreciseCallout: some View {
+        Label("Precise Location is off", systemImage: "location.slash.fill")
+            .font(.subheadline.weight(.semibold))
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .glassEffect(.regular, in: Capsule())
+            .padding(.horizontal, Self.margin)
+    }
+
     /// Sets the end being picked, then moves From and To back down, or to a line atop the trips once both
     /// are picked.
     private func pick(_ place: TripPlace) {
@@ -1298,7 +1493,7 @@ struct NewTripView: View {
         var place = place
         // Setting Home or Work: saved, where you are by where you're found
         if let slot = setting {
-            let point = place.point ?? location.location.map {
+            let point = place.point ?? freshHere.map {
                 TripPlace.Point(latitude: $0.coordinate.latitude, longitude: $0.coordinate.longitude)
             }
             if let point {
@@ -1320,7 +1515,8 @@ struct NewTripView: View {
     }
 
     /// Home, Work and places added as glass chips, a tap to go there (or from there, while From's
-    /// picked); one not set yet asks for its place. A long press changes or forgets it. + after
+    /// picked); one not set yet asks for its place. Held down, it can be changed, renamed (one
+    /// added) or forgotten. + after
     /// them adds another, asking its name and then its place. They scroll once past the screen.
     /// With `here`, where you are first.
     private func savedChips(here: Bool = false) -> some View {
@@ -1350,6 +1546,16 @@ struct NewTripView: View {
             }
         } message: {
             Text("Name it, then pick where it is.")
+        }
+        .alert("Rename Place", isPresented: Binding(get: { renamingPlace != nil },
+                                                    set: { if !$0 { renamingPlace = nil } })) {
+            TextField("Name", text: $newName)
+                .textInputAutocapitalization(.words)
+            Button("Cancel", role: .cancel) {}
+            Button("Save") {
+                let name = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let slot = renamingPlace, !name.isEmpty { saved.rename(slot, to: name) }
+            }
         }
     }
 
@@ -1386,24 +1592,37 @@ struct NewTripView: View {
     private func savedChip(_ slot: SavedPlaces.Slot) -> some View {
         let place = saved.place(slot)
         let name = saved.name(slot)
-        return Button {
-            useSaved(slot)
-        } label: {
-            Label(name, systemImage: saved.symbol(slot))
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(place == nil && slot != .sightseeing ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
-                .padding(.horizontal, 14)
-                .frame(height: 38)
-                .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .glassEffect(.regular.interactive(), in: Capsule())
-        .contextMenu {
-            if place != nil {
-                Button("Change \(name)…", systemImage: "pencil") { setSaved(slot) }
-                Button("Forget \(name)", systemImage: "trash", role: .destructive) { saved.set(slot, to: nil) }
+        // Gestures rather than a Button with a context menu: the glass chip's button took a long
+        // press as a tap, so the menu never showed
+        return Label(name, systemImage: saved.symbol(slot))
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(place == nil && slot != .sightseeing ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
+            .padding(.horizontal, 14)
+            .frame(height: 38)
+            .contentShape(Capsule())
+            .glassEffect(.regular.interactive(), in: Capsule())
+            .onTapGesture { useSaved(slot) }
+            .onLongPressGesture { editSaved(slot) }
+            .sensoryFeedback(.impact, trigger: editingPlace) { _, new in new == slot }
+            // On each chip, so its popover points at the one held down
+            .confirmationDialog(name, isPresented: Binding(get: { editingPlace == slot },
+                                                           set: { if !$0 { editingPlace = nil } }),
+                                titleVisibility: .visible) {
+                Button("Change Address") { setSaved(slot) }
+                if case .added = slot {
+                    Button("Rename") {
+                        newName = name
+                        renamingPlace = slot
+                    }
+                }
+                Button("Forget \(name)", role: .destructive) { saved.set(slot, to: nil) }
+            } message: {
+                if let detail = place?.detail { Text(detail) }
             }
-        }
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { useSaved(slot) }
+            .accessibilityAction(named: "Edit") { editSaved(slot) }
         .accessibilityHint(slot == .sightseeing ? "Choose a sight to go to"
                            : place == nil ? "Sets your \(name.lowercased()) address" : "")
     }
@@ -1435,10 +1654,36 @@ struct NewTripView: View {
 
     /// Frames the map on From and To once both are picked, before Plan Trip. Their page's map is a
     /// new one: left following you, it began at MapKit's own view of the country, held to the
-    /// city's bounds at their far corner (Perth Amboy) until it found you.
+    /// city's bounds at their far corner (Perth Amboy) until it found you. Just From picked, the
+    /// map's made anew too: framed on From if it's a place, else held where it was (`holdStart`).
     private func frameEnds() {
-        guard hasEnds else { return }
+        guard hasEnds else {
+            if let start = from?.location { frameStart(on: [start]) } else { holdStart() }
+            return
+        }
         frameStart(on: [from?.location ?? location.location, to?.location ?? location.location].compactMap { $0 })
+    }
+
+    /// Gives the start map, about to be made anew (picking an end replaces it), somewhere to
+    /// begin. Following you or moved by hand, its position says nowhere, and a new map began at
+    /// MapKit's view of the country, held to the city's bounds at their far corner: Perth Amboy.
+    private func holdStart() {
+        guard startPosition.followsUserLocation || startPosition.positionedByUser else { return }
+        if let startCamera {
+            startPosition = .camera(startCamera)
+        } else {
+            frameStart(on: [location.location].compactMap { $0 })
+        }
+    }
+
+    /// Held down: asks how to edit a saved place that's set; one not set asks for its place.
+    private func editSaved(_ slot: SavedPlaces.Slot) {
+        guard slot != .sightseeing else { return }
+        if saved.place(slot) == nil {
+            setSaved(slot)
+        } else {
+            editingPlace = slot
+        }
     }
 
     /// Asks for a saved place's place: the end being picked's search field, or To's.
@@ -1467,6 +1712,15 @@ struct NewTripView: View {
         _ = saved.set(pending.slot, to: TripPlace(name: pending.name, detail: pending.detail, point: point))
     }
 
+    /// Where you are, if found in the last `freshFor`: an older fix can be a ride away, from
+    /// before the app was last in the background.
+    private var freshHere: CLLocation? {
+        guard let here = location.location, -here.timestamp.timeIntervalSinceNow < Self.freshFor else { return nil }
+        return here
+    }
+
+    private static let freshFor: TimeInterval = 120
+
     private func relocate(_ here: CLLocation?) {
         guard let here, let ends else { return }
         let planned = from?.isHere == true ? ends.start : to?.isHere == true ? ends.end : nil
@@ -1493,6 +1747,7 @@ struct NewTripView: View {
         picked = 0
         ends = nil
         longerWalk = nil
+        walkInstead = nil
         // Every way to go off: nothing to plan, Plan Trip greyed and a word over From and To
         guard let from, let to, hasMode else {
             state = .waiting
@@ -1517,8 +1772,13 @@ struct NewTripView: View {
             frameStart(on: [from.location, to.location].compactMap { $0 })
             return
         }
-        state = .planning
         frameStart(on: [start, end])
+        // From and To a few steps apart: no trip, rather than a 0 m walk of a minute
+        guard start.distance(from: end) >= Self.samePlace else {
+            state = .failed(title: "Same Place", message: "From and To are the same place.", fix: .fades)
+            return
+        }
+        state = .planning
         // The timetable read in now, off the main thread, while the server plans: the first
         // time, it's a big file to unpack, which held the trips up as they came in
         Task.detached(priority: .userInitiated) { _ = TimetableStore.load() }
@@ -1526,24 +1786,48 @@ struct NewTripView: View {
         let subway = self.subway
         let walkRange = walkChoice.meters
         // Walking all the way, asked of Apple Maps while the trains are planned, and Citi Bike's trips
-        async let walking = Self.walkAll(walkAll, from: start, to: end)
+        let noLimit = walkChoice.minutes == Self.noLimitMinutes
+        // Not waited on where it can't be offered (below): a walk across town takes seconds to route
+        let walking = Task { await Self.walkAll(walkAll, noLimit: noLimit, from: start, to: end) }
+        defer { walking.cancel() }
         async let biking = Self.bikeTrips(bike, own: biking ? ownBike.kind : nil, carry: bikeCarry, endName: to.name,
                                           from: start, to: end, subway: subway, walkRange: walkRange)
         // Google's routes, asked for once: each walk tried below picks from the same ones. Nil
-        // if the server couldn't be reached
-        let routes: [ServerRoutes.Route]? = buses || subway
-            ? await ServerRoutes.routes(from: start, to: end, buses: buses) : []
+        // if the server couldn't be reached, and whether it refused as over its daily limit
+        let fetched: (routes: [ServerRoutes.Route]?, overLimit: Bool) = buses || subway
+            ? await ServerRoutes.fetchRoutes(from: start, to: end, buses: buses, subway: subway) : ([], false)
+        let routes = fetched.routes
         guard !Task.isCancelled else { return }
         var rides = await Self.rides(routes, buses: buses, subway: subway, from: start, to: end, walkRange: walkRange)
         guard !Task.isCancelled else { return }
-        let walk = await walking
-        let bikeTrips = await biking
+        let biked = await biking
+        let bikeTrips = biked.trips
+        // Walking all the way now only if there's nothing else; else once the trips' minutes
+        // say whether it could be offered beside them
+        var walkedAll: (walk: Walk?, tooLong: Int?, trouble: MapsTrouble?) = (nil, nil, nil)
+        let nothingElse = rides.planned.isEmpty && bikeTrips.isEmpty
+        if nothingElse { walkedAll = await walking.value }
+        var walk = walkedAll.walk
         guard !Task.isCancelled else { return }
-        // No ride within your walk to and from it, nor any bike trip: the trips of the shortest
-        // longer walk offered that has some, rather than none at all
+        // Walk off, and no ride within your walk to and from it nor any bike trip: walking all
+        // the way, where it's no longer than your walk, rather than a ride with a longer one
+        var walkedInstead = false
+        if !walkAll, rides.planned.isEmpty, bikeTrips.isEmpty,
+           let found = await Self.walkAll(true, noLimit: noLimit, from: start, to: end).walk,
+           noLimit || WalkTripRow.minutes(of: found) <= walkChoice.minutes {
+            guard !Task.isCancelled else { return }
+            walk = found
+            walkedInstead = true
+        }
+        // A walk instead cut short comes back nil, as if there were none: superseded, this plan
+        // mustn't put No Trip Found over the new one's planning
+        guard !Task.isCancelled else { return }
+        // No ride within your walk to and from it, nor any bike trip, nor a walk instead: the
+        // trips of the shortest longer walk offered that has some, rather than none at all
         var walked = walkChoice.minutes
-        if rides.planned.isEmpty, bikeTrips.isEmpty, buses || subway {
-            for choice in Self.walkChoices where choice.meters > walkRange {
+        if rides.planned.isEmpty, bikeTrips.isEmpty, !walkedInstead, buses || subway {
+            // In fifteens, as many tries as before the slider's fives
+            for choice in Self.walkChoices where choice.meters > walkRange && choice.minutes % 15 == 0 {
                 rides = await Self.rides(routes, buses: buses, subway: subway, from: start, to: end,
                                          walkRange: choice.meters)
                 guard !Task.isCancelled else { return }
@@ -1553,21 +1837,38 @@ struct NewTripView: View {
         }
         let planned = rides.planned
         guard !planned.isEmpty || walk != nil || !bikeTrips.isEmpty else {
-            state = noTripFound(buses: buses, subway: subway, none: rides.none, walked: walked,
-                                offline: buses && routes == nil)
+            state = noTripFound(from: start, to: end, buses: buses, subway: subway, none: rides.none, walked: walked,
+                                offline: buses && routes == nil, overLimit: buses && fetched.overLimit,
+                                walkTooLong: walkedAll.tooLong, walkTrouble: walkedAll.trouble, noBike: biked.none)
             return
         }
-        options = planned.map(\.choice)
-        trips = planned.map(\.trip)
-        plannedAt = .now
-        ends = (start, end)
         // Trips with a bus aren't in the timetable: estimated by Google's times for the bus
-        // (`BusTrip.arrival`). Read once for them all
-        let timetable = TimetableStore.load(now: plannedAt)
-        minutes = options.indices.map { index in
-            guard case .bus(let trip) = options[index] else { return trips[index].flatMap { minutes(of: $0, by: timetable) } }
-            return trip.minutes(from: start, to: end, at: plannedAt, timetable: timetable)
-        }
+        // (`BusTrip.arrival`). Read once for them all, and timed, off the main thread: the first
+        // read unpacks a big file, which hitched New Trip as the trips came in. As
+        // `minutes(of:by:)`, from these ends at this time
+        let choices = planned.map(\.choice)
+        let rideTrips = planned.map(\.trip)
+        let at = Date.now
+        let (timetable, timed) = await Task.detached(priority: .userInitiated) { () -> (Timetable?, [Int?]) in
+            let timetable = TimetableStore.load(now: at)
+            let timed = choices.indices.map { index -> Int? in
+                if case .bus(let trip) = choices[index] {
+                    return trip.minutes(from: start, to: end, at: at, timetable: timetable)
+                }
+                guard let trip = rideTrips[index], let timetable,
+                      let arrival = TripPlanner.arrival(of: trip, from: start, to: end, at: at, timetable: timetable)
+                else { return nil }
+                return Int(arrival.timeIntervalSince(at) / 60)
+            }
+            return (timetable, timed)
+        }.value
+        // Set only now, after the wait, so a plan superseded meanwhile leaves the new one's be
+        guard !Task.isCancelled else { return }
+        options = choices
+        trips = rideTrips
+        plannedAt = at
+        ends = (start, end)
+        minutes = timed
 
         for (index, trip) in trips.enumerated() {
             guard let trip, let change = trip.change,
@@ -1588,12 +1889,22 @@ struct NewTripView: View {
             options[index] = .train(option)
             minutes[index] = minutes(of: changed, by: timetable)
         }
+        // Walking all the way, waited on unless even the straight line's too long to offer
+        // beside the trips: over `walkOffered` and slower than the fastest
+        if !nothingElse, walkAll {
+            let soonest = Self.soonestWalk(from: start, to: end)
+            let fastestTrip = minutes.compactMap { $0 }.min()
+            if soonest <= Self.walkOffered || fastestTrip.map({ soonest <= $0 }) ?? true {
+                walk = await walking.value.walk
+                guard !Task.isCancelled else { return }
+            }
+        }
         // Walking all the way, if it's not far, as quick as the trains, or all there is
         let walkAllMinutes = walk.map(WalkTripRow.minutes(of:))
         if let walk, let walkMinutes = walkAllMinutes {
             dropTrips(slowerThan: walkMinutes)
             let fastest = minutes.compactMap { $0 }.min()
-            if walkMinutes <= Self.walkOffered || fastest.map({ walkMinutes <= $0 }) ?? true {
+            if walkedInstead || walkMinutes <= Self.walkOffered || fastest.map({ walkMinutes <= $0 }) ?? true {
                 options.append(.walk(walk))
                 trips.append(nil)
                 minutes.append(walkMinutes)
@@ -1616,6 +1927,11 @@ struct NewTripView: View {
         // Said over the trips while a ride's among them that walks past your choice
         let riding = options.contains { if case .walk = $0 { false } else { true } }
         longerWalk = walked > walkChoice.minutes && riding ? walked : nil
+        if walkedInstead {
+            let by = Self.orList((subway ? ["subway"] : []) + (buses ? ["bus"] : []) + (self.biking ? ["bike"] : []))
+            walkInstead = by.isEmpty ? nil
+                : "No \(by) trip found. Walking there is within \(Self.yourWalk(walkChoice.minutes))."
+        }
         plannedKey = planKey
         state = .ready
     }
@@ -1646,72 +1962,186 @@ struct NewTripView: View {
         return (trains.trips.map { ServerRoutes.Planned(choice: .train($0.option), trip: $0) }, trains.none)
     }
 
-    /// No Trip Found, saying why: with only Walk on, no walk; by subway, why the planner found
-    /// none (`none`) with up to a `walked` minutes' walk, and that there's nothing by bus or bike
-    /// either; and, `offline`, that bus trips need the server, which couldn't be reached.
-    private func noTripFound(buses: Bool, subway: Bool, none: TripPlanner.NoTrip?, walked: Int,
-                             offline: Bool) -> PlanState {
+    /// No Trip Found, saying why: with only Walk on, no walk, or one too long (`walkTooLong`
+    /// minutes); by subway, why the planner found none (`none`) with up to a `walked` minutes'
+    /// walk, and that there's nothing by bus or bike either, and why not by bike (`noBike`);
+    /// and, `offline`, that bus trips need the server, which couldn't be reached, or refused as
+    /// over its daily limit (`overLimit`). Where Apple Maps was busy or out of reach for the walk
+    /// all the way (`walkTrouble`) or the rides (`NoBike.maps`), that, with Try Again. Where an
+    /// end is on Staten Island or at JFK, that the app doesn't plan its ferry, railway or
+    /// AirTrain (`unplanned`).
+    private func noTripFound(from start: CLLocation, to end: CLLocation, buses: Bool, subway: Bool,
+                             none: TripPlanner.NoTrip?, walked: Int, offline: Bool, overLimit: Bool,
+                             walkTooLong: Int?, walkTrouble: MapsTrouble?, noBike: BikePlanner.NoBike?) -> PlanState {
         let others = [buses ? "bus" : nil, bike != nil ? "bike" : nil].compactMap { $0 }
-        let by = ((subway ? ["subway"] : []) + others).joined(separator: " or ")
+        let by = Self.orList((subway ? ["subway"] : []) + others)
         guard !by.isEmpty else {
-            return .failed(title: "No Trip Found", message: "Leeway couldn't find a walk between these places.", fix: .fades)
-        }
-        let unreachable = "Bus trips need a connection, and Leeway couldn't reach its server."
-        // By bus alone, with no server: nothing to say but that
-        if offline, by == "bus" {
-            return .failed(title: "Couldn't Get Bus Trips", message: "\(unreachable) Check your connection and try again.",
+            if let walkTrouble {
+                return .failed(title: "No Trip Found", message: walkTrouble.message, fix: .retry)
+            }
+            guard let walkTooLong else {
+                return .failed(title: "No Trip Found", message: "Leeway couldn't find a walk between these places.", fix: .fades)
+            }
+            let modes = ["Subway", "Bus"] + (hasBike ? [ownBike == .none ? "Citi Bike" : "My Bike"] : [])
+            return .failed(title: "No Trip Found",
+                           message: "Walking there takes about \(Self.hoursAndMinutes(walkTooLong)). To see it, set Comfortable Walk "
+                               + "to No Limit in Settings, or turn on \(Self.orList(modes)).",
                            fix: .fades)
         }
-        let walk = Self.walkLabel(walked)
-        // By subway, why, as the planner found: no station a walk from an end, or none but
-        // across the water, or walking's as quick; and that the other ways found none either
-        let why = subway ? none?.message(walk: walk, walkOn: walkAll) : nil
-        var message = why.map { others.isEmpty ? $0 : "\($0) Leeway couldn't find a \(others.joined(separator: " or ")) trip either." }
+        let unreachable = overLimit ? "Leeway's bus planner has hit its daily limit."
+            : "Bus trips need a connection, and Leeway couldn't reach its server."
+        // By bus alone, with no server: nothing to say but that
+        if offline, by == "bus" {
+            return .failed(title: "Couldn't Get Bus Trips",
+                           message: "\(unreachable) \(overLimit ? "Try again later." : "Check your connection and try again.")",
+                           fix: .fades)
+        }
+        let walk = Self.longestWalkLabel(walked)
+        let whyNoBike = bike == nil ? nil : noBike.map { noBikeMessage($0) }
+        // Apple Maps busy or out of reach: trying again may find one
+        let bikeTrouble = if bike != nil, case .maps? = noBike { true } else { false }
+        let fix: Fix = walkTrouble != nil || bikeTrouble ? .retry : .fades
+        // By bike alone, why, where it's known: the ride, not the walk
+        if let whyNoBike, by == "bike" {
+            var message = whyNoBike
+            if let walkTrouble, walkTrouble.message != whyNoBike { message += " \(walkTrouble.message)" }
+            return .failed(title: "No Trip Found", message: message, fix: fix)
+        }
+        // By subway, why: an end the app can't plan to (Staten Island, JFK), or as the planner
+        // found, no station a walk from an end, or none but across the water, or walking's as
+        // quick; and that the other ways found none either
+        let why = Self.unplanned(from: start, to: end) ?? (subway ? none?.message(walk: walk, walkOn: walkAll) : nil)
+        var message = why.map { others.isEmpty ? $0 : "\($0) Leeway couldn't find a \(Self.orList(others)) trip either." }
             ?? "Leeway couldn't find a \(by) trip between these places with up to a \(walk) walk."
+        if let whyNoBike { message += " \(whyNoBike)" }
+        if let walkTrouble, walkTrouble.message != whyNoBike { message += " \(walkTrouble.message)" }
         if offline { message += " \(unreachable)" }
-        return .failed(title: "No Trip Found", message: message, fix: .fades)
+        return .failed(title: "No Trip Found", message: message, fix: fix)
+    }
+
+    /// Why a trip from `start` to `end` may not be found, where an end's somewhere the app
+    /// doesn't plan the way to: Staten Island (its ferry and railway), or JFK's terminals (the
+    /// AirTrain). Nil elsewhere.
+    private static func unplanned(from start: CLLocation, to end: CLLocation) -> String? {
+        if [start, end].contains(where: { WalkReach.land(at: $0.coordinate) == .statenIsland }) {
+            return "Leeway doesn't plan the Staten Island Ferry or Railway yet."
+        }
+        let fromJFK = atJFK(start)
+        guard fromJFK || atJFK(end) else { return nil }
+        return "Leeway doesn't plan the AirTrain yet. Plan \(fromJFK ? "from" : "to") Howard Beach or Jamaica."
+    }
+
+    /// Whether `place` is at JFK: its terminals and Federal Circle, the AirTrain's stops short of
+    /// Howard Beach and Jamaica.
+    private static func atJFK(_ place: CLLocation) -> Bool {
+        let lat = place.coordinate.latitude, lon = place.coordinate.longitude
+        return (40.636...40.664).contains(lat) && (-73.810 ... -73.768).contains(lon)
+    }
+
+    /// Why there's no Citi Bike trip, said: the ride too long (and an e-bike's, if it'd do), or
+    /// no dock within your walk.
+    private func noBikeMessage(_ noBike: BikePlanner.NoBike) -> String {
+        switch noBike {
+        case .rideTooLong(let eBikeMinutes?):
+            "A classic bike takes over an hour; an e-bike about \(eBikeMinutes) min."
+        case .rideTooLong(nil):
+            "Riding there takes over an hour."
+        case .noDock(let atStart):
+            "No Citi Bike dock within \(Self.yourWalk(walkChoice.minutes)) of the \(atStart ? "start has a bike" : "end has room for one")."
+        case .maps(let trouble):
+            trouble.message
+        }
+    }
+
+    /// "subway", "subway or bus", "subway, bus or bike".
+    private static func orList(_ words: [String]) -> String {
+        guard let last = words.last, words.count > 1 else { return words.first ?? "" }
+        return "\(words.dropLast().joined(separator: ", ")) or \(last)"
+    }
+
+    /// "3 hr 36 min", "2 hr", "45 min".
+    private static func hoursAndMinutes(_ minutes: Int) -> String {
+        let hours = minutes / 60, left = minutes % 60
+        guard hours > 0 else { return "\(left) min" }
+        return left == 0 ? "\(hours) hr" : "\(hours) hr \(left) min"
     }
 
     /// Longest ride all the way offered beside quicker trips.
     private static let rideOffered = 45
 
     /// Longest walk all the way offered at all, even with nothing else: past it, No Trip Found
-    /// rather than an eight-hour walk from Glen Oaks to Times Square.
+    /// rather than an eight-hour walk from Glen Oaks to Times Square. With No Limit, any.
     private static let longestWalk = 120
 
-    /// Walking all the way, or none with Walk off or past `longestWalk`.
-    private static func walkAll(_ on: Bool, from start: CLLocation, to end: CLLocation) async -> Walk? {
-        guard on, let walk = try? await WalkingDirections.walk(from: start, to: end),
-              WalkTripRow.minutes(of: walk) <= longestWalk else { return nil }
-        return walk
+    /// Meters apart From and To are the same place: no trip planned between them.
+    private static let samePlace: Double = 30
+
+    /// Fewest minutes walking all the way from `start` to `end` could take: the straight line,
+    /// at a brisker pace than any walk's timed at, as none's shorter.
+    private static func soonestWalk(from start: CLLocation, to end: CLLocation) -> Int {
+        Int(start.distance(from: end) / briskPace / 60)
+    }
+
+    /// Metres a second: quicker than walks are timed at (`WalkCosts.pace`, Apple Maps').
+    private static let briskPace = 1.6
+
+    /// Walking all the way, or none with Walk off or past `longestWalk` (unless `noLimit`), then
+    /// with its minutes (`tooLong`) for No Trip Found to say; or none as Apple Maps was busy or
+    /// out of reach (`trouble`), rather than having no walk.
+    private static func walkAll(_ on: Bool, noLimit: Bool, from start: CLLocation,
+                                to end: CLLocation) async -> (walk: Walk?, tooLong: Int?, trouble: MapsTrouble?) {
+        guard on else { return (nil, nil, nil) }
+        let walk: Walk
+        do {
+            walk = try await WalkingDirections.walk(from: start, to: end)
+        } catch {
+            return (nil, nil, MapsTrouble(error))
+        }
+        let minutes = WalkTripRow.minutes(of: walk)
+        return noLimit || minutes <= longestWalk ? (walk, nil, nil) : (nil, minutes, nil)
     }
 
     /// Minutes sooner an e-bike's trip is to be kept over a classic bike's the same way: a
     /// classic costs members nothing more, and there are more of them.
     private static let eBikeSooner = 2
 
-    /// Your own bike's trips if you've one (`own`, `BikePlanner.planOwn`), as `carry` says with a
+    /// Your own bike's trips if you've one (`own`, `BikePlanner.plannedOwn`), as `carry` says with a
     /// train; else Citi Bike's trips by `kind`, or none with Bike off (`BikePlanner`).
     /// With both kinds, each is planned and one kept of each trip (all the way, or with the same
     /// train before or after): the classic bike's, unless the e-bike's is more than
     /// `eBikeSooner` minutes sooner. Where its e-bikes are few and the classic's bikes aren't
     /// (`CitiBike.few`), by the e-bike's from its fuller dock instead (`dockChoices`), or the
-    /// classic's with none: not a sure bike for one that may be gone.
+    /// classic's with none: not a sure bike for one that may be gone. Where the classic's are few
+    /// and the e-bike's aren't, the e-bike's if it's as soon. With no Citi Bike trip, why
+    /// (`BikePlanner.NoBike`), where the kinds agree.
     private static func bikeTrips(_ kinds: BikeKinds?, own: CitiBike.Kind?, carry: BikeCarry, endName: String,
                                   from start: CLLocation, to end: CLLocation,
-                                  subway: Bool, walkRange: Double) async -> [BikeTrip] {
+                                  subway: Bool, walkRange: Double) async -> (trips: [BikeTrip], none: BikePlanner.NoBike?) {
         if let own {
-            return await BikePlanner.planOwn(from: start, to: end, endName: endName, kind: own, carry: carry,
-                                             subway: subway, walkRange: walkRange)
+            return await BikePlanner.plannedOwn(from: start, to: end, endName: endName, kind: own, carry: carry,
+                                                subway: subway, walkRange: walkRange)
         }
-        guard let kinds else { return [] }
-        let found = await withTaskGroup(of: [BikeTrip].self) { group in
+        guard let kinds else { return ([], nil) }
+        let planned = await withTaskGroup(of: (trips: [BikeTrip], none: BikePlanner.NoBike?).self) { group in
             for kind in kinds.kinds {
-                group.addTask { await BikePlanner.plan(from: start, to: end, kind: kind, subway: subway, walkRange: walkRange) }
+                group.addTask { await BikePlanner.planned(from: start, to: end, kind: kind, subway: subway, walkRange: walkRange) }
             }
-            return await group.reduce(into: []) { $0 += $1 }
+            return await group.reduce(into: []) { $0.append($1) }
         }
-        guard kinds.kinds.count > 1 else { return found }
+        let found = planned.flatMap(\.trips)
+        // Why none, where each kind says the same; both kinds' rides too long, even an e-bike's
+        guard !found.isEmpty else {
+            let reasons = planned.map(\.none)
+            // Apple Maps busy or out of reach for either kind: trying again may find one
+            if let maps = reasons.first(where: { if case .maps? = $0 { true } else { false } }) {
+                return ([], maps)
+            }
+            if reasons.count > 1, reasons.allSatisfy({ if case .rideTooLong = $0 { true } else { false } }) {
+                return ([], .rideTooLong(eBikeMinutes: nil))
+            }
+            return ([], Set(reasons).count == 1 ? reasons.first ?? nil : nil)
+        }
+        guard kinds.kinds.count > 1 else { return (found, nil) }
         var kept: [String: BikeTrip] = [:]
         for trip in found {
             let key = "\(trip.bikeFirst) \(trip.train.map { "\($0)" } ?? "")"
@@ -1720,12 +2150,17 @@ struct NewTripView: View {
                 continue
             }
             let (eBike, bike) = trip.kind == .eBike ? (trip, other) : (other, trip)
+            // The classic's bikes few and the e-bike's not, as soon there: the e-bike's
+            if bike.bikes < CitiBike.few, eBike.bikes >= CitiBike.few, eBike.minutes <= bike.minutes {
+                kept[key] = eBike
+                continue
+            }
             let eBikeMinutes = eBike.bikes < CitiBike.few && bike.bikes >= CitiBike.few
                 ? eBike.dockChoices.filter { $0.bikes >= CitiBike.few }.map(\.minutes).min()
                 : eBike.minutes
             kept[key] = eBikeMinutes.map { $0 < bike.minutes - eBikeSooner } ?? false ? eBike : bike
         }
-        return kept.values.sorted { $0.minutes < $1.minutes }
+        return (kept.values.sorted { $0.minutes < $1.minutes }, nil)
     }
 
     /// Leaves out the trips timed to take longer than walking all the way (`walkMinutes`): a
@@ -1822,9 +2257,17 @@ struct NewTripView: View {
 
     /// Frames the map while trips are found on `places` (From and To, as far as they're known), or
     /// on the city without them, rather than wherever the map was, which can be the continent.
-    private func frameStart(on places: [CLLocation]) {
+    /// Animated only for a map already showing (`animated`): most callers make the map anew, and a
+    /// new one animates from MapKit's start, the city bounds' far corner, sweeping past Bayonne.
+    private func frameStart(on places: [CLLocation], animated: Bool = false) {
+        let heading = MapNorth.heading(ny: nyNorth)
+        // Called inside other animations too (`startOver`), so they're turned off here unless asked
+        var transaction = Transaction(animation: animated ? .smooth : nil)
+        transaction.disablesAnimations = !animated
         guard !places.isEmpty else {
-            startPosition = .region(Self.cityRegion)
+            let position = MapNorth.position(fitting: MKMapRect(Self.cityRegion), heading: heading, in: startRoom)
+                ?? .region(Self.cityRegion)
+            withTransaction(transaction) { startPosition = position }
             return
         }
         var rect = MKMapRect.null
@@ -1835,7 +2278,9 @@ struct NewTripView: View {
         let least = 2_000 * MKMapPointsPerMeterAtLatitude(places[0].coordinate.latitude)
         let dx = max(rect.width * 0.15, (least - rect.width) / 2, 0)
         let dy = max(rect.height * 0.15, (least - rect.height) / 2, 0)
-        withAnimation(.smooth) { startPosition = .rect(rect.insetBy(dx: -dx, dy: -dy)) }
+        let framed = rect.insetBy(dx: -dx, dy: -dy)
+        let position = MapNorth.position(fitting: framed, heading: heading, in: startRoom) ?? .rect(framed)
+        withTransaction(transaction) { startPosition = position }
     }
 
     /// `trip`'s minutes door to door by the timetable (`timetable`, if already read), leaving when
@@ -2014,13 +2459,15 @@ struct TripPlaceList: View {
 
     /// Made once the list shows, not each time New Trip makes the list again.
     @State private var completer: PlaceCompleter?
-    @State private var contacts = ContactSearch()
+    @State private var contacts: ContactSearch?
     /// What's being looked up after a tap.
     @State private var resolving: Lookup?
     /// Its lookup, stopped if the list goes, so it can't pick for the other end opened next.
     @State private var looking: Task<Void, Never>?
     /// What was looked up and found too far from the subway to plan from.
     @State private var tooFar: Set<Lookup> = []
+    /// What was tapped but couldn't be looked up, as offline.
+    @State private var notFound: Set<Lookup> = []
 
     private var stations: [Station] {
         let query = StationSearch(search)
@@ -2038,7 +2485,7 @@ struct TripPlaceList: View {
     }
 
     private var contactAddresses: [ContactAddress] {
-        search.count < 2 ? [] : contacts.results(for: search)
+        search.count < 2 ? [] : contacts?.results(for: search) ?? []
     }
 
     /// Whether what's typed could be someone's name: two letters or more, not a street number.
@@ -2047,9 +2494,11 @@ struct TripPlaceList: View {
     }
 
     var body: some View {
+        // Searched once each time, not again for the chips: it's every station, near spellings and all
+        let stations = stations
         VStack(spacing: 0) {
             if !stations.isEmpty {
-                stationChips
+                stationChips(stations)
                     .padding(.vertical, 6)
             }
             list
@@ -2058,6 +2507,8 @@ struct TripPlaceList: View {
         .task(id: search) {
             let completer = completer ?? PlaceCompleter()
             self.completer = completer
+            let contacts = contacts ?? ContactSearch()
+            self.contacts = contacts
             if !search.isEmpty {
                 do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
             }
@@ -2070,11 +2521,12 @@ struct TripPlaceList: View {
 
     private var list: some View {
         List {
-            if !contactAddresses.isEmpty || (couldBeName && (contacts.mayAsk || contacts.mayShare)) {
+            if let contacts, !contactAddresses.isEmpty || (couldBeName && (contacts.mayAsk || contacts.mayShare)) {
                 Section {
                     ForEach(contactAddresses) { address in
                         lookupButton(.contact(address)) {
-                            ContactAddressRow(address: address, tooFar: tooFar.contains(.contact(address)))
+                            ContactAddressRow(address: address, tooFar: tooFar.contains(.contact(address)),
+                                              notFound: notFound.contains(.contact(address)))
                         }
                     }
                     if couldBeName {
@@ -2103,6 +2555,8 @@ struct TripPlaceList: View {
                                 Text(result.title).foregroundStyle(.primary)
                                 if tooFar.contains(.place(result)) {
                                     Text("More than 5 miles from the subway").font(.caption).foregroundStyle(.red)
+                                } else if notFound.contains(.place(result)) {
+                                    Text("Couldn't look up this address").font(.caption).foregroundStyle(.red)
                                 } else if !result.subtitle.isEmpty {
                                     Text(result.subtitle).font(.caption).foregroundStyle(.secondary)
                                 }
@@ -2130,7 +2584,7 @@ struct TripPlaceList: View {
 
     /// The stations for the search as a row of chips, Home and Work's in New Trip, scrolling
     /// past the screen.
-    private var stationChips: some View {
+    private func stationChips(_ stations: [Station]) -> some View {
         ScrollView(.horizontal) {
             GlassEffectContainer(spacing: 8) {
                 HStack(spacing: 8) {
@@ -2193,6 +2647,7 @@ struct TripPlaceList: View {
         guard !tooFar.contains(lookup), resolving == nil else { return }
         resolving = lookup
         defer { resolving = nil }
+        notFound.remove(lookup)
         let item: MKMapItem?
         let name: String
         let detail: String
@@ -2215,7 +2670,12 @@ struct TripPlaceList: View {
             name = address.name
             detail = address.street
         }
-        guard let item, !Task.isCancelled else { return }
+        guard !Task.isCancelled else { return }
+        guard let item else {
+            // As offline: said on its row, rather than nothing happening
+            notFound.insert(lookup)
+            return
+        }
         guard let nearest = Nearby.nearest(to: item.location), nearest.meters <= PlaceCompleter.reach else {
             tooFar.insert(lookup)
             return
@@ -2259,6 +2719,8 @@ private struct StationChip: View {
 private struct ContactAddressRow: View {
     let address: ContactAddress
     let tooFar: Bool
+    /// Its address couldn't be looked up, as offline.
+    var notFound = false
 
     var body: some View {
         HStack(spacing: 12) {
@@ -2277,6 +2739,8 @@ private struct ContactAddressRow: View {
                 }
                 if tooFar {
                     Text("More than 5 miles from the subway").font(.caption).foregroundStyle(.red)
+                } else if notFound {
+                    Text("Couldn't look up this address").font(.caption).foregroundStyle(.red)
                 } else {
                     Text(address.street).font(.caption).foregroundStyle(.secondary)
                 }
@@ -2285,7 +2749,7 @@ private struct ContactAddressRow: View {
     }
 }
 
-/// MapKit's suggestions for addresses and places near the subway as you type, nearest you first
+/// MapKit's suggestions for addresses and places in New York near the subway as you type, nearest you first
 /// if Leeway knows where you are. Suggestions only finish words, so with few for what's typed
 /// (as for "barclys center" or "brookyln museum"), MapKit's search looks too, which forgives
 /// misspellings.
@@ -2320,7 +2784,7 @@ private final class PlaceCompleter: NSObject, MKLocalSearchCompleterDelegate {
 
     /// The results for `query`, none while they're still for what was typed before it.
     func results(for query: String) -> [MKLocalSearchCompletion] {
-        query == resultsQuery ? results : []
+        Self.withOrdinals(query) == resultsQuery ? results : []
     }
     /// MapKit's search's places when suggestions were few, those not suggested already.
     private(set) var found: [MKMapItem] = []
@@ -2329,13 +2793,33 @@ private final class PlaceCompleter: NSObject, MKLocalSearchCompleterDelegate {
 
     /// The places searched for `query`, none while they're still for what was typed before it.
     func found(for query: String) -> [MKMapItem] {
-        query == foundQuery ? found : []
+        Self.withOrdinals(query) == foundQuery ? found : []
     }
     @ObservationIgnored private let completer = MKLocalSearchCompleter()
     @ObservationIgnored private var searching: Task<Void, Never>?
 
     var query = "" {
-        didSet { completer.queryFragment = query }
+        didSet { completer.queryFragment = Self.withOrdinals(query) }
+    }
+
+    /// What's typed with numbered streets made ordinal: "16 E 34" as "16 E 34th". MapKit
+    /// doesn't take a bare number after E or W for a street, and suggests "16 E Park Ave".
+    static func withOrdinals(_ query: String) -> String {
+        let directions: Set<String> = ["e", "w", "n", "s", "east", "west", "north", "south"]
+        var words = query.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
+        for index in words.indices.dropFirst() {
+            guard let number = Int(words[index]), number > 0,
+                  directions.contains(words[index - 1].lowercased()) else { continue }
+            let suffix = switch (number % 100, number % 10) {
+            case (11...13, _): "th"
+            case (_, 1): "st"
+            case (_, 2): "nd"
+            case (_, 3): "rd"
+            default: "th"
+            }
+            words[index] += suffix
+        }
+        return words.joined(separator: " ")
     }
 
     /// Fewer suggestions than this, and MapKit's search looks too.
@@ -2371,7 +2855,7 @@ private final class PlaceCompleter: NSObject, MKLocalSearchCompleterDelegate {
     // The completer calls back on the main thread
     nonisolated func completerDidUpdateResults(_ completer: MKLocalSearchCompleter) {
         MainActor.assumeIsolated {
-            results = completer.results
+            results = completer.results.filter { Self.inNewYork($0.subtitle) }
             resultsQuery = completer.queryFragment
             searchIfFew()
         }
@@ -2383,6 +2867,12 @@ private final class PlaceCompleter: NSObject, MKLocalSearchCompleterDelegate {
             resultsQuery = completer.queryFragment
             searchIfFew()
         }
+    }
+
+    /// Whether an address is in New York: it names the state ("NY" or "New York"). Places in
+    /// New Jersey and further, and those without a state, aren't offered.
+    static func inNewYork(_ address: String) -> Bool {
+        address.contains(/\bNY\b|New York/)
     }
 
     /// With few suggestions for three letters or more, MapKit's search for what's typed: up to
@@ -2406,6 +2896,7 @@ private final class PlaceCompleter: NSObject, MKLocalSearchCompleterDelegate {
             guard !Task.isCancelled else { return }
             found = Array(items.filter { item in
                 guard let name = item.name, !suggested.contains(name.lowercased()),
+                      Self.inNewYork(item.address?.fullAddress ?? ""),
                       let nearest = Nearby.nearest(to: item.location) else { return false }
                 return nearest.meters <= Self.reach
             }.prefix(6))

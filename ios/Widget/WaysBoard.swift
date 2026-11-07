@@ -14,10 +14,22 @@ struct WaysBoard: View {
     var refreshing = false
     /// The controls layer: only the walk button, where the board has room for it.
     var controls = false
+    /// A saved bus changing to a train: the bus, in the header where your train goes. It has no
+    /// countdown on the Lock Screen, so no walk button.
+    var origin: Origin? = nil
     @Environment(\.widgetFamily) private var widgetFamily
+
+    struct Origin {
+        var line: String
+        /// Its stop: "4 Av & 9 St".
+        var name: String
+        /// "Cobble Hill".
+        var way: String
+    }
     @Environment(\.boardFamily) private var boardFamily
     @Environment(\.dynamicTypeSize) private var textSize
     @Environment(\.widgetRenderingMode) private var renderingMode
+    @Environment(\.routeLook) private var routeLook
     @Environment(\.accessibilityDifferentiateWithoutColor) private var withoutColor
 
     private var family: WidgetFamily { boardFamily ?? widgetFamily }
@@ -58,11 +70,16 @@ struct WaysBoard: View {
         VStack(alignment: .leading, spacing: 0) {
             header
             if let first = connections.first {
-                TopCard(entry: entry, train: first.first, later: connections.dropFirst().prefix(2).map { minutesToLeave($0.first) },
+                TopCard(entry: entry, train: first.first,
+                        later: connections.dropFirst().prefix(routeLook ? 1 : 2).map { minutesToLeave($0.first) },
                         marks: marks)
                     .padding(.top, 10)
                 let ways = ways(first)
-                if let fastest = ways.first {
+                if routeLook, !ways.isEmpty {
+                    table(Array(ways.prefix(3)))
+                        .padding(.top, 12)
+                        .frame(maxHeight: .infinity, alignment: .top)
+                } else if let fastest = ways.first {
                     fastestBox(fastest).padding(.top, 8)
                     otherWays(Array(ways.dropFirst()))
                         .padding(.top, 6)
@@ -92,7 +109,11 @@ struct WaysBoard: View {
             VStack(spacing: 6) {
                 header
                 if let first = connections.first {
-                    mediumBox(first)
+                    if routeLook {
+                        routeMedium(first)
+                    } else {
+                        mediumBox(first)
+                    }
                 } else {
                     mediumMessage(entry.problem ?? "No \(entry.lineLabel) trains to \(changeNames) predicted")
                 }
@@ -117,7 +138,7 @@ struct WaysBoard: View {
                         HStack(alignment: .firstTextBaseline, spacing: 4) {
                             Text("leaves in")
                                 .font(.footnote)
-                                .foregroundStyle(Color.boardGray)
+                                .foregroundStyle(BoardInk.gray)
                             transferCountdown(way, font: .subheadline.weight(.semibold))
                         }
                     }
@@ -127,28 +148,195 @@ struct WaysBoard: View {
             } else {
                 Text("No trains to \(destinationName) predicted")
                     .font(.footnote.weight(.semibold))
-                    .foregroundStyle(Color.boardText)
+                    .foregroundStyle(BoardInk.text)
                     .multilineTextAlignment(.trailing)
             }
         }
         .padding(.horizontal, 14)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(RoundedRectangle(cornerRadius: 16).fill(Color.boardText.opacity(0.07)))
+        .background(BoardTile())
+    }
+
+    /// The Saved Route's: a shorter countdown box with your train's time, then the soonest way
+    /// as the large table's top row.
+    private func routeMedium(_ connection: Connection) -> some View {
+        VStack(spacing: 6) {
+            HStack(spacing: 8) {
+                BoardCountdown(connection.first, on: entry, marks: marks, size: 34)
+                Spacer(minLength: 0)
+                HStack(spacing: 5) {
+                    WayMark(route: connection.first.route, size: 16)
+                    Text("leaves \(connection.first.time.clock)")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(BoardInk.text)
+                        .monospacedDigit()
+                }
+                .lineLimit(1)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("\(BusLeg.line(of: connection.first.route).map(BusBadge.spokenName) ?? Lines.name(of: connection.first.route)) leaves at \(Spoken.clock(connection.first.time))")
+            }
+            .padding(.horizontal, 14)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(BoardTile())
+            if let way = ways(connection).first {
+                HStack(spacing: 10) {
+                    WayMark(route: way.route, size: 24)
+                    VStack(alignment: .leading, spacing: 0) {
+                        if !way.staysOn {
+                            Text("Change at")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(BoardInk.gray)
+                        }
+                        Text(place(way))
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(BoardInk.text)
+                            .minimumScaleFactor(0.8)
+                    }
+                    Spacer(minLength: 4)
+                    transfer(way)
+                    Spacer(minLength: 4)
+                    if !way.staysOn {
+                        VStack(alignment: .trailing, spacing: 0) {
+                            Text("Leaves in")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(BoardInk.gray)
+                            transferCountdown(way, font: .title3.weight(.semibold))
+                        }
+                    }
+                }
+                .lineLimit(1)
+                .padding(.horizontal, 4)
+                .frame(height: 40)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(spoken(way, fastest: true))
+            } else {
+                Text("No trains to \(destinationName) predicted")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(BoardInk.text)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(height: 40)
+            }
+        }
+    }
+
+    /// The change itself: the walker and its minutes, or across the platform train · walk ·
+    /// train. Nothing when staying on.
+    @ViewBuilder private func transfer(_ way: Way) -> some View {
+        if !way.staysOn, let connection = way.connection {
+            let bus = busWalk(way)
+            let across = bus == nil && (connection.next.map { change.at(connection).isAcross(from: connection.arrival, to: $0) } ?? false)
+            Group {
+                if across {
+                    HStack(spacing: 1) {
+                        Image(systemName: "tram.fill")
+                        Image(systemName: "figure.walk")
+                        Image(systemName: "tram.fill")
+                    }
+                    .font(.footnote.weight(.semibold))
+                } else {
+                    HStack(spacing: 3) {
+                        Image(systemName: "figure.walk")
+                        Text("\(bus ?? change.walkMinutes) min")
+                    }
+                    .font(.subheadline.weight(.medium))
+                }
+            }
+            .foregroundStyle(BoardInk.text)
+            .lineLimit(1)
+            .fixedSize()
+        }
+    }
+
+    // MARK: Saved Route large table
+
+    private static let markColumn: CGFloat = 36
+    private static let transferColumn: CGFloat = 70
+    private static let leavesColumn: CGFloat = 64
+
+    /// The marks and places together, which "Change at" is centred over: as wide as the widest,
+    /// so it sits over the marks and names themselves.
+    private func changeColumn(_ ways: [Way]) -> CGFloat {
+        let font = UIFont.systemFont(ofSize: style.points(.subheadline), weight: .semibold)
+        let widest = ways.map { place($0).width(in: font) }.max() ?? 0
+        // At least as wide as its header and "Fastest" under the name
+        let caption = UIFont.systemFont(ofSize: style.points(.caption1), weight: .semibold)
+        return max(Self.markColumn + 8 + ceil(max(widest, "Fastest".width(in: caption))),
+                   ceil("Change at".width(in: caption)) + 4)
+    }
+
+    /// The fastest way and two more on the widget's background, under column headers: where to
+    /// change, how, and when the train changed to leaves. Transfer sits midway between the other
+    /// two.
+    private func table(_ ways: [Way]) -> some View {
+        let column = changeColumn(ways)
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 6) {
+                Text("Change at").frame(width: column)
+                Spacer(minLength: 0)
+                Text("Transfer").frame(width: Self.transferColumn)
+                Spacer(minLength: 0)
+                Text("Leaves in").frame(width: Self.leavesColumn)
+            }
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(BoardInk.gray)
+            .lineLimit(1)
+            .padding(.horizontal, 4)
+            .padding(.bottom, 4)
+            .accessibilityHidden(true)
+            ForEach(Array(ways.enumerated()), id: \.offset) { index, way in
+                tableRow(way, column: column, fastest: index == 0)
+            }
+        }
+    }
+
+    private func tableRow(_ way: Way, column: CGFloat, fastest: Bool) -> some View {
+        HStack(spacing: 6) {
+            // The mark beside the name; "Fastest" under the name
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 8) {
+                    WayMark(route: way.route, size: 24)
+                        .frame(width: Self.markColumn)
+                    Text(place(way))
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(BoardInk.text)
+                }
+                if fastest {
+                    Text("Fastest")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.liveText)
+                        .padding(.leading, Self.markColumn + 8)
+                }
+            }
+            .frame(width: column, alignment: .leading)
+            Spacer(minLength: 0)
+            transfer(way)
+                .frame(width: Self.transferColumn)
+            Spacer(minLength: 0)
+            transferCountdown(way, font: .title3.weight(.semibold))
+                .frame(width: Self.leavesColumn)
+        }
+        .monospacedDigit()
+        .lineLimit(1)
+        .minimumScaleFactor(0.75)
+        .padding(.horizontal, 4)
+        .frame(height: 48)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(spoken(way, fastest: fastest))
     }
 
     private func mediumMessage(_ text: String) -> some View {
         Text(text)
             .font(.subheadline.weight(.semibold))
-            .foregroundStyle(Color.boardText)
+            .foregroundStyle(BoardInk.text)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
             .padding(.horizontal, 14)
-            .background(RoundedRectangle(cornerRadius: 14).fill(Color.boardText.opacity(0.07)))
+            .background(BoardTile(radius: 14))
     }
 
     private func message(_ text: String) -> some View {
         Text(text)
             .font(.subheadline.weight(.semibold))
-            .foregroundStyle(Color.boardText)
+            .foregroundStyle(BoardInk.text)
             .padding(.top, 14)
     }
 
@@ -156,7 +344,11 @@ struct WaysBoard: View {
 
     /// "Atlantic Av / DeKalb Av", where the change is.
     private var changeNames: String {
-        let names = change.stationNames(for: entry.selection)
+        // From a bus, each change's station: not along a train of yours
+        var stations: [String] = []
+        for name in change.stops.compactMap(\.station?.name) where !stations.contains(name) { stations.append(name) }
+        let names = origin == nil ? change.stationNames(for: entry.selection)
+            : stations.count > 1 ? stations.map(\.mainStationName).joined(separator: " / ") : stations.first ?? ""
         return names.isEmpty ? "the change" : names
     }
 
@@ -177,27 +369,32 @@ struct WaysBoard: View {
     /// on the right for walk, which the controls layer draws there.
     private var header: some View {
         HStack(spacing: style.headerSpacing) {
-            // Just the counted-down train's line lit
-            LineBullets(routes: entry.selection.routes, size: isMedium ? 24 : style.bulletSize,
-                        lit: connections.first?.first.route)
+            if let origin {
+                BusBadge(line: origin.line, size: isMedium ? 24 : style.bulletSize * 0.85)
+            } else {
+                // Just the counted-down train's line lit
+                LineBullets(routes: entry.selection.routes, size: isMedium ? 24 : style.bulletSize,
+                            lit: connections.first?.first.route)
+            }
+            let from = origin?.name ?? entry.stationName
             VStack(alignment: .leading, spacing: 0) {
-                Text("\(entry.stationName) \(Text("→").foregroundStyle(Color.boardGray)) \(destinationName)")
+                Text("\(from) \(Text("→").foregroundStyle(BoardInk.gray)) \(destinationName)")
                     .font(style.nameFont)
-                    .foregroundStyle(Color.boardText)
+                    .foregroundStyle(BoardInk.text)
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
-                    .accessibilityLabel("\(entry.stationName) to \(destinationName)")
+                    .accessibilityLabel("\(from) to \(destinationName)")
                 if !isMedium {
                 HStack(spacing: 3) {
-                    Text("\(entry.heading), via")
+                    Text("\(origin.map { "to \($0.way)" } ?? entry.heading), via")
                         .lineLimit(1)
                         .minimumScaleFactor(style.headingScale)
                     ForEach(changeRoutes, id: \.self) { route in
-                        LineBullet(route: route, size: 14, relativeTo: .footnote)
+                        WayMark(route: route, size: 14, relativeTo: .footnote)
                     }
                 }
                 .font(style.headingFont)
-                .foregroundStyle(Color.boardGray)
+                .foregroundStyle(BoardInk.gray)
                 }
             }
             .accessibilityElement(children: .combine)
@@ -206,13 +403,19 @@ struct WaysBoard: View {
             if entry.closes {
                 Pill(symbol: "xmark", large: true, round: true).hidden()
             }
-            Pill(symbol: "figure.walk", large: true).hidden()
+            if origin == nil {
+                Pill(symbol: "figure.walk", large: true).hidden()
+            }
         }
     }
 
     /// Walk, with a ✕ before it (`TrainEntry.closes`).
-    private var buttons: some View {
-        BoardButtons(entry: entry, large: true, spacing: style.headerSpacing) { walkButton }
+    @ViewBuilder private var buttons: some View {
+        if origin == nil {
+            BoardButtons(entry: entry, large: true, spacing: style.headerSpacing) { walkButton }
+        } else {
+            BoardButtons(entry: entry, large: true, spacing: style.headerSpacing) { EmptyView() }
+        }
     }
 
     private var walkButton: some View {
@@ -233,14 +436,25 @@ struct WaysBoard: View {
     private func place(_ way: Way) -> String {
         guard !way.staysOn, let connection = way.connection,
               let name = change.at(connection).station?.name else { return "Stay on" }
-        return name.mainStationName.replacingOccurrences(of: " Av", with: "")
+        let main = name.mainStationName
+        let short = main.replacingOccurrences(of: " Av", with: "")
+        // "Atlantic", but "4 Av", not "4"
+        return short.allSatisfy(\.isNumber) ? main : short
     }
 
     /// "across platform" or "3 min walk"; nil when staying on.
     private func how(_ way: Way) -> String? {
         guard !way.staysOn, let connection = way.connection, let next = connection.next else { return nil }
+        if let minutes = busWalk(way) { return "\(minutes) min walk" }
         return change.at(connection).isAcross(from: connection.arrival, to: next)
             ? "across platform" : "\(change.walkMinutes) min walk"
+    }
+
+    /// A change to or from a bus: its walk, in minutes; nil between trains.
+    private func busWalk(_ way: Way) -> Int? {
+        guard let connection = way.connection,
+              BusLeg.line(of: way.route) != nil || BusLeg.line(of: connection.arrival.route) != nil else { return nil }
+        return Int((connection.walk / 60).rounded())
     }
 
     /// "1 min", "<1 min"; nil when staying on or with no train to change to.
@@ -262,7 +476,7 @@ struct WaysBoard: View {
     /// A way for VoiceOver: "D at Atlantic Av, 1 minute wait, across the platform. At 34 St-Herald
     /// Sq at 10:06 AM, live."
     private func spoken(_ way: Way, fastest: Bool) -> String {
-        let line = Lines.name(of: way.route)
+        let line = BusLeg.line(of: way.route).map(BusBadge.spokenName) ?? Lines.name(of: way.route)
         var first = way.staysOn ? "Stay on the \(line)" : "\(line) at \(way.connection.flatMap { change.at($0).station?.name } ?? "the change")"
         if let connection = way.connection, !way.staysOn {
             first += ", " + connection.spokenWait(quick: false)
@@ -327,7 +541,7 @@ struct WaysBoard: View {
             VStack(alignment: .trailing, spacing: 0) {
                 Text(leavesLabel(way))
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(Color.boardGray)
+                    .foregroundStyle(BoardInk.gray)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
                 transferCountdown(way, font: .title2.weight(.semibold))
@@ -337,7 +551,7 @@ struct WaysBoard: View {
         .padding(.horizontal, Self.rowInset)
         .padding(.vertical, 10)
         .frame(minHeight: Self.boxHeight)
-        .background(RoundedRectangle(cornerRadius: 16).fill(Color.boardText.opacity(0.07)))
+        .background(BoardTile())
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(spoken(way, fastest: true))
     }
@@ -351,19 +565,19 @@ struct WaysBoard: View {
             if !way.staysOn && !compact {
                 Text("Change at")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(Color.boardGray)
+                    .foregroundStyle(BoardInk.gray)
             }
             HStack(spacing: 6) {
-                LineBullet(route: way.route, size: 26)
+                WayMark(route: way.route, size: 26)
                 Text(place(way))
                     .font(.title2.weight(.semibold))
-                    .foregroundStyle(Color.boardText)
+                    .foregroundStyle(BoardInk.text)
             }
             let detail = [wait(way).map { "\($0) wait" }, how(way)].compactMap { $0 }.joined(separator: " · ")
             if !detail.isEmpty {
                 Text(detail)
                     .font(.footnote)
-                    .foregroundStyle(Color.boardGray)
+                    .foregroundStyle(BoardInk.gray)
                     .monospacedDigit()
             }
         }
@@ -384,7 +598,7 @@ struct WaysBoard: View {
         if way.staysOn {
             Text("no change")
                 .font(.subheadline)
-                .foregroundStyle(Color.boardGray)
+                .foregroundStyle(BoardInk.gray)
                 .lineLimit(1)
         } else if transferTrain(way) == nil {
             Text("none predicted")
@@ -398,7 +612,7 @@ struct WaysBoard: View {
                 Text(wait)
             }
             .font(.subheadline)
-            .foregroundStyle(Color.boardGray)
+            .foregroundStyle(BoardInk.gray)
             .monospacedDigit()
             .lineLimit(1)
         }
@@ -407,12 +621,12 @@ struct WaysBoard: View {
     private func row(_ way: Way, column: CGFloat, height: CGFloat) -> some View {
         HStack(spacing: 10) {
             // Always clear of the next row's bullet, however tight the rows
-            LineBullet(route: way.route, size: min(26, height - Self.bulletGap))
+            WayMark(route: way.route, size: min(26, height - Self.bulletGap))
                 .frame(width: Self.bulletColumn)
             HStack(spacing: 0) {
                 Text(place(way))
                     .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Color.boardText)
+                    .foregroundStyle(BoardInk.text)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
                     .frame(width: column, alignment: .leading)
@@ -455,20 +669,20 @@ struct LeavesColumn: View {
     var body: some View {
         VStack(alignment: .trailing, spacing: 4) {
             HStack(spacing: 5) {
-                LineBullet(route: train.route, size: 18)
+                WayMark(route: train.route, size: 18)
                 Text("leaves \(train.time.clock)")
                     .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Color.boardText)
+                    .foregroundStyle(BoardInk.text)
             }
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel("\(Lines.name(of: train.route)) leaves at \(Spoken.clock(train.time))")
+            .accessibilityLabel("\(BusLeg.line(of: train.route).map(BusBadge.spokenName) ?? Lines.name(of: train.route)) leaves at \(Spoken.clock(train.time))")
             if let next = later.first {
                 ViewThatFits(in: .horizontal) {
                     Text("then " + later.map(\.label).joined(separator: " · "))
                     Text("then \(next.label)")
                 }
                 .font(.footnote)
-                .foregroundStyle(Color.boardGray)
+                .foregroundStyle(BoardInk.gray)
             }
         }
         .monospacedDigit()

@@ -505,13 +505,20 @@ private struct OutageRow: View {
 private struct StationMap: View {
     let station: Station
     let route: String
+    @State private var position: MapCameraPosition
 
-    var body: some View {
-        Map(initialPosition: .region(MKCoordinateRegion(
+    init(station: Station, route: String) {
+        self.station = station
+        self.route = route
+        _position = State(initialValue: .region(MKCoordinateRegion(
             center: station.coordinate,
             latitudinalMeters: 350,
             longitudinalMeters: 350
-        ))) {
+        )))
+    }
+
+    var body: some View {
+        Map(position: $position) {
             Marker(station.name, systemImage: "tram.fill", coordinate: station.coordinate)
                 .tint(LineStyle.of(route).swiftUIColor)
             ForEach(Array(station.entrances.enumerated()), id: \.offset) { _, entrance in
@@ -521,6 +528,9 @@ private struct StationMap: View {
             }
         }
         .mapStyle(.standard(pointsOfInterest: .excludingAll))
+        // Turned NY North where it rests, if Settings says: a little further out, for the
+        // square round the station's corners
+        .turnsNorth($position, widening: 1.2)
         .id(station.id)
         .accessibilityLabel("Map of \(station.name) and its entrances")
     }

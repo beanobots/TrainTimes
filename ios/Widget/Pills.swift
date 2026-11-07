@@ -91,6 +91,7 @@ struct EndTripButton: View {
     var closing: String? = nil
     @Environment(\.stillControls) private var still
     @Environment(\.endTripFace) private var face
+    @Environment(\.routeLook) private var routeLook
 
     var body: some View {
         if let closing {
@@ -113,7 +114,7 @@ struct EndTripButton: View {
                                 let origin = proxy.frame(in: .named(EndTripFace.space)).origin
                                 face.view
                                     .frame(width: face.size.width, height: face.size.height)
-                                    .background(Color.boardBackground)
+                                    .background(routeLook ? Color.routeBackground : Color.boardBackground)
                                     .offset(x: -origin.x, y: -origin.y)
                             }
                             // Not crossfaded over the board

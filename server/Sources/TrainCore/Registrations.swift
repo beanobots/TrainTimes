@@ -38,6 +38,14 @@ struct Registration: Sendable, Equatable {
     /// The phone's widget push token, in lowercase hex: its widgets reload as the countdown's
     /// times change, to show the same. Nil from older apps, or once APNs no longer knows it.
     var widgetToken: String? = nil
+    /// A bus countdown's bus (the app's bus home stop): its lines at its stop, one way, counted
+    /// down to from Bus Time; `selection` then stands for none. Nil for a train's.
+    var bus: BusChoice? = nil
+
+    /// What it counts down to, for logs: a train's `Selection.trainID`, or "bus B63,B103 @308209".
+    var countdownID: String {
+        bus.map { "bus \($0.allLines.joined(separator: ",")) @\($0.stop.id)" } ?? selection.trainID
+    }
 
     /// The changed-to trains whose alerts it mentions along with its own (`Change.alertSelections`).
     var changeSelections: [Selection] { change?.alertSelections(for: selection) ?? [] }
@@ -93,6 +101,33 @@ struct RegistrationRequest: Decodable, Sendable {
     var change: Change?
     /// The phone's widget push token (`WidgetPushInfo.token`), in hex; nil from older apps.
     var widgetToken: String?
+    /// A bus countdown's bus; nil for a train's, and from older apps.
+    var bus: BusChoice?
+
+    /// Whether `bus` is one Bus Time can be asked about: up to 20 lines (the busiest stop has 17),
+    /// each a line's name, at a stop (and any across the street) in the city that's a real stop,
+    /// one of its lines stopping there (`BusStops.isReal`). Its changes, which only the app
+    /// uses, are dropped when it's stored.
+    var busIsValid: Bool { busRefusal == nil }
+
+    /// Why `bus` isn't valid (`busIsValid`), for the log; nil if it is. Only once its lines and
+    /// stop codes have passed are they written, by `BusStops.refusal(of:)`.
+    var busRefusal: String? {
+        guard let bus else { return nil }
+        let stops = [bus.stop] + (bus.otherStop.map { [$0] } ?? [])
+        guard (1...20).contains(bus.allLines.count) else { return "\(bus.allLines.count) lines" }
+        guard bus.allLines.allSatisfy({ BusTime.validLine($0) != nil }) else { return "a line isn't a line's name" }
+        guard stops.allSatisfy({ BusTime.isStopCode($0.id) && $0.name.utf8.count <= 128 }) else {
+            return "a stop's code or name isn't one"
+        }
+        guard stops.allSatisfy({ TransitRoutes.isInCity(($0.latitude, $0.longitude)) }) else {
+            return "a stop outside the city"
+        }
+        guard (bus.destination?.utf8.count ?? 0) <= 256, (bus.otherDestination?.utf8.count ?? 0) <= 256 else {
+            return "destination too long"
+        }
+        return BusStops.refusal(of: bus)
+    }
 
     /// Whether `state` is no bigger than one the app posts. Parts of it are
     /// pushed back, as it was sent, and APNs refuses a payload over 4 KB.
@@ -156,6 +191,12 @@ actor Store {
             // The phone's widget push token
             try db.transaction {
                 try db.execute("ALTER TABLE registrations ADD COLUMN widget_token TEXT; PRAGMA user_version = 3;")
+            }
+        }
+        if version < 4 {
+            // A bus countdown's bus
+            try db.transaction {
+                try db.execute("ALTER TABLE registrations ADD COLUMN bus BLOB; PRAGMA user_version = 4;")
             }
         }
     }
@@ -266,7 +307,10 @@ actor Store {
             }
         }
         let encoder = JSONEncoder()
-        try db.transaction {
+        // Kept in memory even if it can't be saved (a full disk, a lock held too long): otherwise
+        // each pass would push every countdown again, and keep pushing to tokens APNs dropped
+        var saveError: Error?
+        do { try db.transaction {
             for registration in changed {
                 try db.query("UPDATE registrations SET last_state = ?, last_push = ?, trip = ? WHERE token = ?", [
                     .blob(try encoder.encode(registration.lastState)),
@@ -278,10 +322,11 @@ actor Store {
                 try db.query("UPDATE registrations SET widget_token = NULL WHERE token = ?", [.text(registration.token)])
             }
             try Self.delete(dropped, from: db)
-        }
+        } } catch { saveError = error }
         for registration in changed { registrations[registration.token] = registration }
         for registration in widgetTokensGone { registrations[registration.token]?.widgetToken = nil }
         for token in dropped { unindex(token) }
+        if let saveError { throw saveError }
     }
 
     /// A pass's `Registration.later` for each token it read, in memory only. Each applies only
@@ -309,8 +354,8 @@ actor Store {
         try db.query("""
             INSERT OR REPLACE INTO registrations
                 (token, owner, environment, selection, trip, started, alert_kinds, revision, last_state, last_push, change,
-                 widget_token)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 widget_token, bus)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, [
             .text(registration.token), .text(registration.owner), .text(registration.environment.rawValue),
             .blob(try encoder.encode(registration.selection)), .text(registration.trip),
@@ -321,6 +366,7 @@ actor Store {
             registration.lastPush.map { .real($0.timeIntervalSinceReferenceDate) } ?? .null,
             try registration.change.map { .blob(try encoder.encode($0)) } ?? .null,
             registration.widgetToken.map { .text($0) } ?? .null,
+            try registration.bus.map { .blob(try encoder.encode($0)) } ?? .null,
         ])
     }
 
@@ -334,7 +380,7 @@ actor Store {
         var unreadable: [String] = []
         for row in try db.query("""
             SELECT token, owner, environment, selection, trip, started, alert_kinds, revision, last_state, last_push, change,
-                widget_token
+                widget_token, bus
             FROM registrations
             """) {
             guard let token = row[0].text else { continue }
@@ -349,6 +395,13 @@ actor Store {
             let alertKinds = row[6].blob.flatMap { try? decoder.decode(ServiceAlert.KnownKinds.self, from: $0).kinds }
             let lastState = row[8].blob.flatMap { try? decoder.decode(ContentState.self, from: $0) }
             let change = row[10].blob.flatMap { try? decoder.decode(Change.self, from: $0) }
+            // A bus countdown whose bus can't be read can't be kept up: it goes, as a train's
+            // selection that can't be read does
+            let bus = row[12].blob.flatMap { try? decoder.decode(BusChoice.self, from: $0) }
+            if bus == nil, row[12].blob != nil {
+                unreadable.append(token)
+                continue
+            }
             var lost: [String] = []
             if alertKinds == nil, row[6].blob != nil { lost.append("alert kinds") }
             if lastState == nil, row[8].blob != nil { lost.append("last state") }
@@ -360,7 +413,7 @@ actor Store {
                 token: token, owner: owner, environment: environment, selection: selection, trip: trip,
                 started: Date(timeIntervalSinceReferenceDate: started), alertKinds: alertKinds, revision: revision,
                 lastState: lastState, lastPush: row[9].real.map(Date.init(timeIntervalSinceReferenceDate:)),
-                change: change, widgetToken: row[11].text
+                change: change, widgetToken: row[11].text, bus: bus
             ))
         }
         if !unreadable.isEmpty {

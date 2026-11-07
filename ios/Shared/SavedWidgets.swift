@@ -16,6 +16,12 @@ struct SavedWidget: Codable, Hashable, Identifiable, Sendable {
     var destinationID: String?
     /// Whether the medium Next train widget shows the other direction beside this one.
     var bothWays: Bool
+    /// What it shows: a subway train (`selection`), a bus (`bus`) or a Citi Bike dock (`dock`).
+    var kind: SavedRouteKind = .subway
+    /// A bus widget's bus.
+    var bus: BusChoice? = nil
+    /// A Citi Bike widget's dock.
+    var dock: DockChoice? = nil
 
     /// Id of the widget migrated from the app's train before saved widgets existed.
     static let firstID = UUID(uuidString: "5D1C8A0E-0F57-4E2B-9C3A-7B1E2D4F6A01")!
@@ -30,7 +36,8 @@ struct SavedWidget: Codable, Hashable, Identifiable, Sendable {
     }
 
     init(id: UUID = UUID(), name: String = "", selection: Selection, change: Change? = nil,
-         commute: CommutingHours? = nil, destinationID: String? = nil, bothWays: Bool = false) {
+         commute: CommutingHours? = nil, destinationID: String? = nil, bothWays: Bool = false,
+         kind: SavedRouteKind = .subway, bus: BusChoice? = nil, dock: DockChoice? = nil) {
         self.id = id
         self.name = name
         self.selection = selection
@@ -38,10 +45,28 @@ struct SavedWidget: Codable, Hashable, Identifiable, Sendable {
         self.commute = commute
         self.destinationID = destinationID
         self.bothWays = bothWays
+        self.kind = kind
+        self.bus = bus
+        self.dock = dock
+    }
+
+    /// What widgets show until they pick a saved one, when Settings' home stop is a bus.
+    static func `default`(bus: BusChoice) -> SavedWidget {
+        SavedWidget(id: defaultID, selection: .fallback, bothWays: bus.bothWays, kind: .bus, bus: bus)
+    }
+
+    /// A bus widget, for `bus`.
+    static func bus(_ bus: BusChoice, name: String = "") -> SavedWidget {
+        SavedWidget(name: name, selection: .fallback, bothWays: bus.bothWays, kind: .bus, bus: bus)
+    }
+
+    /// A Citi Bike widget, for `dock`.
+    static func dock(_ dock: DockChoice, name: String = "") -> SavedWidget {
+        SavedWidget(name: name, selection: .fallback, kind: .bike, dock: dock)
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, selection, change, commute, destinationID, bothWays
+        case id, name, selection, change, commute, destinationID, bothWays, kind, bus, dock
     }
 
     /// A missing name defaults to blank; an unreadable change is dropped. New properties must
@@ -54,7 +79,12 @@ struct SavedWidget: Codable, Hashable, Identifiable, Sendable {
                   change: try? container.decodeIfPresent(Change.self, forKey: .change),
                   commute: try container.decodeIfPresent(CommutingHours.self, forKey: .commute),
                   destinationID: try container.decodeIfPresent(String.self, forKey: .destinationID),
-                  bothWays: try container.decodeIfPresent(Bool.self, forKey: .bothWays) ?? false)
+                  bothWays: try container.decodeIfPresent(Bool.self, forKey: .bothWays) ?? false,
+                  kind: (try? container.decodeIfPresent(SavedRouteKind.self, forKey: .kind)) ?? .subway,
+                  bus: try? container.decodeIfPresent(BusChoice.self, forKey: .bus),
+                  dock: try? container.decodeIfPresent(DockChoice.self, forKey: .dock))
+        // A bus or dock widget that lost its bus or dock is shown as the subway one it falls back to
+        if (kind == .bus && bus == nil) || (kind == .bike && dock == nil) { kind = .subway }
     }
 
     /// Where Next train times its trains to: the destination, when there's no change.
@@ -62,10 +92,15 @@ struct SavedWidget: Codable, Hashable, Identifiable, Sendable {
         change == nil ? destinationID.flatMap(StationDirectory.station(id:)) : nil
     }
 
-    /// The name, or the station's.
+    /// The name, or the station's, stop's or dock's.
     var title: String {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
-        return trimmed.isEmpty ? (selection.station?.name ?? "Train") : trimmed
+        guard trimmed.isEmpty else { return trimmed }
+        switch kind {
+        case .subway: return selection.station?.name ?? "Train"
+        case .bus: return bus.map { "\($0.allLines.map(BusNames.label).joined(separator: ", ")) · \($0.stopName)" } ?? "Bus"
+        case .bike: return dock?.name ?? "Citi Bike"
+        }
     }
 
     /// What to show at `date`: during commuting hours, their train and change with this one's

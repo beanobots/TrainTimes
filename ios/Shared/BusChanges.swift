@@ -57,3 +57,52 @@ extension TrainService {
         return connection
     }
 }
+
+// A change from a bus to a train (`BusChoice.changes`): each bus at your stop is timed to where
+// you get off by the timetable's minutes there (Bus Time has no times further on), then the walk,
+// and gets the first train it can catch at each change: a train's change board (`Connection`),
+// its bus drawn as a line marked a bus's (`BusLeg.route`).
+
+extension BusChoice {
+    /// As a train's change for the boards that draw one: at the first change's station, the
+    /// others its alternatives. Nil without changes.
+    var trainChange: Change? {
+        guard let changes, let first = changes.first else { return nil }
+        return Change(stationID: first.selection.stationID, routes: first.selection.routes,
+                      direction: first.selection.direction, walkMinutes: first.walkMinutes,
+                      alternatives: changes.dropFirst().map {
+                          Change.Stop(stationID: $0.selection.stationID, routes: $0.selection.routes,
+                                      direction: $0.selection.direction)
+                      })
+    }
+
+    /// Each of `buses` still to come at `date` with its ways on: for each change, the first of
+    /// its trains (`trains`, one list per change) it can catch, soonest leaving first.
+    func connections(buses: [BusArrival], trains: [[Arrival]], at date: Date) -> [Connection] {
+        guard let changes else { return [] }
+        return buses.compactMap { bus -> Connection? in
+            guard let time = bus.time, time > date else { return nil }
+            let route = BusLeg.prefix + line
+            let first = Arrival(route: route, time: time, stop: BusLeg.prefix + stop.id, lastStop: "", isLive: bus.isLive)
+            var ways: [Way] = []
+            for (index, change) in changes.enumerated() where trains.indices.contains(index) {
+                let off = time.addingTimeInterval(change.minutes * 60)
+                let walk = TimeInterval(change.walkMinutes * 60)
+                let arrival = Arrival(route: route, time: off, stop: BusLeg.prefix + change.stop.id, lastStop: "",
+                                      isLive: bus.isLive)
+                guard let train = trains[index].first(where: { $0.leaves >= off.addingTimeInterval(walk) }) else { continue }
+                let connection = Connection(first: first, arrival: arrival, next: train, walk: walk,
+                                            stationID: index == 0 ? nil : change.selection.stationID)
+                ways.append(Way(route: train.route, connection: connection, arrival: train))
+            }
+            ways.sort { ($0.arrival?.leaves ?? .distantFuture) < ($1.arrival?.leaves ?? .distantFuture) }
+            guard let soonest = ways.first?.connection else {
+                return Connection(first: first, arrival: first, next: nil, ways: [])
+            }
+            var connection = soonest
+            connection.stationID = nil
+            connection.ways = ways
+            return connection
+        }
+    }
+}

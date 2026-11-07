@@ -2,13 +2,21 @@ import SwiftUI
 
 /// Comfortable Walk, for Settings and first-run setup: how far New Trip's rides may have you walk to
 /// and from them (`NewTripView.walkChoices`). 15 to 45 minutes in fives, then No Limit at the far
-/// end. The stretch past 45 is dashed and pulls back: the thumb follows the finger at a third of
-/// its speed there, and only a drag to the very end lands on No Limit; let go short and it springs
-/// back to 45. At No Limit the whole track turns the tint and the thumb carries the infinity sign.
+/// end. The thumb follows the finger and springs to the nearest stop when let go. The stretch past
+/// 45 is dashed and pulls back: the thumb follows at a third of the finger's speed there, and only
+/// a drag to the very end springs it onto No Limit, as dragging back past halfway springs it off;
+/// let go short and it springs back to 45. At No Limit the tint grows along the whole track and the
+/// thumb carries the infinity sign.
 struct WalkSlider: View {
     @Binding var minutes: Int
-    /// How far into the resisting stretch the thumb's dragged, 0…1; 0 when it isn't.
-    @State private var pull: CGFloat = 0
+    /// Where the thumb is while it's dragged, from the track's start; nil when it rests on its stop.
+    @State private var finger: CGFloat?
+    /// Whether the thumb's dragged past 45, short of No Limit.
+    @State private var pulling = false
+    /// Whether the drag began on No Limit: back across the dashed stretch the thumb then follows the
+    /// finger, as it leaves No Limit at halfway, rather than sticking at the end and then jumping
+    /// most of the way back to 45.
+    @State private var leaving = false
 
     private static let choices = NewTripView.walkChoices.map(\.minutes)
     private static let last = choices.count - 1
@@ -17,6 +25,8 @@ struct WalkSlider: View {
     private static let give: CGFloat = 0.35
     /// How far into the last stretch the finger must be let go for No Limit.
     private static let landing: CGFloat = 0.95
+    /// How much of the track 15–45 takes; the dashed stretch to No Limit gets the rest.
+    private static let solidShare: CGFloat = 0.75
 
     /// `minutes`' stop; the one below if it's none of them.
     private var stop: Int {
@@ -26,7 +36,7 @@ struct WalkSlider: View {
     private var noLimit: Bool { stop == Self.last }
 
     private var value: String {
-        pull > 0 ? "\(Self.choices[Self.last - 1]) min…" : NewTripView.walkLabel(minutes)
+        pulling ? "\(Self.choices[Self.last - 1]) min…" : NewTripView.walkLabel(minutes)
     }
 
     var body: some View {
@@ -60,23 +70,33 @@ struct WalkSlider: View {
 
     private func track(width: CGFloat) -> some View {
         let usable = width - Self.thumb
-        let x = { (position: CGFloat) in position / CGFloat(Self.last) * usable }
-        let lastSolid = x(CGFloat(Self.last - 1)), end = x(CGFloat(Self.last))
-        let thumbX = noLimit ? end : x(CGFloat(stop)) + pull * (end - lastSolid)
+        let lastSolid = usable * Self.solidShare, end = usable
+        // 15–45 evenly across the solid share; No Limit at the far end
+        let x = { (position: CGFloat) in
+            position >= CGFloat(Self.last) ? end : position / CGFloat(Self.last - 1) * lastSolid
+        }
+        let thumbX = finger ?? (noLimit ? end : x(CGFloat(stop)))
         return ZStack(alignment: .leading) {
-            // 15–45, solid
+            // 15–45, solid, from 15's centre to 45's so the two ends match
             Capsule()
                 .fill(.quaternary)
-                .frame(width: lastSolid + Self.thumb / 2, height: 6)
-            // Past 45: dashed until No Limit's picked, solid once it is
+                .frame(width: lastSolid, height: 6)
+                .offset(x: Self.thumb / 2)
+            // Past 45, dashed, stopping at the landing ring; at No Limit the tint grows over it
             DashLine()
-                .stroke(noLimit ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary),
-                        style: StrokeStyle(lineWidth: noLimit ? 6 : 3, lineCap: .round, dash: noLimit ? [] : [3, 5]))
-                .frame(width: end - lastSolid, height: 6)
+                .stroke(.tertiary, style: StrokeStyle(lineWidth: 3, lineCap: .round, dash: [3, 5]))
+                .frame(width: max(0, end - lastSolid - Self.thumb / 2 - 4), height: 6)
                 .offset(x: lastSolid + Self.thumb / 2)
+            // No Limit's landing place: an empty ring where the thumb settles
+            Circle()
+                .strokeBorder(.tertiary, lineWidth: 2)
+                .frame(width: Self.thumb, height: Self.thumb)
+                .offset(x: end)
+                .opacity(noLimit ? 0 : 1)
             Capsule()
                 .fill(.tint)
-                .frame(width: thumbX + Self.thumb / 2, height: 6)
+                .frame(width: thumbX, height: 6)
+                .offset(x: Self.thumb / 2)
             ZStack {
                 Circle()
                     .fill(noLimit ? AnyShapeStyle(.tint) : AnyShapeStyle(.white))
@@ -85,6 +105,7 @@ struct WalkSlider: View {
                     Image(systemName: "infinity")
                         .font(.caption.weight(.bold))
                         .foregroundStyle(.white)
+                        .transition(.scale(scale: 0.4).combined(with: .opacity))
                 }
             }
             .frame(width: Self.thumb, height: Self.thumb)
@@ -95,24 +116,45 @@ struct WalkSlider: View {
         .gesture(
             DragGesture(minimumDistance: 0)
                 .onChanged { drag in
-                    let raw = (drag.location.x - Self.thumb / 2) / usable * CGFloat(Self.last)
-                    let lastStop = CGFloat(Self.last - 1)
-                    if raw <= lastStop {
-                        pull = 0
-                        set(Int(max(0, raw).rounded()))
-                    } else if noLimit && raw > lastStop + 0.5 {
-                        // Already No Limit: it stays until dragged well back
+                    if finger == nil { leaving = noLimit }
+                    let at = min(max(0, drag.location.x - Self.thumb / 2), end)
+                    // How far past 45 into the dashed stretch, 0…1 across it
+                    let past = (at - lastSolid) / (end - lastSolid)
+                    // No Limit's caught only near the end, and once caught kept until dragged well back
+                    let toNoLimit = noLimit ? past > 0.5 : past >= Self.landing
+                    let index: Int, place: CGFloat
+                    if toNoLimit {
+                        (index, place) = (Self.last, leaving ? max(at, lastSolid) : end)
+                    } else if at <= lastSolid {
+                        // Following the finger; the stop it's nearest picked
+                        (index, place) = (Int((at / lastSolid * CGFloat(Self.last - 1)).rounded()), at)
+                    } else if leaving {
+                        // Off No Limit, back toward 45: following the finger
+                        (index, place) = (Self.last - 1, at)
                     } else {
-                        set(Self.last - 1)
-                        pull = min(1, (raw - lastStop) * Self.give)
+                        // Past 45 the thumb lags the finger
+                        (index, place) = (Self.last - 1, lastSolid + past * Self.give * (end - lastSolid))
+                    }
+                    pulling = !toNoLimit && at > lastSolid
+                    // A tap, or a step onto No Limit, springs there; otherwise it tracks the finger.
+                    // Stepping off No Limit the thumb's already under it, so only its look changes
+                    if finger == nil || (toNoLimit && !noLimit) {
+                        withAnimation(.spring(duration: 0.35, bounce: 0.15)) {
+                            finger = place
+                            set(index)
+                        }
+                    } else if noLimit && !toNoLimit {
+                        finger = place
+                        withAnimation(.smooth(duration: 0.2)) { set(index) }
+                    } else {
+                        finger = place
+                        set(index)
                     }
                 }
-                .onEnded { drag in
-                    let raw = (drag.location.x - Self.thumb / 2) / usable * CGFloat(Self.last)
-                    withAnimation(.spring(duration: 0.3)) {
-                        if pull > 0 && raw >= CGFloat(Self.last - 1) + Self.landing { set(Self.last) }
-                        pull = 0
-                    }
+                .onEnded { _ in
+                    // Settles on the stop picked; short of No Limit, back to 45
+                    pulling = false
+                    withAnimation(.spring(duration: 0.35, bounce: 0.15)) { finger = nil }
                 }
         )
         .sensoryFeedback(.selection, trigger: stop)

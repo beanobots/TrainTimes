@@ -156,7 +156,9 @@ enum TimetableBuilder {
     /// "25:03:30" as seconds; times past midnight run past 24:00.
     static func seconds(_ time: String) -> Int? {
         let parts = time.split(separator: ":").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
-        guard parts.count == 3 else { return nil }
+        // Small enough not to overflow and crash the server on a garbled time; anything else
+        // odd is left for the trip's checks to drop it
+        guard parts.count == 3, parts.allSatisfy({ (-999_999...999_999).contains($0) }) else { return nil }
         return parts[0] * 3600 + parts[1] * 60 + parts[2]
     }
 

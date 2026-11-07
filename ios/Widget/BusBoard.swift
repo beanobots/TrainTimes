@@ -25,34 +25,37 @@ struct BusBoardEntry {
     static let ahead: TimeInterval = 20 * 60
     static let reload: TimeInterval = 5 * 60
 
+    /// How long `fetch` waits for the times, from its start, before drawing without the late ones.
+    static let fetchWait: TimeInterval = 8
+
     /// The trip's times now: the next buses (MTA Bus Time, through the push server) and any
-    /// train's, fetched together.
+    /// train's, fetched together. Each request's timeout only counts idle time, so on weak signal
+    /// they could hold the widget past iOS's limit and leave it blank, as the saved bus widget's
+    /// (`routeFetchWait`): whatever's late by `fetchWait` is shown unreachable.
     static func fetch(_ trip: BusTrip, otherWay: BusRide? = nil, now: Date) async -> BusBoardEntry {
-        async let stopTimes = BusTimes.arrivals(line: trip.bus.line, at: trip.bus.from, now: now)
-        async let otherTimes = otherWay.asyncMap { await BusTimes.arrivals(line: $0.line, at: $0.from, now: now) }
-        async let onwardTimes = trip.onward.asyncMap { await BusTimes.arrivals(line: $0.line, at: $0.from, now: now) }
-        var trains: [Arrival] = []
-        var trainTimes: [String: Date] = [:]
-        var trainFailed = false
-        if let train = trip.train {
-            do {
-                let board = try await TrainService.board(for: train.selection, arrivingAt: train.endStation,
-                                                         includingAlerts: false, includingOutages: false,
-                                                         waitingAfterOwnLines: TimelinePlan.firstDrawWait, now: now)
-                trains = train.selection.catchable(board.trains, now: now)
-                trainTimes = board.destinationTimes
-            } catch {
-                trainFailed = true
-            }
+        let deadline = Date.now.addingTimeInterval(Self.fetchWait)
+        let stopTimes = Task { await BusTimes.arrivals(line: trip.bus.line, at: trip.bus.from, now: now) }
+        let otherTimes = Task { await otherWay.asyncMap { await BusTimes.arrivals(line: $0.line, at: $0.from, now: now) } }
+        let onwardTimes = Task { await trip.onward.asyncMap { await BusTimes.arrivals(line: $0.line, at: $0.from, now: now) } }
+        // The train's catchable times and when each gets there; nil if the MTA couldn't be reached
+        let trainTimes = Task { () -> (trains: [Arrival], times: [String: Date])? in
+            guard let train = trip.train else { return ([], [:]) }
+            guard let board = try? await TrainService.board(for: train.selection, arrivingAt: train.endStation,
+                                                            includingAlerts: false, includingOutages: false,
+                                                            waitingAfterOwnLines: TimelinePlan.firstDrawWait, now: now)
+            else { return nil }
+            return (train.selection.catchable(board.trains, now: now), board.destinationTimes)
         }
-        let buses = await stopTimes
-        let other = await otherTimes
-        let onward = await onwardTimes
+        let train = await TrainService.value(of: trainTimes, by: deadline) ?? nil
+        let buses = await TrainService.value(of: stopTimes, by: deadline) ?? nil
+        let other = await TrainService.value(of: otherTimes, by: deadline) ?? nil
+        // Late counts as failed only for a trip that has a second bus
+        let onward = await TrainService.value(of: onwardTimes, by: deadline) ?? (trip.onward == nil ? nil : .some(nil))
         let problem = buses == nil || onward == .some(nil) ? "Couldn't reach Bus Time"
-            : trainFailed ? "Couldn't reach the MTA" : nil
-        return BusBoardEntry(trip: trip, buses: buses?.arrivals ?? [], trains: trains, trainTimes: trainTimes,
-                             problem: problem, otherWay: otherWay, otherBuses: other??.arrivals ?? [],
-                             onwardBuses: onward??.arrivals ?? [])
+            : train == nil ? "Couldn't reach the MTA" : nil
+        return BusBoardEntry(trip: trip, buses: buses?.arrivals ?? [], trains: train?.trains ?? [],
+                             trainTimes: train?.times ?? [:], problem: problem, otherWay: otherWay,
+                             otherBuses: other??.arrivals ?? [], onwardBuses: onward??.arrivals ?? [])
     }
 
     /// When the board changes after `now`, sorted: each time what it counts down to goes, and

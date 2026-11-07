@@ -6,33 +6,14 @@ struct WidgetsView: View {
     @Environment(WidgetStore.self) private var store
     @Environment(SettingsStore.self) private var settings
     @Environment(\.scenePhase) private var scenePhase
-    @State private var choosingTrain = false
-    /// The train picked for a new widget, before it's named.
-    @State private var chosenTrain: Selection?
-    /// Whether Both was picked as its direction.
-    @State private var chosenBoth = false
-    @State private var newWidget: NewWidget?
-
-    private struct NewWidget: Identifiable {
-        let id = UUID()
-        let selection: Selection
-        let bothWays: Bool
-    }
-
-    /// Defaults to Settings' default train (with its alerts); the picker sets station, lines and
-    /// direction together.
-    private var newTrain: Binding<Selection> {
-        Binding {
-            chosenTrain ?? settings.defaultTrain
-        } set: {
-            chosenTrain = $0
-        }
-    }
+    @State private var choosing = false
+    /// The widget picked (its kind, then its train, bus or dock), before it's named.
+    @State private var chosen: SavedWidget?
+    @State private var newWidget: SavedWidget?
 
     private func add() {
-        chosenTrain = nil
-        chosenBoth = false
-        choosingTrain = true
+        chosen = nil
+        choosing = true
     }
 
     /// The inputs that decide what an unconfigured (or orphaned) placed Transfers widget shows:
@@ -40,6 +21,8 @@ struct WidgetsView: View {
     private var placement: [String] {
         store.saved.widgets.map { "\($0.id) \($0.change != nil)" }
     }
+
+    @Environment(\.isSideways) private var sideways
 
     var body: some View {
         NavigationStack {
@@ -71,14 +54,17 @@ struct WidgetsView: View {
             }
             // As the Home Screen: the widgets on a wallpaper, each named under it
             .scrollContentBackground(.hidden)
-            .background(WallpaperBackdrop().ignoresSafeArea())
+            // On its side, a card over the map in its place (`sidewaysCard`)
+            .background {
+                if !sideways { WallpaperBackdrop().ignoresSafeArea() }
+            }
             .contentMargins(.top, 16, for: .scrollContent)
             // No title bar, as New Trip: the tab says where you are
             .toolbar(.hidden, for: .navigationBar)
             // Over the tab bar, by your thumb
             .safeAreaBar(edge: .bottom) {
                 Button(action: add) {
-                    Label("New Widget", systemImage: "plus")
+                    Label("New Route", systemImage: "plus")
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.primary)
                         .padding(.horizontal, 14)
@@ -89,14 +75,16 @@ struct WidgetsView: View {
                 .glassEffect(.regular.interactive(), in: Capsule())
                 .padding(.bottom, 8)
             }
+            // On its side, down the left over the map as Nearby's card, New Route at its foot
+            .sidewaysCard()
             // On dismiss, continue to AddWidget; nothing if cancelled
-            .sheet(isPresented: $choosingTrain, onDismiss: {
-                if let chosenTrain { newWidget = NewWidget(selection: chosenTrain, bothWays: chosenBoth) }
+            .sheet(isPresented: $choosing, onDismiss: {
+                if let chosen { newWidget = chosen }
             }) {
-                TrainPicker(selection: newTrain, bothWays: $chosenBoth)
+                NewWidgetPicker { chosen = $0 }
             }
             .sheet(item: $newWidget) { widget in
-                AddWidget(starting: widget.selection, bothWays: widget.bothWays)
+                AddWidget(starting: widget)
             }
             // Placed widgets change outside the app, so recount on appear and foreground
             .task { await store.countPlaced() }
@@ -116,6 +104,7 @@ private struct WidgetRow: View {
     /// As last shown while editing it.
     let look: WidgetLook
     let placed: Int
+    @Environment(\.isSideways) private var sideways
 
     /// The widget as the Home Screen shows it, then its name and how many are placed under it,
     /// as an app's name is.
@@ -124,8 +113,9 @@ private struct WidgetRow: View {
             WidgetPreview(widget: widget, look: look)
             Text("\(widget.title) · \(placed == 0 ? "Not placed" : "\(placed) placed")")
                 .font(.caption.weight(.medium))
-                .foregroundStyle(.white)
-                .shadow(color: .black.opacity(0.35), radius: 2, y: 1)
+                // White on the wallpaper; on its side, on the card
+                .foregroundStyle(sideways ? AnyShapeStyle(.secondary) : AnyShapeStyle(.white))
+                .shadow(color: .black.opacity(sideways ? 0 : 0.35), radius: 2, y: 1)
                 .lineLimit(1)
         }
         .frame(maxWidth: WidgetLook.medium.size.width)
@@ -159,7 +149,7 @@ private struct WidgetEditor: View {
             .listSectionSpacing(.compact)
             .pinnedWidget(widget.wrappedValue, look: look)
             // The name is edited in its field, as Clock's Edit Alarm does
-            .navigationTitle("Edit Widget")
+            .navigationTitle("Edit Route")
             .navigationBarTitleDisplayMode(.inline)
         }
     }
@@ -172,8 +162,8 @@ private struct AddWidget: View {
     @State private var widget: SavedWidget
     @State private var look = WidgetLook.medium
 
-    init(starting selection: Selection, bothWays: Bool) {
-        _widget = State(initialValue: SavedWidget(selection: selection, bothWays: bothWays))
+    init(starting widget: SavedWidget) {
+        _widget = State(initialValue: widget)
     }
 
     var body: some View {
@@ -184,7 +174,7 @@ private struct AddWidget: View {
             }
             .listSectionSpacing(.compact)
             .pinnedWidget(widget, look: $look)
-            .navigationTitle("New Widget")
+            .navigationTitle("New Route")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -203,8 +193,7 @@ private struct AddWidget: View {
     }
 }
 
-/// The three widgets as tiles, each its outline with its name and size: Next train comes small
-/// and medium, Transfers large.
+/// The Saved Route's three sizes as tiles, each its outline with its name and size.
 private struct LookTiles: View {
     @Binding var look: WidgetLook
 
@@ -251,31 +240,12 @@ private struct LookTiles: View {
 private struct WidgetHeader: View {
     let widget: SavedWidget
     @Binding var look: WidgetLook
-    /// Not saved: it only shows how the Home Screen may draw the widget.
-    @State private var appearance = WidgetAppearance.standard
 
     var body: some View {
         Section {
             VStack(spacing: 10) {
-                // Clear and Tinted on a stand-in wallpaper, for their glass to show
-                WidgetPreview(widget: widget, look: look, appearance: appearance)
-                    .shadow(color: .black.opacity(appearance == .standard ? 0.12 : 0), radius: 8, y: 2)
-                    .padding(appearance == .standard ? 0 : 14)
-                    .background {
-                        if appearance != .standard {
-                            WallpaperBackdrop()
-                                .clipShape(RoundedRectangle(cornerRadius: 38, style: .continuous))
-                                .transition(.opacity)
-                        }
-                    }
-                    .animation(.snappy, value: appearance)
-                Picker("Home Screen", selection: $appearance) {
-                    ForEach(WidgetAppearance.allCases) { appearance in
-                        Text(appearance.name).tag(appearance)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(maxWidth: WidgetLook.medium.size.width)
+                WidgetPreview(widget: widget, look: look)
+                    .shadow(color: .black.opacity(0.12), radius: 8, y: 2)
                 LookTiles(look: $look)
                     .frame(maxWidth: WidgetLook.medium.size.width)
             }
@@ -397,8 +367,15 @@ private struct WidgetFields: View {
     }
 
     var body: some View {
+        switch widget.kind {
+        case .subway: trainFields
+        case .bus, .bike: RouteFields(widget: $widget)
+        }
+    }
+
+    @ViewBuilder private var trainFields: some View {
         TripSections(selection: train, change: $widget.change, destinationID: $widget.destinationID,
-                     bothWays: $widget.bothWays) {
+                     bothWays: $widget.bothWays, route: $widget) {
             // Labelled like Depart from and Arrive at below it; empty shows the station's name
             VStack(alignment: .leading, spacing: 4) {
                 Text("Name")
@@ -427,6 +404,8 @@ private struct TripSections<Leading: View>: View {
     @Binding var destinationID: String?
     /// A widget's Both directions, picked as the train's direction; nil where it isn't offered.
     var bothWays: Binding<Bool>?
+    /// The route these are, whose Depart from can then be a bus stop too; nil for trains only.
+    var route: Binding<SavedWidget>?
     /// The card's header, e.g. when the other trip shows; nil for none.
     var header: String?
     /// Rows above Depart from and Arrive at, in the same card: the widget's name, or the other
@@ -447,11 +426,13 @@ private struct TripSections<Leading: View>: View {
     }
 
     init(selection: Binding<Selection>, change: Binding<Change?>, destinationID: Binding<String?>,
-         bothWays: Binding<Bool>? = nil, header: String? = nil, @ViewBuilder leading: () -> Leading) {
+         bothWays: Binding<Bool>? = nil, route: Binding<SavedWidget>? = nil, header: String? = nil,
+         @ViewBuilder leading: () -> Leading) {
         _selection = selection
         _change = change
         _destinationID = destinationID
         self.bothWays = bothWays
+        self.route = route
         self.header = header
         self.leading = leading()
     }
@@ -485,11 +466,16 @@ private struct TripSections<Leading: View>: View {
                          placeholder: "Choose a train")
         }
         .buttonStyle(.plain)
-        .accessibilityHint("Choose another station, line or direction")
+        .accessibilityHint(route == nil ? "Choose another station, line or direction"
+                                        : "Choose another station or bus stop")
         // On the button, not the Section: a Section applies modifiers to each row, header
         // and footer, and the duplicate sheets break this one
         .sheet(isPresented: $choosingTrain) {
-            TrainPicker(selection: $selection, bothWays: bothWays)
+            if let route {
+                NewWidgetPicker(kind: .subway, editing: route.wrappedValue) { route.wrappedValue.takeDeparture($0) }
+            } else {
+                TrainPicker(selection: $selection, bothWays: bothWays)
+            }
         }
     }
 
@@ -838,9 +824,15 @@ private struct ChangeRow: View {
 
     private var subtitle: String {
         let from = lines.map(selection.only) ?? selection
+        // "or the B63 to Cobble Hill, 3 min walk"
+        let buses = change.buses.map { "the \(BusNames.label($0.line)) to \($0.wayName), \($0.walkMinutes) min walk" }
+        guard !change.routes.isEmpty else {
+            return buses.joined(separator: " or ").prefix(1).uppercased() + buses.joined(separator: " or ").dropFirst()
+        }
         let heading = change.heading(for: from)
         let how = change.isAllAcross(from: from) ? "across the platform" : "\(change.walkMinutes) min walk"
-        return "\(Lines.list(change.routes, joinedBy: "or")) \(heading) · \(how)"
+        let trains = "\(Lines.list(change.routes, joinedBy: "or")) \(heading) · \(how)"
+        return buses.isEmpty ? trains : ([trains] + buses).joined(separator: ", or ")
     }
 
     /// "From the Q", when it's for only some of your lines.
@@ -851,8 +843,14 @@ private struct ChangeRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            LineBullets(routes: change.routes, size: 36)
-                .frame(width: 46)
+            Group {
+                if change.routes.isEmpty, let bus = change.buses.first {
+                    BusBadge(line: bus.line, size: 30)
+                } else {
+                    LineBullets(routes: change.routes, size: 36)
+                }
+            }
+            .frame(width: 46)
             VStack(alignment: .leading, spacing: 2) {
                 // Labelled like Depart from and Arrive at, as it shares their card
                 Text(isAlternative ? "Or change at" : "Then change at")

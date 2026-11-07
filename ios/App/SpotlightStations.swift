@@ -90,13 +90,92 @@ struct OpenStationIntent: OpenIntent {
     }
 }
 
-/// The station a Spotlight tap opened, for `AppTabs` to show its picker.
+/// The station a Spotlight tap opened, for `AppTabs` to show its picker; or the bus home stop,
+/// for Nearby to open.
 @MainActor
 @Observable
 final class StationOpening {
     static let shared = StationOpening()
 
     var station: Station?
+    var busStop: BusChoice?
+}
+
+/// Settings' home stop in Spotlight when it's a bus: "5 Av & Union St", with its lines. Only that
+/// stop, as bus stops are too many to list. Tapping it opens it on Nearby (`OpenBusStopIntent`).
+struct SpotlightBusStop: IndexedEntity {
+    static let typeDisplayRepresentation: TypeDisplayRepresentation = "Bus Stop"
+    static let defaultQuery = SpotlightBusStopQuery()
+
+    /// The MTA's stop code.
+    let id: String
+
+    /// The home stop, if it's this one.
+    var bus: BusChoice? { SharedStore.defaultBus.flatMap { $0.stop.id == id ? $0 : nil } }
+
+    var displayRepresentation: DisplayRepresentation {
+        guard let bus else { return DisplayRepresentation(title: "Bus stop") }
+        let lines = bus.allLines.map(BusNames.label).joined(separator: " ")
+        return DisplayRepresentation(title: "\(bus.stopName)", subtitle: "\(lines) · Toward \(bus.shortWayName)")
+    }
+
+    var attributeSet: CSSearchableItemAttributeSet {
+        let attributes = CSSearchableItemAttributeSet()
+        guard let bus else { return attributes }
+        let lines = bus.allLines.map(BusNames.label)
+        attributes.keywords = lines + lines.map { "\($0) bus" } + ["bus", "bus stop", "home stop"]
+        attributes.latitude = NSNumber(value: bus.stop.latitude)
+        attributes.longitude = NSNumber(value: bus.stop.longitude)
+        return attributes
+    }
+
+    private static let index = CSSearchableIndex(name: "Bus Stops")
+
+    /// Lists the home stop if it's a bus, and drops any before it: at launch and once it changes.
+    static func indexHome() async {
+        guard CSSearchableIndex.isIndexingAvailable() else { return }
+        try? await index.deleteAppEntities(ofType: SpotlightBusStop.self)
+        if let bus = SharedStore.defaultBus {
+            try? await index.indexAppEntities([SpotlightBusStop(id: bus.stop.id)])
+        }
+    }
+}
+
+struct SpotlightBusStopQuery: EntityStringQuery {
+    func entities(for identifiers: [SpotlightBusStop.ID]) async throws -> [SpotlightBusStop] {
+        identifiers.filter { $0 == SharedStore.defaultBus?.stop.id }.map(SpotlightBusStop.init(id:))
+    }
+
+    func entities(matching string: String) async throws -> [SpotlightBusStop] {
+        guard let bus = SharedStore.defaultBus else { return [] }
+        let words = ([bus.stopName] + bus.allLines).joined(separator: " ").lowercased()
+        let typed = string.lowercased().split(separator: " ")
+        return typed.allSatisfy { words.contains($0) } ? [SpotlightBusStop(id: bus.stop.id)] : []
+    }
+
+    func suggestedEntities() async throws -> [SpotlightBusStop] {
+        SharedStore.defaultBus.map { [SpotlightBusStop(id: $0.stop.id)] } ?? []
+    }
+}
+
+/// The bus home stop tapped in Spotlight: opens it on Nearby.
+struct OpenBusStopIntent: OpenIntent {
+    static let title: LocalizedStringResource = "Open Bus Stop"
+
+    @Parameter(title: "Bus Stop")
+    var target: SpotlightBusStop
+
+    init() {}
+
+    init(target: SpotlightBusStop) {
+        self.target = target
+    }
+
+    func perform() async throws -> some IntentResult {
+        let bus = target.bus
+        await MainActor.run { StationOpening.shared.busStop = bus }
+        return .result()
+    }
 }
 
 /// A Spotlight station's lines, then which way (straight to which way with one line), as the

@@ -1,3 +1,4 @@
+import AudioToolbox
 import CoreLocation
 import Observation
 import UIKit
@@ -85,6 +86,9 @@ final class WalkSession: Identifiable {
     /// Whether the walk is on the Lock Screen: off once its countdown's swiped away, or another
     /// takes its place (a widget's walk button), until `showOnLockScreen()`.
     private(set) var onLockScreen = true
+    /// Precise Location is off, even after asking for it for the walk: turns and getting there
+    /// mostly can't be told.
+    private(set) var isApproximate = false
 
     /// Another trip from where you are, by the timetable as New Trip times them, and how much
     /// sooner than yours it gets there.
@@ -107,6 +111,12 @@ final class WalkSession: Identifiable {
     private static let seenFor: TimeInterval = 20 * 60
     /// Metres from the station you got on at that count as having ridden on from it.
     private static let awayFromStation: CLLocationDistance = 300
+    /// Metres a second faster than walking or running: on the train, away from the station.
+    private static let trainSpeed: CLLocationSpeed = 8
+    /// Metres from the change's station, the end's, or the end, that count as come up there off
+    /// the train, having gone in by another entrance (`pastStation(_:)`): an exit a long block
+    /// from the station's middle, and the first fix up the street from it.
+    private static let cameUp: CLLocationDistance = 400
     /// Seconds a station check on the ride waits for a fix: one from Wi-Fi or cell comes in a
     /// few, and underground, waiting longer mostly gets none anyway.
     private static let ridingFixWait: TimeInterval = 8
@@ -133,6 +143,13 @@ final class WalkSession: Identifiable {
     private static let otherSideFixes = 3
 
     private var offFixes = 0
+    /// You've been within `awayFromStation` of the station walking to it: not, say, in a cab
+    /// on the way, for `ridingOff(_:)`.
+    private var nearedStation = false
+    /// `board()` begun from `ridingOff(_:)`, so it's only once.
+    private var autoBoarding = false
+    /// Fast fixes away from the station in a row (`ridingOff`).
+    private var fastFixes = 0
     /// Fixes in a row clearly on another sidewalk from the walk's.
     private var sideFixes = 0
     /// Each fix's sidewalk check, numbered, and the last counted or ruled out: one that comes
@@ -178,9 +195,6 @@ final class WalkSession: Identifiable {
         started = .now
         updatePathLeft()
     }
-
-    /// Whether it's walking all the way, with no train.
-    var isWalkOnly: Bool { trip == nil }
 
     /// The end's station, or walking all the way, the end.
     var destinationName: String { trip?.destination.name ?? endName }
@@ -252,6 +266,60 @@ final class WalkSession: Identifiable {
         }
         // Not a redraw for the same path, as standing still
         if left != pathLeft { pathLeft = left }
+        vibrateIfNewInstruction()
+    }
+
+    /// Settings' Vibrate During Navigation, on unless turned off.
+    static let vibratesKey = "walkVibrates"
+
+    /// The instruction last shown: the stage, and walking, what its step says. Nil until the first.
+    @ObservationIgnored private var shownInstruction: String?
+    /// Where the step last shown ends, where its instruction's done: with its words, which step
+    /// it is, rather than its place in the walk's steps, as a re-route starts them over from the
+    /// first, the same turn ahead and all.
+    @ObservationIgnored private var shownStepEnd: CLLocation?
+    /// Metres apart two steps' ends may be and still be the same turn: a re-route's walk puts its
+    /// corner a little elsewhere, a crosswalk's width short of the next corner.
+    private static let sameTurn: CLLocationDistance = 10
+    /// The instruction's check, waiting for the change under way to finish: a re-route sets the
+    /// walk, then where you are on it, and the walk with the old place on it isn't one to buzz for.
+    @ObservationIgnored private var instructionCheck: Task<Void, Never>?
+
+    /// A buzz as the instruction shown changes while walking (Settings' `vibratesKey`): a tap
+    /// with the app open; with it closed, the phone's vibration, felt in a pocket. How strong the
+    /// tap, and how many buzzes, are Settings' (`WalkVibration`).
+    private func vibrateIfNewInstruction() {
+        guard instructionCheck == nil else { return }
+        instructionCheck = Task { [weak self] in
+            self?.instructionCheck = nil
+            self?.checkInstruction()
+        }
+    }
+
+    private func checkInstruction() {
+        // The step's own words: a crossing's street named later isn't a new one. Told apart from
+        // another saying the same by where it ends, not its number: a re-route's walk numbers
+        // from 0, and "Take a left onto 4th Ave" again, at the same corner, isn't new
+        let step = nextStep
+        let shown = "\(stage.rawValue) \(step?.instruction ?? "")"
+        let end = step.flatMap { $0.points.last ?? $0.crossing?.first }
+            .map { CLLocation(latitude: $0.lat, longitude: $0.lon) }
+        let sameEnd = switch (end, shownStepEnd) {
+        case (nil, nil): true
+        case let (end?, shownEnd?): end.distance(from: shownEnd) <= Self.sameTurn
+        default: false
+        }
+        guard shown != shownInstruction || !sameEnd else { return }
+        // Not for the first, as Go's tapped, nor before or after the walk
+        let first = shownInstruction == nil
+        shownInstruction = shown
+        shownStepEnd = end
+        guard !first, isStarted, UserDefaults.standard.object(forKey: Self.vibratesKey) as? Bool ?? true else { return }
+        if UIApplication.shared.applicationState == .active {
+            WalkVibration.tap()
+        } else {
+            WalkVibration.buzz()
+        }
     }
 
     /// The steps after `nextStep`, the first on the turn card under it.
@@ -343,9 +411,12 @@ final class WalkSession: Identifiable {
     /// Where to get off the train you're on: the change's station, or the end's.
     var getOffHere: String { isLastTrain ? destinationName : getOffName }
 
-    /// On the train: "Get off at Times Sq-42 St", or "Change at DeKalb Av for the Q".
+    /// On the train: "Get off at Times Sq-42 St", or "Change at DeKalb Av for the Q", or with a
+    /// change a street walk away "Change at Livonia Av, walk to Junius St for the 3".
     var rideInstruction: String {
-        isLastTrain ? "Get off at \(destinationName)" : "Change at \(getOffName) for the \(onwardLines)"
+        guard !isLastTrain else { return "Get off at \(destinationName)" }
+        let walk = trip?.change?.streetWalk.map { ", walk to \($0.station.name)" } ?? ""
+        return "Change at \(getOffName)\(walk) for the \(onwardLines)"
     }
 
     /// The line of the train you're on or would catch.
@@ -462,11 +533,22 @@ final class WalkSession: Identifiable {
     /// walk's about to take its place), the Lock Screen's countdown.
     func stop(endingCountdown: Bool = true) {
         isStarted = false
+        if endingCountdown { endCountdown() }
         unfollow()
         untrack()
         refreshing?.cancel()
         refreshing = nil
-        if endingCountdown { Task { await TrainActivityController.endWalk() } }
+    }
+
+    /// Ends the walk's countdown, in a background task begun before location stops: with the
+    /// screen off, location was all that kept the app awake, and without it the app could be
+    /// suspended before the countdown ended, leaving its turn arrow in the Dynamic Island.
+    private func endCountdown() {
+        let task = UIApplication.shared.beginBackgroundTask(withName: "End walk countdown")
+        Task {
+            await TrainActivityController.endWalk()
+            if task != .invalid { UIApplication.shared.endBackgroundTask(task) }
+        }
     }
 
     /// On the train, at the station or the change: stops following you until you're off it.
@@ -577,7 +659,8 @@ final class WalkSession: Identifiable {
     private func follow() {
         guard following == nil else { return }
         background = CLBackgroundActivitySession()
-        following = WalkFollower { [weak self] location in self?.moved(to: location) }
+        following = WalkFollower(moved: { [weak self] location in self?.moved(to: location) },
+                                 approximate: { [weak self] approximate in self?.isApproximate = approximate })
     }
 
     private func unfollow() {
@@ -634,6 +717,7 @@ final class WalkSession: Identifiable {
         guard isStarted && stage != .arrived else { return }
         
         self.location = location
+        if ridingOff(location) { return }
         guard let walk else { return }
         let here = Walk.Point(location.coordinate)
         progress = walk.progress(at: here, after: progress?.step ?? 0)
@@ -661,14 +745,85 @@ final class WalkSession: Identifiable {
             atStation()
         case .fromTrain where isThere(location, at: end):
             stage = .arrived
+            endCountdown()
             unfollow()
             Saved.clear()
-            Task { await TrainActivityController.endWalk() }
             return
         default:
             break
         }
         Task { await postLive() }
+    }
+
+    /// Whether `location` is moving off from the station faster than walking, as on the train you
+    /// never said you were on: if so it's boarded, as "I'm on the train" would, so you aren't
+    /// followed at best accuracy, nor re-routed back, for the rest of the ride.
+    private func ridingOff(_ location: CLLocation) -> Bool {
+        guard stage == .toTrain || stage == .atStation, let station = trip?.selection.station else { return false }
+        // Already boarding: the fixes meanwhile are the train's, not the walk's to reroute on
+        if autoBoarding { return true }
+        let away = location.distance(from: station.location) > max(Self.awayFromStation, location.horizontalAccuracy)
+        if !away { nearedStation = true }
+        // Two fast fixes in a row, each with a speed iOS is sure of (under 0 when it can't tell),
+        // so one spiked fix doesn't put you on a train
+        let fast = location.speed > Self.trainSpeed && location.speedAccuracy >= 0 && location.speedAccuracy < 3
+        fastFixes = away && fast ? fastFixes + 1 : 0
+        // Gone in by another entrance, never said, and a fix from up the line: underground there
+        // were none to be fast, so it's where it is that says you rode
+        if let past = pastStation(location) {
+            autoBoarding = true
+            Task {
+                await rideOn(to: past)
+                autoBoarding = false
+            }
+            return true
+        }
+        guard away, nearedStation || stage == .atStation, fastFixes >= 2 else { return false }
+        autoBoarding = true
+        Task {
+            await board()
+            autoBoarding = false
+        }
+        return true
+    }
+
+    /// Where a fix puts you that's far past the station you were walking to, nearer the change or
+    /// the end than it: on the train still, or come up at the change, or at the end.
+    private enum Past {
+        case riding, atChange, atEnd
+    }
+
+    /// Where `location` puts you, walking to the station or at it, if it's past it: more than
+    /// `awayFromStation` from it, having been near it (not, say, starting out on the far side of
+    /// it for an express), and nearer the change's station or the end's (or the end) than it.
+    /// Nil short of that, walking to it still.
+    private func pastStation(_ location: CLLocation) -> Past? {
+        guard stage == .toTrain || stage == .atStation, nearedStation || stage == .atStation,
+              let trip, let station = trip.selection.station else { return nil }
+        let fromStation = location.distance(from: station.location)
+        guard fromStation > max(Self.awayFromStation, location.horizontalAccuracy) else { return nil }
+        let toChange = trip.change?.station.map { location.distance(from: $0.location) } ?? .infinity
+        let toEnd = min(location.distance(from: trip.destination.location), location.distance(from: end))
+        guard min(toChange, toEnd) < fromStation else { return nil }
+        let near = max(Self.cameUp, location.horizontalAccuracy)
+        if toEnd <= near, toEnd <= toChange { return .atEnd }
+        if toChange <= near { return .atChange }
+        return .riding
+    }
+
+    /// On from the station by the train you never said you were on, to `past`: boarded, as "I'm
+    /// on the train" would, and off at the change or the end if that's where you've come up, so
+    /// the countdown moves through each and you're followed again, now walking out. Not once the
+    /// walk's stopped meanwhile: off the train, it'd follow you again.
+    private func rideOn(to past: Past) async {
+        await board()
+        guard isStarted, past != .riding, stage == .riding else { return }
+        gotOff()
+        // Past the change too: on the train changed to, and off that
+        guard isStarted, past == .atEnd, stage == .changing else { return }
+        await board()
+        guard isStarted, stage == .ridingOn else { return }
+        gotOff()
     }
 
     /// Whether `location` is at `place`: within `there`, or as near as GPS can tell by a
@@ -724,7 +879,9 @@ final class WalkSession: Identifiable {
         defer { isFinding = false }
         switch stage {
         case .toTrain:
-            guard let trip, let current = walks else { return }
+            // Not back to the station once far past it, on toward where you get off: that's the
+            // ride (`pastStation(_:)`), not a wrong turn
+            guard let trip, let current = walks, pastStation(location) == nil else { return }
             let boarding = StationWays.boarding(trip.selection, from: location) ?? current.boarding
             guard let walk = try? await WalkingDirections.walk(from: location, to: boarding, along: pathLeft), stage == .toTrain else { return }
             walks?.boarding = boarding
@@ -792,6 +949,8 @@ final class WalkSession: Identifiable {
         onwardTrains = []
         arrivals = [:]
         offFixes = 0
+        nearedStation = false
+        fastFixes = 0
         sideFixes = 0
         sideCounted = sideChecks
         save()
@@ -803,9 +962,15 @@ final class WalkSession: Identifiable {
         // Not if the walk's been ended or switched again while the trains came
         guard isStarted, self.trip == trip else { return }
         if onLockScreen, let live = liveState {
-            try? await TrainActivityController.startWalk(for: trip.selection, trains: countdownTrains, walk: live)
-            liveStarted = true
-            posted = live
+            do {
+                try await TrainActivityController.startWalk(for: trip.selection, trains: countdownTrains, walk: live)
+                liveStarted = true
+                posted = live
+            } catch {
+                // Not the old trip's countdown updated with this one's trains: put up again
+                // each round, as before one's started (`keepLockScreen()`)
+                liveStarted = false
+            }
         }
     }
 
@@ -1114,6 +1279,8 @@ final class ActiveWalk {
     static let shared = ActiveWalk()
 
     var session: WalkSession?
+    /// Counts walks ended with End or Done, for New Trip to start over clean after each.
+    private(set) var endings = 0
 
     /// Starts `session`, in place of any walk already under way.
     func begin(_ session: WalkSession) {
@@ -1124,6 +1291,7 @@ final class ActiveWalk {
 
     /// Ends the walk: its location, its trains and its countdown, and the walking screen.
     func end() {
+        if session != nil { endings += 1 }
         session?.stop()
         session = nil
         WalkSession.Saved.clear()
@@ -1182,9 +1350,15 @@ final class ActiveWalk {
 private final class WalkFollower: NSObject, CLLocationManagerDelegate {
     private let manager = CLLocationManager()
     private let moved: (CLLocation) -> Void
+    /// Told whether Precise Location is off, as it starts and as it's changed.
+    private let approximate: (Bool) -> Void
+    /// When it started: iOS's first update is often its cached fix from before (on getting off,
+    /// the station you got on at), which isn't where you are.
+    nonisolated private let started = Date.now
 
-    init(moved: @escaping (CLLocation) -> Void) {
+    init(moved: @escaping (CLLocation) -> Void, approximate: @escaping (Bool) -> Void) {
         self.moved = moved
+        self.approximate = approximate
         super.init()
         manager.delegate = self
         manager.activityType = .otherNavigation
@@ -1197,6 +1371,11 @@ private final class WalkFollower: NSObject, CLLocationManagerDelegate {
         manager.allowsBackgroundLocationUpdates = true
         manager.showsBackgroundLocationIndicator = true
         manager.startUpdatingLocation()
+        // Approximate Location's fixes are a few hundred metres out: never at a turn or the
+        // station, nor off the walk. Precise for now, if you'll allow it
+        if manager.accuracyAuthorization == .reducedAccuracy {
+            manager.requestTemporaryFullAccuracyAuthorization(withPurposeKey: "Walking")
+        }
     }
 
     /// Metres moved between fixes while walking.
@@ -1217,7 +1396,8 @@ private final class WalkFollower: NSObject, CLLocationManagerDelegate {
     }
 
     nonisolated func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
-        guard let location = locations.last else { return }
+        guard let location = locations.last, location.horizontalAccuracy >= 0,
+              location.timestamp > started.addingTimeInterval(-10) else { return }
         Task { @MainActor in
             // Not one already on its way when stopped
             guard self.manager.delegate != nil else { return }
@@ -1225,5 +1405,36 @@ private final class WalkFollower: NSObject, CLLocationManagerDelegate {
         }
     }
 
+    /// As it starts, and when Precise Location's turned on or off.
+    nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        let approximate = manager.accuracyAuthorization == .reducedAccuracy
+        Task { @MainActor in
+            guard self.manager.delegate != nil else { return }
+            self.approximate(approximate)
+        }
+    }
+
     nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {}
+}
+
+/// How a walk's new instruction is felt. With the app open it's a haptic tap; with it closed only
+/// the phone's own vibration plays, once.
+enum WalkVibration {
+    /// The tap, with the app open: the error pattern's taps, then a heavy thump.
+    @MainActor static func tap() {
+        let notice = UINotificationFeedbackGenerator()
+        let thump = UIImpactFeedbackGenerator(style: .heavy)
+        notice.prepare()
+        thump.prepare()
+        notice.notificationOccurred(.error)
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(350))
+            thump.impactOccurred(intensity: 1)
+        }
+    }
+
+    /// The phone's vibration, with the app closed.
+    static func buzz() {
+        AudioServicesPlaySystemSound(kSystemSoundID_Vibrate)
+    }
 }

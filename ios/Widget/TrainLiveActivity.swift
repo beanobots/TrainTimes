@@ -30,7 +30,7 @@ struct TrainLiveActivity: Widget {
                         HStack(alignment: .center) {
                             VStack(alignment: .leading, spacing: 4) {
                                 HStack(spacing: 6) {
-                                    LineBullet(route: trainRoute(context), size: 24)
+                                    RouteMark(route: trainRoute(context), size: 24)
                                     Text(context.attributes.stationName).font(.subheadline.bold())
                                 }
                                 Text(context.attributes.heading).font(.caption).foregroundStyle(.secondary)
@@ -75,7 +75,7 @@ struct TrainLiveActivity: Widget {
                 } else {
                     // The mark goes here; the compact countdown has no room for it
                     HStack(spacing: 2) {
-                        LineBullet(route: trainRoute(context), size: 20)
+                        RouteMark(route: trainRoute(context), size: 20)
                         statusMark(context, size: 10)
                             .foregroundStyle(statusColor(context))
                     }
@@ -90,7 +90,7 @@ struct TrainLiveActivity: Widget {
                     ViewThatFits(in: .horizontal) {
                         HStack(spacing: 3) {
                             if walk.phase != .fromTrain && walk.phase != .off {
-                                LineBullet(route: trainRoute(context), size: 16)
+                                RouteMark(route: trainRoute(context), size: 16)
                             }
                             minutes
                         }
@@ -111,7 +111,7 @@ struct TrainLiveActivity: Widget {
                         .accessibilityLabel("\(walk.distance), \(walk.instruction)")
                 } else {
                     // No room for the countdown; VoiceOver still gives the due time
-                    LineBullet(route: trainRoute(context), size: 20)
+                    RouteMark(route: trainRoute(context), size: 20)
                         .accessibilityValue("\(status(context)), \(Spoken.clock(shownState(context).train))")
                 }
             }
@@ -126,7 +126,7 @@ private struct CountdownBanner: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
-                LineBullet(route: trainRoute(context), size: 28)
+                RouteMark(route: trainRoute(context), size: 28)
                 VStack(alignment: .leading, spacing: 0) {
                     Text(context.attributes.stationName).font(.headline).foregroundStyle(.white)
                     Text(context.attributes.heading).font(.caption).foregroundStyle(Color.boardGray)
@@ -165,7 +165,8 @@ private struct CountdownBanner: View {
                 Text(context.attributes.ends.map { $0 <= .now } ?? false
                      ? "This countdown has ended."
                      : context.isStale && shownState(context).train <= .now && !isAtStation(context)
-                     ? "This train is due. Tap refresh for new times."
+                     ? (context.attributes.bus == nil ? "This train is due. Tap refresh for new times."
+                                                      : "This bus is due. Tap refresh for new times.")
                      : "Updated \(Spoken.clock(shownState(context).updated))")
                     .font(.caption)
                     .foregroundStyle(Color.boardGray)
@@ -278,7 +279,7 @@ private func walkFooter(_ context: ActivityViewContext<TrainActivityAttributes>,
     switch walk.phase {
     case .toTrain, .atStation, .changing:
         HStack(spacing: 8) {
-            LineBullet(route: trainRoute(context), size: 28)
+            RouteMark(route: trainRoute(context), size: 28)
             VStack(alignment: .leading, spacing: 0) {
                 markedCountdown(context, markSize: 12, size: 24)
                     .foregroundStyle(statusColor(context))
@@ -290,10 +291,11 @@ private func walkFooter(_ context: ActivityViewContext<TrainActivityAttributes>,
         }
     case .riding:
         HStack(spacing: 8) {
-            LineBullet(route: trainRoute(context), size: 28)
+            RouteMark(route: trainRoute(context), size: 28)
             VStack(alignment: .leading, spacing: 0) {
-                if let getOff = walk.getOff, getOff > .now {
-                    Text(timerInterval: Date.now...getOff, countsDown: true)
+                // One `now`: a second, later one could pass `getOff` and make the range trap
+                if let getOff = walk.getOff, case let now = Date.now, getOff > now {
+                    Text(timerInterval: now...getOff, countsDown: true)
                         .font(.system(size: 24, weight: .bold, design: .rounded))
                         .monospacedDigit()
                         .foregroundStyle(.white)
@@ -347,10 +349,11 @@ private func sizedWalkCountdown(_ context: ActivityViewContext<TrainActivityAttr
 /// The compact island's countdown: to the train, to getting off on it, or to getting there.
 private func walkCountdown(_ context: ActivityViewContext<TrainActivityAttributes>, walk: WalkState) -> Text {
     if walksToTrain(walk), isAtStation(context) { return Text(AtStation.shortLabel) }
-    guard let target = walkTarget(context, walk: walk), target > .now else {
+    let now = Date.now
+    guard let target = walkTarget(context, walk: walk), target > now else {
         return Text(walk.phase == .fromTrain || walk.phase == .off ? "Now" : "Due")
     }
-    return Text(timerInterval: Date.now...target, countsDown: true)
+    return Text(timerInterval: now...target, countsDown: true)
 }
 
 /// Whether the walk's countdown is to a train to catch, not getting off or getting there.
@@ -376,12 +379,12 @@ extension Color {
 /// The state to draw, moved on to the next train once the current one has gone: held at the
 /// station a while first (`AtStation`).
 private func shownState(_ context: ActivityViewContext<TrainActivityAttributes>) -> TrainActivityAttributes.ContentState {
-    context.state.movedOn(at: .now, holding: AtStation.seconds)
+    context.state.movedOn(at: .now, holding: context.state.heldSeconds)
 }
 
 /// Whether the counted-down train is due and still at the station.
 private func isAtStation(_ context: ActivityViewContext<TrainActivityAttributes>) -> Bool {
-    AtStation.covers(shownState(context).train, at: .now)
+    AtStation.covers(shownState(context).train, at: .now, seconds: context.state.heldSeconds)
 }
 
 /// ↻ and a lit walk button (stops the countdown).
@@ -397,7 +400,7 @@ private func buttons(_ context: ActivityViewContext<TrainActivityAttributes>) ->
 /// (`short` where there's no room for it).
 private func countdown(_ context: ActivityViewContext<TrainActivityAttributes>, short: Bool = false) -> Text {
     let state = shownState(context)
-    if isAtStation(context) { return Text(short ? AtStation.shortLabel : AtStation.label) }
+    if isAtStation(context) { return Text(atLabel(context, short: short)) }
     return Text(timerInterval: min(state.updated, state.train)...state.train, countsDown: true)
 }
 
@@ -406,7 +409,7 @@ private func countdown(_ context: ActivityViewContext<TrainActivityAttributes>, 
 private func markedCountdown(_ context: ActivityViewContext<TrainActivityAttributes>, markSize: CGFloat, size: CGFloat) -> some View {
     HStack(spacing: 4) {
         statusMark(context, size: markSize)
-        Text(isAtStation(context) ? AtStation.label : TimerText.placeholder(seconds: shownState(context).train.timeIntervalSinceNow))
+        Text(isAtStation(context) ? atLabel(context, short: false) : TimerText.placeholder(seconds: shownState(context).train.timeIntervalSinceNow))
             .hidden()
             .overlay(alignment: .trailing) {
                 countdown(context).multilineTextAlignment(.trailing)
@@ -444,6 +447,26 @@ private func noticeLabel(_ notice: String) -> some View {
         .accessibilityLabel("Alert: \(notice)")
 }
 
+/// "At Station", or for a bus "At Stop"; `short` where there's no room.
+private func atLabel(_ context: ActivityViewContext<TrainActivityAttributes>, short: Bool) -> String {
+    guard context.attributes.bus != nil else { return short ? AtStation.shortLabel : AtStation.label }
+    return AtStation.busLabel
+}
+
+/// A line's bullet, or for a bus countdown's ("bus:B63") its badge.
+private struct RouteMark: View {
+    let route: String
+    let size: CGFloat
+
+    var body: some View {
+        if let line = BusLeg.line(of: route) {
+            BusBadge(line: line, size: size)
+        } else {
+            LineBullet(route: route, size: size)
+        }
+    }
+}
+
 /// The counted-down train's line, which may be another line running on yours.
 private func trainRoute(_ context: ActivityViewContext<TrainActivityAttributes>) -> String {
     shownState(context).route ?? context.attributes.selection.firstRoute
@@ -455,10 +478,13 @@ private func trainRoute(_ context: ActivityViewContext<TrainActivityAttributes>)
 private func summary(_ context: ActivityViewContext<TrainActivityAttributes>) -> Text {
     let state = shownState(context)
     var text = Text(verbatim: Spoken.clock(state.train))
-    guard !state.following.isEmpty else { return text }
+    // Not those already gone when it's drawn
+    let now = Date.now
+    let shown = state.following.indices.filter { state.following[$0] > now }
+    guard !shown.isEmpty else { return text }
     text = Text("\(text) · then ")
-    for index in state.following.indices {
-        if index > 0 { text = Text("\(text)\(Text(verbatim: ", "))") }
+    for index in shown {
+        if index != shown.first { text = Text("\(text)\(Text(verbatim: ", "))") }
         if let line = otherLine(context, index: index, spoken: false) {
             text = Text("\(text)\(Text(verbatim: line + " "))")
         }
@@ -484,12 +510,16 @@ private func spokenSummary(_ context: ActivityViewContext<TrainActivityAttribute
 private func otherLine(_ context: ActivityViewContext<TrainActivityAttributes>, index: Int, spoken: Bool) -> String? {
     guard let routes = shownState(context).followingRoutes, index < routes.count,
           routes[index] != trainRoute(context) else { return nil }
+    if spoken, let bus = BusLeg.line(of: routes[index]) { return BusBadge.spokenName(bus) }
     return spoken ? Lines.name(of: routes[index]) : LineStyle.of(routes[index]).label
 }
 
-/// Whole minutes until `date`, updating as the clock does ("9 minutes").
+/// Whole minutes until `date`, updating as the clock does ("9 minutes"). A countdown timer at
+/// minute precision, which stops at 0 once `date` passes with no push to redraw, where an
+/// offset would count back up.
 private func minutesLeft(until date: Date) -> Text {
-    Text(.currentDate, format: .offset(to: date, allowedFields: [.minute], maxFieldCount: 1, sign: .never))
+    Text(.currentDate, format: .timer(countingDownIn: min(.now, date)..<date, showsHours: false,
+                                      maxPrecision: .seconds(60)))
 }
 
 // MARK: Previews

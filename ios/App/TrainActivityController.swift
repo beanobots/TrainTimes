@@ -10,12 +10,13 @@ import WidgetKit
 /// own in between.
 enum TrainActivityController {
     enum Problem: LocalizedError {
-        case notAllowed, noTrains
+        case notAllowed, noTrains, noBuses
 
         var errorDescription: String? {
             switch self {
             case .notAllowed: "Live Activities are off for Leeway. Turn them on in Settings › Leeway."
             case .noTrains: "There's no train you can catch right now."
+            case .noBuses: "There's no bus due at your stop right now."
             }
         }
     }
@@ -178,7 +179,7 @@ enum TrainActivityController {
     private static func moveOnLater(_ activity: Activity<TrainActivityAttributes>, from state: CountdownState) {
         let id = activity.id, train = state.train
         movingOn[id]?.cancel()
-        let at = train.addingTimeInterval(AtStation.seconds)
+        let at = train.addingTimeInterval(state.heldSeconds)
         guard at > .now else {
             movingOn[id] = nil
             return
@@ -291,7 +292,7 @@ enum TrainActivityController {
         }
     }
 
-    /// Puts up a walk with no train, walking all the way (`WalkSession.isWalkOnly`): its turns
+    /// Puts up a walk with no train, walking all the way (a `WalkSession` with no trip): its turns
     /// and when you'll get there, as walking out from a train. No station or line, so nothing for
     /// the widgets or the push server to follow; it's stale only once its time's up.
     static func startPlainWalk(_ walk: WalkState) async throws {
@@ -344,6 +345,7 @@ enum TrainActivityController {
             let walks = running.filter { $0.content.state.walk != nil }
             guard !walks.isEmpty else { return }
             for activity in walks {
+                await forgetMovingOn(activity.id)
                 await activity.end(nil, dismissalPolicy: .immediate)
             }
             if running.isEmpty { await tellWidgets(nil) }
@@ -406,6 +408,68 @@ enum TrainActivityController {
         return train ?? nil
     }
 
+    // MARK: Bus
+
+    /// Counts down to the next bus at `bus`, a bus home stop, replacing any running countdown.
+    /// Returns that bus's arrival. The push server keeps it up from Bus Time, as it does a
+    /// train's from the feeds; without it (no Bus Time key there, say), it moves on to the next
+    /// bus by itself, and gets new times when the app runs, ↻ is tapped, or iOS gives a
+    /// background refresh.
+    @discardableResult
+    static func start(bus: BusChoice) async throws -> Date {
+        try await inTurn { try await startBusNow(bus, widgetID: nil) }
+    }
+
+    /// A saved bus widget's walk button: stops the countdown if it's this widget's bus, else
+    /// counts down to it.
+    static func toggle(bus: BusChoice, widgetID: String) async throws {
+        try await inTurn {
+            let shown = SharedStore.loadCountdown()?.isShown(onWidget: widgetID, for: bus.countdownID) ?? false
+            if shown && running.contains(where: { $0.attributes.bus?.countdownID == bus.countdownID }) {
+                await endActivities()
+                await tellWidgets(nil)
+            } else {
+                _ = try await startBusNow(bus, widgetID: widgetID)
+            }
+        }
+    }
+
+    private static func startBusNow(_ bus: BusChoice, widgetID: String?) async throws -> Date {
+        guard ActivityAuthorizationInfo().areActivitiesEnabled else { throw Problem.notAllowed }
+        let now = Date.now
+        guard let state = await busState(bus, after: nil, now: now) else { throw Problem.noBuses }
+        let ends = now.addingTimeInterval(CountdownState.lifetime)
+        let attributes = TrainActivityAttributes(selection: Selection(stationID: "", routes: [], direction: .north),
+                                                 stationName: bus.stopName, heading: "Toward \(bus.shortWayName)",
+                                                 ends: ends, bus: bus)
+        let activity: Activity<TrainActivityAttributes>
+        do {
+            activity = try Activity.request(attributes: attributes, content: content(state, ends: ends, serverBacked: false),
+                                            pushType: .token)
+        } catch {
+            // Maybe only the push token (a build without push notifications); try without
+            activity = try Activity.request(attributes: attributes, content: content(state, ends: ends, serverBacked: false))
+        }
+        await ActivityPush.watch(activity, started: now)
+        await moveOnLater(activity, from: state)
+        await endActivities(except: activity.id)
+        // Its widget's walk button lit, and any other countdown's gone from theirs
+        await tellWidgets(SharedStore.Countdown(trainID: bus.countdownID, ends: ends, widgetID: widgetID))
+        await ActivityPush.scheduleRefreshIfNeeded()
+        return state.train
+    }
+
+    /// `bus`'s countdown from Bus Time, as the push server makes it (`CountdownState(buses:after:now:)`).
+    /// Nil if Bus Time can't be reached or has none coming.
+    private static func busState(_ bus: BusChoice, after last: Date?, now: Date) async -> CountdownState? {
+        // Only the chosen stop's buses, as the server's: not a line's across the street
+        guard let times = await BusTimes.arrivals(lines: bus.allLines, at: bus.place, onlyAt: bus.stop.id, now: now) else { return nil }
+        let buses = times.arrivals.compactMap { arrival in
+            arrival.time.map { CountdownBus(line: arrival.line, destination: arrival.destination, time: $0, isLive: arrival.isLive) }
+        }
+        return CountdownState(buses: buses, after: last, now: now)
+    }
+
     /// Fetches new times for every running countdown: same train while it's coming, else the
     /// next. With no trains it stays up, saying so, until stopped.
     static func refresh() async {
@@ -423,6 +487,16 @@ enum TrainActivityController {
         var changed: Set<String> = []
         // Not a walk's: its walk refreshes it (`refresh()`)
         for activity in running where activity.content.state.walk == nil {
+            // A bus's from Bus Time: the same bus while it's coming, else the next
+            if let bus = activity.attributes.bus {
+                let shown = activity.content.state.movedOn(at: .now, holding: activity.content.state.heldSeconds)
+                if let state = await busState(bus, after: shown.train, now: .now) {
+                    await post(state, to: activity)
+                } else {
+                    await redraw(activity)
+                }
+                continue
+            }
             let selection = activity.attributes.selection
             let settings = SharedStore.loadSettings()
             let now = Date.now
@@ -509,8 +583,13 @@ enum TrainActivityController {
     /// walk just started this one. Trains near you doesn't show it.
     private static func reloadWidgets(from old: SharedStore.Countdown?, to countdown: SharedStore.Countdown?) async {
         guard old != countdown else { return }
-        for trainID in Set([old?.trainID, countdown?.trainID].compactMap { $0 }) {
+        let ids = Set([old?.trainID, countdown?.trainID].compactMap { $0 })
+        for trainID in ids where !trainID.hasPrefix(BusLeg.prefix) {
             await WidgetCenter.shared.reloadWidgets(showing: trainID)
+        }
+        // A bus's: saved bus widgets aren't found by train, so all of them, for their walk buttons
+        if ids.contains(where: { $0.hasPrefix(BusLeg.prefix) }) {
+            WidgetCenter.shared.reloadTimelines(ofKind: WidgetKind.train)
         }
         if countdown?.widgetID?.hasPrefix(WidgetKind.directions + " ") != true {
             WidgetCenter.shared.reloadTimelines(ofKind: WidgetKind.directions)

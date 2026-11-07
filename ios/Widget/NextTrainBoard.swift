@@ -20,6 +20,7 @@ struct NextTrainBoard: View {
     @Environment(\.widgetFamily) private var widgetFamily
     @Environment(\.boardFamily) private var boardFamily
     @Environment(\.widgetRenderingMode) private var renderingMode
+    @Environment(\.routeLook) private var routeLook
     @Environment(\.accessibilityDifferentiateWithoutColor) private var withoutColor
 
     private var family: WidgetFamily { boardFamily ?? widgetFamily }
@@ -31,8 +32,10 @@ struct NextTrainBoard: View {
     /// With a walking time, the countdown is to when to leave.
     private var walking: Bool { entry.selection.walkMinutes > 0 }
     private var noTrains: String { entry.problem ?? "No \(entry.lineLabel) trains predicted" }
-    /// Medium, showing both directions: the other way's trains.
-    private var otherWay: OtherWay? { family == .systemMedium && !noTransfer ? entry.otherWay : nil }
+    /// Medium (and the Saved Route's large), showing both directions: the other way's trains.
+    private var otherWay: OtherWay? {
+        (family == .systemMedium || (isLarge && routeLook)) && !noTransfer ? entry.otherWay : nil
+    }
 
     var body: some View {
         if controls {
@@ -45,17 +48,26 @@ struct NextTrainBoard: View {
         } else {
             VStack(alignment: .leading, spacing: isSmall ? 8 : 6) {
                 header
-                if let otherWay {
+                if let otherWay, isLarge {
+                    // Side by side, each with its next three under it
+                    HStack(alignment: .top, spacing: 8) {
+                        wayColumn(heading: entry.heading, trains: entry.trains, problem: entry.problem)
+                        wayColumn(heading: otherWay.selection.heading, trains: otherWay.trains, problem: otherWay.problem)
+                    }
+                    .padding(.top, 4)
+                } else if let otherWay {
                     HStack(spacing: 6) {
                         wayBox(heading: entry.heading, trains: entry.trains, problem: entry.problem)
                         wayBox(heading: otherWay.selection.heading, trains: otherWay.trains, problem: otherWay.problem)
                     }
+                } else if routeLook, isLarge, let next {
+                    routeLarge(next)
                 } else if noTransfer, isLarge, let next {
                     TopCard(entry: entry, train: next, later: laterMinutes, marks: marks).padding(.top, 4)
                     // As WaysBoard's large message, in line with the card's contents
                     Text("No transfer selected")
                         .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Color.boardText)
+                        .foregroundStyle(BoardInk.text)
                         .padding(.top, 8)
                         .padding(.leading, 14)
                 } else if let next {
@@ -78,7 +90,7 @@ struct NextTrainBoard: View {
                     BoardBox {
                         Text(noTrains)
                             .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(Color.boardText)
+                            .foregroundStyle(BoardInk.text)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
@@ -103,7 +115,7 @@ struct NextTrainBoard: View {
                     .overlay {
                         Image(systemName: "arrow.clockwise")
                             .font(.system(size: 16, weight: .bold))
-                            .foregroundStyle(Color.boardGray)
+                            .foregroundStyle(BoardInk.gray)
                             .accessibilityLabel("Refreshing")
                     }
             } else {
@@ -111,15 +123,28 @@ struct NextTrainBoard: View {
             }
             if isSmall {
                 // Beside ✕ there's room for only the lines; the card showed the way
-                if !entry.closes { smallHeading }
+                if !entry.closes {
+                    smallHeading
+                } else if routeLook {
+                    // The Saved Route names the place, not the way, beside ✕: where it fits whole
+                    // on a line or two, as beside several lines' bullets it may not
+                    let name = entry.selection.station?.cardName ?? entry.stationName
+                    ViewThatFits(in: .horizontal) {
+                        Text(name).lineLimit(1)
+                        Text(name.replacing(" ", with: "\n", maxReplacements: 1)).lineLimit(2)
+                        Color.clear.frame(width: 0, height: 0)
+                    }
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(BoardInk.text)
+                }
             } else if isLarge {
                 VStack(alignment: .leading, spacing: 0) {
                     Text(entry.stationName)
                         .font(BoardStyle.large.nameFont)
-                        .foregroundStyle(Color.boardText)
-                    Text(entry.heading)
+                        .foregroundStyle(BoardInk.text)
+                    Text(otherWay == nil ? entry.heading : "Both directions")
                         .font(BoardStyle.large.headingFont)
-                        .foregroundStyle(Color.boardGray)
+                        .foregroundStyle(BoardInk.gray)
                 }
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
@@ -128,13 +153,13 @@ struct NextTrainBoard: View {
                 // Each box names its direction
                 Text(entry.stationName)
                     .font(.body.bold())
-                    .foregroundStyle(Color.boardText)
+                    .foregroundStyle(BoardInk.text)
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
             } else {
-                Text("\(entry.stationName) \(Text(entry.heading).font(.footnote).foregroundStyle(Color.boardGray))")
+                Text("\(entry.stationName) \(Text(entry.heading).font(.footnote).foregroundStyle(BoardInk.gray))")
                     .font(.body.bold())
-                    .foregroundStyle(Color.boardText)
+                    .foregroundStyle(BoardInk.text)
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
                     .accessibilityLabel("\(entry.stationName), \(entry.heading)")
@@ -162,7 +187,7 @@ struct NextTrainBoard: View {
             Text(wrapped(short)).lineLimit(short.contains(" ") ? 2 : 1).minimumScaleFactor(0.6)
         }
         .font(.footnote.weight(.semibold))
-        .foregroundStyle(Color.boardText)
+        .foregroundStyle(BoardInk.text)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(full)
     }
@@ -185,8 +210,18 @@ struct NextTrainBoard: View {
         let seconds = entry.selection.leaveTime(for: train).timeIntervalSince(entry.date)
         // "0:00" fits at 48; longer times and the walker take room from it
         let digits: CGFloat = seconds >= 3599 ? 0.62 : seconds >= 599 ? 0.78 : 1
-        return VStack(alignment: .leading, spacing: 0) {
+        // Centred in the box: the countdown, its next train's minutes and arrival under it
+        return VStack(alignment: .center, spacing: 2) {
             countdown(train, size: (walking ? 40 : 48) * digits)
+            // The Saved Route: the next one's minutes under it
+            if routeLook, let then = laterMinutes.first {
+                Text("then \(then.label)")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(BoardInk.gray)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
             arrival(train)
         }
     }
@@ -210,19 +245,24 @@ struct NextTrainBoard: View {
         VStack(alignment: .leading, spacing: 0) {
             Text(heading)
                 .font(.footnote.weight(.semibold))
-                .foregroundStyle(Color.boardGray)
+                .foregroundStyle(BoardInk.gray)
             if let train = trains.first {
                 let later = trains.dropFirst().first
+                // At each size, the next one's minutes go before the countdown shrinks, so a
+                // longer "then 12 min" doesn't cost this side the line and size the other has
                 ViewThatFits {
                     wayTimes(train, later: later, size: 38, details: true)
+                    wayTimes(train, later: nil, size: 38, details: true)
                     wayTimes(train, later: later, size: 30, details: true)
+                    wayTimes(train, later: nil, size: 30, details: true)
                     wayTimes(train, later: later, size: 26, details: true)
-                    wayTimes(train, later: later, size: 26, details: false)
+                    wayTimes(train, later: nil, size: 26, details: true)
+                    wayTimes(train, later: nil, size: 26, details: false)
                 }
             } else {
                 Text(problem ?? "None predicted")
                     .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Color.boardText)
+                    .foregroundStyle(BoardInk.text)
                     .padding(.top, 4)
             }
         }
@@ -230,11 +270,12 @@ struct NextTrainBoard: View {
         .minimumScaleFactor(0.8)
         .padding(.horizontal, 12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 16).fill(Color.boardText.opacity(0.07)))
+        .background(BoardTile())
         .accessibilityElement(children: .combine)
     }
 
-    /// The countdown to `train`, then with `details` its line, its time and the minutes to `later`.
+    /// The countdown to `train`, then with `details` its line, its time and the minutes to `later`
+    /// (left off without one).
     private func wayTimes(_ train: Arrival, later: Arrival?, size: CGFloat, details: Bool) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             countdown(train, size: size)
@@ -244,7 +285,7 @@ struct NextTrainBoard: View {
                     let then = later.map { " · then \(MinutesToGo(until: entry.selection.leaveTime(for: $0), from: entry.date).label)" }
                     Text(train.time.clock + (then ?? ""))
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(Color.boardText)
+                        .foregroundStyle(BoardInk.text)
                         .monospacedDigit()
                         .fixedSize()
                 }
@@ -254,9 +295,130 @@ struct NextTrainBoard: View {
         }
     }
 
-    /// The next two's minutes to go (to leave, with a walking time).
+    /// The next two's minutes to go (to leave, with a walking time); the Saved Route's, just the
+    /// next one's.
     private var laterMinutes: [MinutesToGo] {
-        later.prefix(2).map { MinutesToGo(until: entry.selection.leaveTime(for: $0), from: entry.date) }
+        later.prefix(routeLook ? 1 : 2).map { minutesToGo($0) }
+    }
+
+    private func minutesToGo(_ train: Arrival) -> MinutesToGo {
+        MinutesToGo(until: entry.selection.leaveTime(for: train), from: entry.date)
+    }
+
+    // MARK: Saved Route large
+
+    /// The countdown card, then the next three as a departures board: where each goes, when it
+    /// leaves and the minutes to go.
+    private func routeLarge(_ train: Arrival) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                countdown(train, size: 48)
+                Spacer(minLength: 0)
+                HStack(spacing: 5) {
+                    LineBullet(route: train.route, size: 18)
+                    Text("leaves \(train.time.clock)")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(BoardInk.text)
+                        .monospacedDigit()
+                }
+                .lineLimit(1)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("\(Lines.name(of: train.route)) leaves at \(Spoken.clock(train.time))")
+            }
+            .padding(.horizontal, 14)
+            .frame(maxWidth: .infinity, minHeight: WaysBoard.boxHeight)
+            .background(BoardTile())
+            .padding(.top, 4)
+            if !later.isEmpty {
+                Text("Then")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(BoardInk.gray)
+                    .padding(.leading, 10)
+                VStack(spacing: 0) {
+                    ForEach(later.prefix(3), id: \.self) { thenRow($0) }
+                }
+            }
+        }
+    }
+
+    /// One of the next rides: its line, where it goes, when it leaves, the minutes to go.
+    private func thenRow(_ train: Arrival) -> some View {
+        HStack(spacing: 10) {
+            LineBullet(route: train.route, size: 22).frame(width: 38)
+            Text(train.terminal ?? Lines.name(of: train.route))
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(BoardInk.text)
+                .minimumScaleFactor(0.8)
+            Spacer(minLength: 4)
+            Text(train.time.clock)
+                .font(.subheadline)
+                .foregroundStyle(BoardInk.gray)
+            Text(minutesToGo(train).label)
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(train.statusColor(scheduled: BoardInk.color(.text, route: routeLook)))
+                .frame(minWidth: 58, alignment: .trailing)
+        }
+        .monospacedDigit()
+        .lineLimit(1)
+        .padding(.horizontal, 10)
+        .frame(height: 30)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(Lines.name(of: train.route)) to \(train.terminal ?? "its last stop"), \(Spoken.clock(train.time)), \(status(train))")
+    }
+
+    /// One direction on large showing both, as medium's box with the next three listed under it.
+    private func wayColumn(heading: String, trains: [Arrival], problem: String?) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(heading)
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(BoardInk.gray)
+            if let train = trains.first {
+                countdown(train, size: 40)
+                HStack(spacing: 4) {
+                    LineBullet(route: train.route, size: 14)
+                    Text("leaves \(train.time.clock)")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(BoardInk.text)
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("\(Lines.name(of: train.route)) leaves at \(Spoken.clock(train.time))")
+                let then = trains.dropFirst().prefix(3)
+                if !then.isEmpty {
+                    Divider().padding(.vertical, 8)
+                    Text("Then")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(BoardInk.gray)
+                    ForEach(Array(then), id: \.self) { next in
+                        HStack {
+                            Text(next.time.clock)
+                                .font(.footnote)
+                                .foregroundStyle(BoardInk.gray)
+                            Spacer(minLength: 4)
+                            Text(minutesToGo(next).label)
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(next.statusColor(scheduled: BoardInk.color(.text, route: routeLook)))
+                        }
+                        .padding(.top, 4)
+                    }
+                }
+            } else {
+                Text(problem ?? "None predicted")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(BoardInk.text)
+                    .padding(.top, 4)
+            }
+        }
+        .monospacedDigit()
+        .lineLimit(1)
+        .minimumScaleFactor(0.8)
+        .padding(12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(BoardTile())
+        .accessibilityElement(children: .combine)
+    }
+
+    private func status(_ train: Arrival) -> String {
+        train.isLive ? "live" : "scheduled"
     }
 
     private func leavesColumn(_ train: Arrival) -> some View {
@@ -272,7 +434,7 @@ struct NextTrainBoard: View {
         if let destination = entry.destination, let time = entry.destinationTimes[train.trip] {
             Text("Arrive \(time.clock)")
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(Color.boardGray)
+                .foregroundStyle(BoardInk.gray)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
                 .accessibilityLabel("Arrives at \(destination.name) at \(Spoken.clock(time))")

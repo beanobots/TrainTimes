@@ -17,12 +17,7 @@ enum Nearby {
         var id: String { station.id }
 
         /// "0.3 mi" or "0.5 km" per locale; at least 0.1, never in feet.
-        var distance: String {
-            let unit: UnitLength = Locale.current.measurementSystem == .metric ? .kilometers : .miles
-            let value = max(Measurement(value: meters, unit: UnitLength.meters).converted(to: unit).value, 0.1)
-            return Measurement(value: value, unit: unit)
-                .formatted(.measurement(width: .abbreviated, usage: .asProvided, numberFormatStyle: .number.precision(.fractionLength(1))))
-        }
+        var distance: String { Nearby.distance(meters) }
 
         /// As `TripPlanner.walkSeconds(_:)` times it; at least 1.
         var walkMinutes: Int {
@@ -61,6 +56,14 @@ enum Nearby {
 
     /// So the app can reload it when location is turned on.
     static let widgetKind = "NearbyWidget"
+
+    /// "0.3 mi" or "0.5 km" per locale; at least 0.1, never in feet.
+    static func distance(_ meters: Double) -> String {
+        let unit: UnitLength = Locale.current.measurementSystem == .metric ? .kilometers : .miles
+        let value = max(Measurement(value: meters, unit: UnitLength.meters).converted(to: unit).value, 0.1)
+        return Measurement(value: value, unit: unit)
+            .formatted(.measurement(width: .abbreviated, usage: .asProvided, numberFormatStyle: .number.precision(.fractionLength(1))))
+    }
 
     /// Opens the app to grant location: it asks the first time, or opens Settings if it was
     /// turned off.

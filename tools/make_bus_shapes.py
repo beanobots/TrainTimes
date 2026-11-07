@@ -12,8 +12,10 @@ pale bus routes on Nearby's and New Trip's maps (NearbyLines.swift).
 As make_shapes.py does for the subway: each line's shapes, the longest first,
 leaving out any that runs along one already listed (so a two-way street is
 drawn once, and a one-way pair twice), each simplified and written the same
-way. Lines are keyed by their names as Bus Time's and Google's both come to
-(`BusTime.canonical` on the server): "B63", "M15+" for Select Bus Service.
+way. Lines are keyed by their names as riders, Bus Time's PublishedLineName and
+Google's have them, the GTFS's route_short_name ("Q6", not its route_id "Q06"),
+as `BusTime.canonical` on the server writes them: "B63", "M15+" for Select Bus
+Service.
 """
 import csv
 import json
@@ -33,15 +35,26 @@ def canonical(line):
     return name
 
 
+def line_names(feed):
+    """Each of `feed`'s route ids: its line's name, `canonical` of its route_short_name ("Q6"
+    for the route id "Q06", "M15+" for "M15-SBS"), or of the route id if it has none."""
+    names = {}
+    with open(f"{feed}/routes.txt", encoding="utf-8-sig", newline="") as file:
+        for route in csv.DictReader(file):
+            names[route["route_id"]] = canonical(route.get("route_short_name", "").strip() or route["route_id"])
+    return names
+
+
 def main(target_dir, feeds):
     trips = defaultdict(Counter)  # line: how many trips run each shape
     points = defaultdict(list)
     for feed in feeds:
+        names = line_names(feed)
         # Shape ids are only each feed's own
         with open(f"{feed}/trips.txt", encoding="utf-8-sig", newline="") as file:
             for trip in csv.DictReader(file):
                 if trip.get("shape_id"):
-                    trips[canonical(trip["route_id"])][(feed, trip["shape_id"])] += 1
+                    trips[names.get(trip["route_id"]) or canonical(trip["route_id"])][(feed, trip["shape_id"])] += 1
         with open(f"{feed}/shapes.txt", encoding="utf-8-sig", newline="") as file:
             for row in csv.DictReader(file):
                 points[(feed, row["shape_id"])].append((int(row["shape_pt_sequence"]),

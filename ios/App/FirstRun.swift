@@ -26,7 +26,6 @@ struct SightSection: Identifiable {
     let sights: [Sight]
 
     var id: String { title }
-    var chipID: String { "chip \(title)" }
 
     static let all: [SightSection] = [
         SightSection(title: "Landmarks", jump: "Landmarks", sights: [
@@ -186,6 +185,16 @@ final class LeaveReminder: NSObject, UNUserNotificationCenterDelegate {
     }
 }
 
+/// Home (or the hotel) as setup's just picked it, for Nearby, under setup's cover, to start
+/// loading the trains, buses and docks near it at once, ready as setup closes. Nearby goes by it
+/// only until your location's found; it's not kept past this run.
+@MainActor
+@Observable
+final class SetupHome {
+    static let shared = SetupHome()
+    var location: CLLocation?
+}
+
 /// First-run setup's answers, kept until Start Riding saves them. Walking, biking and step-free
 /// start as Settings has them, for setup run again.
 @MainActor
@@ -204,6 +213,14 @@ final class FirstRunAnswers {
     var bothWays = false
     /// No primary stop: no default train.
     var noStop = false
+    /// The stop's a bus (`bus`), not `train`: the page's Subway or Bus, Subway at first.
+    var busPicked = false
+    /// The bus stops nearest Home, nearest first, once fetched with Bus picked; nil before.
+    private(set) var busPlaces: [NearbyBusPlace]?
+    /// Bus Time couldn't be reached for `busPlaces`; tried again by Try Again or picking Bus again.
+    private(set) var busPlacesFailed = false
+    /// The home stop as a bus, as suggested or picked; nil before Bus's.
+    var bus: BusChoice?
     var walkPreference = UserDefaults.standard.string(forKey: WalkRouting.preferenceKey)
         .flatMap(WalkPreference.init(rawValue:)) ?? .balanced
     var walkMinutes = UserDefaults.standard.object(forKey: NewTripView.walkMinutesKey) as? Int ?? NewTripView.defaultWalkMinutes
@@ -218,10 +235,41 @@ final class FirstRunAnswers {
     func setHome(_ place: TripPlace, isHotel: Bool) {
         home = place
         visiting = isHotel
+        SetupHome.shared.location = place.location
         nearby = place.location.map { Nearby.stations(near: $0, limit: 3) } ?? []
         train = nearby.first.map { Self.towardManhattan(at: $0.station) }
         bothWays = false
         noStop = false
+        busPlaces = nil
+        busPlacesFailed = false
+        bus = nil
+    }
+
+    /// The bus stops nearest Home, and the nearest's lines suggested, the first way.
+    func findBusPlaces() async {
+        guard busPlaces == nil, let home, let from = home.location else { return }
+        busPlacesFailed = false
+        let fetched = await NearbyBuses.places(near: from, wait: NearbyBuses.appWait)
+        // Home changed meanwhile (Back, another address): these are the old one's
+        guard self.home == home, busPlaces == nil else { return }
+        guard let found = fetched else {
+            busPlacesFailed = true
+            return
+        }
+        busPlaces = Array(found.prefix(3))
+        if bus == nil, let first = found.first { choose(first) }
+    }
+
+    /// Picks `place`, every line there, its first way.
+    func choose(_ place: NearbyBusPlace) {
+        bus = place.choice(lines: place.lines(at: .now).map(\.line), way: 0, both: false)
+        noStop = false
+    }
+
+    /// The place `bus` is at, if it's one of `busPlaces`.
+    var busPlace: NearbyBusPlace? {
+        guard let bus else { return nil }
+        return busPlaces?.first { $0.ways.contains { $0.stop.id == bus.stop.id || $0.stop.id == bus.otherStop?.id } }
     }
 
     /// Picks `station`, all its lines, toward Manhattan.
@@ -275,11 +323,17 @@ final class FirstRunAnswers {
         if noStop {
             app.defaultTrain = nil
             app.defaultBothWays = false
+            app.defaultBus = nil
+        } else if busPicked, let bus {
+            app.defaultBus = bus
         } else if let train {
             app.defaultTrain = train
             app.defaultBothWays = bothWays
+            app.defaultBus = nil
         }
         app.stepFree = stepFree
+        // For the Citi Bike and Nearby widgets, which can't read the app's own defaults
+        app.bikeKinds = bikeKinds.shared
         settings.settings = app
         let defaults = UserDefaults.standard
         defaults.set(walkPreference.rawValue, forKey: WalkRouting.preferenceKey)
@@ -328,8 +382,87 @@ private final class HomeSearch: NSObject, MKLocalSearchCompleterDelegate {
         didSet {
             guard query != oldValue else { return }
             if isBlank { results = [] }
-            completer.queryFragment = query
+            finding = !isBlank
+            failed = false
+            completer.queryFragment = Self.searchable(query)
         }
+    }
+
+    /// Waiting on MapKit's suggestions for what's typed, which can take seconds.
+    private(set) var finding = false
+    /// The last suggestions couldn't be had (offline, or Apple Maps throttling), rather than
+    /// there being none, so the page doesn't say no address was found.
+    private(set) var failed = false
+
+    /// Whether `typed` came in at once, longer than one word more than `before`: AutoFill or a
+    /// paste, of what's most likely a whole address.
+    static func arrivedWhole(_ typed: String, after before: String) -> Bool {
+        typed.count - before.count >= 12 && typed.contains(where: \.isNumber) && typed.contains(" ")
+    }
+
+    /// The street types an address's unit may follow, for `searchable(_:)`.
+    private static let streetTypes = "st|street|ave|avenue|av|rd|road|pl|place|blvd|boulevard|dr|drive|ln|lane|ct|court|"
+        + "ter|terrace|pkwy|parkway|way|sq|square|hwy|broadway"
+
+    /// What's typed as MapKit finds it best. AutoFill's address has its apartment, which MapKit
+    /// doesn't know and then matches poorly: "Apt 4B", "#4B", "3rd Floor", or "St 4B," dropped.
+    /// And a bare street number after the house number, as "181 18", which MapKit matches to
+    /// anything with an 18 in it, made "181 18th".
+    static func searchable(_ typed: String) -> String {
+        var text = typed.replacingOccurrences(of: "\n", with: ", ")
+        // (rule, what's kept): a unit after a street type keeps the street type
+        let units: [(String, String)] = [
+            (#"[,\s]*\b\d+(?:st|nd|rd|th)\s+(?:fl|floor)\b\.?"#, ""),
+            (#"[,\s]*\b(?:apt|apartment|unit|suite|ste|fl|floor|rm|room|ph|penthouse|bldg|building)\b\.?\s*#?\s*(?:[\w-]*\d[\w-]*|[a-z]\b)"#, ""),
+            (#"[,\s]*#\s*[\w-]+"#, ""),
+            (#"(\b(?:"# + streetTypes + #")\b\.?)\s+(?:\d{1,4}[a-z]?|[a-z]\d{1,3}|\d{1,4}-[a-z])(?=\s*(?:,|$))"#, "$1"),
+        ]
+        for (rule, kept) in units {
+            text = text.replacingOccurrences(of: rule, with: kept, options: [.regularExpression, .caseInsensitive])
+        }
+        var words = text.split(separator: " ").map(String.init)
+        guard let first = words.first,
+              first.range(of: #"^\d+(-\d+)?[a-z]?$"#, options: [.regularExpression, .caseInsensitive]) != nil else {
+            return text.trimmingCharacters(in: .whitespaces)
+        }
+        // Straight after the house number, or after E, W and so on
+        let sides: Set<String> = ["e", "w", "n", "s", "e.", "w.", "n.", "s.", "east", "west", "north", "south"]
+        for index in words.indices.dropFirst() where index == 1 || sides.contains(words[index - 1].lowercased()) {
+            let comma = words[index].hasSuffix(",") ? "," : ""
+            guard words[index].first?.isNumber == true, let number = Int(words[index].dropLast(comma.count)),
+                  (1..<300).contains(number) else { continue }
+            words[index] = ordinal(number) + comma
+        }
+        return words.joined(separator: " ")
+    }
+
+    /// 1st, 2nd, 3rd, 4th, 11th, 21st.
+    private static func ordinal(_ number: Int) -> String {
+        let suffix = (11...13).contains(number % 100) ? "th" : [1: "st", 2: "nd", 3: "rd"][number % 10] ?? "th"
+        return "\(number)\(suffix)"
+    }
+
+    /// Only New York's: the area round the stations takes in New Jersey too.
+    private static func inNewYork(_ result: MKLocalSearchCompletion) -> Bool {
+        result.subtitle.range(of: #"\bNY\b"#, options: .regularExpression) != nil
+    }
+
+    /// The addresses starting as typed first ("181 18th St" for "181 18"), then those at the same
+    /// house number, then the rest as MapKit has them. Once a house number's typed, only those
+    /// with it: MapKit's slow to answer, and its places for "1", "18" and so on (1 WTC) would show
+    /// meanwhile.
+    private static func ranked(_ results: [MKLocalSearchCompletion], for query: String) -> [MKLocalSearchCompletion] {
+        let words = searchable(query).lowercased().split(separator: " ")
+        guard let house = words.first, house.first?.isNumber == true else { return results }
+        let start = words.prefix(2).joined(separator: " ")
+        let number = #"\b"# + NSRegularExpression.escapedPattern(for: String(house)) + #"\b"#
+        func rank(_ result: MKLocalSearchCompletion) -> Int {
+            let title = result.title.lowercased()
+            return title.hasPrefix(start) ? 0 : title.hasPrefix(house + " ") ? 1 : 2
+        }
+        return results
+            .filter { ($0.title + " " + $0.subtitle).range(of: number, options: .regularExpression) != nil }
+            .enumerated().sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }.map(\.element)
     }
 
     /// Nothing typed but spaces: no suggestions, and Home shows again.
@@ -346,23 +479,59 @@ private final class HomeSearch: NSObject, MKLocalSearchCompleterDelegate {
     // The completer calls back on the main thread
     nonisolated func completerDidUpdateResults(_ completer: MKLocalSearchCompleter) {
         MainActor.assumeIsolated {
-            results = isBlank ? [] : completer.results
+            results = isBlank ? [] : Self.ranked(completer.results.filter(Self.inNewYork), for: query)
+            finding = false
+            failed = false
         }
     }
 
     nonisolated func completer(_ completer: MKLocalSearchCompleter, didFailWithError error: Error) {
         MainActor.assumeIsolated {
             results = []
+            finding = false
+            failed = MapsTrouble(error) != nil
         }
     }
 
+    /// A whole address, as AutoFill gives it, looked up straight away rather than waiting on
+    /// suggestions for it: in New York and within `reach` of a station, or nil.
+    static func place(forAddress typed: String) async -> TripPlace? {
+        let request = MKLocalSearch.Request()
+        request.naturalLanguageQuery = searchable(typed)
+        request.resultTypes = .address
+        request.region = served
+        request.regionPriority = .required
+        guard let items = try? await MKLocalSearch(request: request).start().mapItems,
+              let item = items.first(where: { item in
+                  item.addressRepresentations?.fullAddress(includingRegion: false, singleLine: true)?
+                      .range(of: #"\bNY\b"#, options: .regularExpression) != nil
+              }),
+              let name = item.name,
+              let nearest = Nearby.nearest(to: item.location), nearest.meters <= reach else { return nil }
+        // "181 18th St, Brooklyn, NY  11215" → "Brooklyn, NY 11215", as a suggestion's line under it
+        let full = item.addressRepresentations?.fullAddress(includingRegion: false, singleLine: true) ?? ""
+        let detail = full.replacingOccurrences(of: name + ", ", with: "")
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        let coordinate = item.location.coordinate
+        return TripPlace(name: name, detail: detail.isEmpty ? nil : detail,
+                         point: TripPlace.Point(latitude: coordinate.latitude, longitude: coordinate.longitude))
+    }
+
     /// Where `result` is, and whether it's a hotel; nil if it can't be found, or is further than
-    /// `reach` from a station.
-    static func place(for result: MKLocalSearchCompletion) async -> (place: TripPlace, isHotel: Bool)? {
+    /// `reach` from a station. Throws if Apple Maps couldn't be asked (`MapsTrouble`): offline,
+    /// it's not that the place isn't there.
+    static func place(for result: MKLocalSearchCompletion) async throws -> (place: TripPlace, isHotel: Bool)? {
         let request = MKLocalSearch.Request(completion: result)
         request.region = served
         request.regionPriority = .required
-        guard let item = try? await MKLocalSearch(request: request).start().mapItems.first,
+        let items: [MKMapItem]
+        do {
+            items = try await MKLocalSearch(request: request).start().mapItems
+        } catch {
+            if MapsTrouble(error) != nil { throw error }
+            return nil
+        }
+        guard let item = items.first,
               let nearest = Nearby.nearest(to: item.location), nearest.meters <= reach else { return nil }
         let coordinate = item.location.coordinate
         let place = TripPlace(name: result.title, detail: shortened(result.subtitle),
@@ -392,11 +561,18 @@ struct FirstRunView: View {
     @FocusState private var searching: Bool
     /// The suggestion being looked up after a tap.
     @State private var looking: MKLocalSearchCompletion?
+    /// An address that came in whole (AutoFill) being looked up (`lookUp(_:)`).
+    @State private var lookingUp = false
     /// Suggestions looked up and not found near the subway.
     @State private var notFound: Set<MKLocalSearchCompletion> = []
+    /// Suggestions tapped that couldn't be looked up, as offline: said so, not as not found,
+    /// and tried again on another tap.
+    @State private var unreachable: Set<MKLocalSearchCompletion> = []
     /// A visit's last day picked past the three offered.
     @State private var laterDay = false
     @State private var choosingTrain = false
+    /// The stops map: fitted round Home and its stations, then turned NY North if Settings says.
+    @State private var stopsPosition = MapCameraPosition.automatic
     /// Each way's next trains from the stop shown, once fetched.
     @State private var trains: [Direction: [Arrival]] = [:]
 
@@ -419,12 +595,19 @@ struct FirstRunView: View {
         .background(Color(uiColor: .systemBackground))
         .onAppear { location.start() }
         .sheet(isPresented: $choosingTrain) {
-            TrainPicker(selection: Binding {
+            HomeStopPicker(train: Binding {
                 answers.train ?? SharedStore.load()
             } set: {
                 answers.train = $0
                 answers.noStop = false
-            }, bothWays: $answers.bothWays)
+            }, bothWays: $answers.bothWays, bus: Binding {
+                answers.busPicked ? answers.bus : nil
+            } set: { bus in
+                // Nil when a train's picked
+                answers.busPicked = bus != nil
+                if let bus { answers.bus = bus }
+                answers.noStop = false
+            })
         }
     }
 
@@ -524,6 +707,12 @@ struct FirstRunView: View {
                 if !search.isBlank {
                     if !search.results.isEmpty {
                         results
+                    } else if search.finding || lookingUp {
+                        searchNote("Searching…", finding: true)
+                    } else if search.failed {
+                        searchNote("Couldn't reach Apple Maps", finding: false)
+                    } else {
+                        searchNote("No addresses found in New York", finding: false)
                     }
                 } else if let home = answers.home {
                     placeCard(home)
@@ -548,13 +737,45 @@ struct FirstRunView: View {
         Page(title: "This your stop?", subtitle: "The closest to home. Siri, the countdown and your first widget show it.",
              next: next) {
             VStack(spacing: 8) {
-                if !answers.nearby.isEmpty {
-                    stopsMap
-                        .padding(.bottom, 6)
+                if answers.home != nil {
+                    Picker("Kind", selection: $answers.busPicked) {
+                        Label("Subway", systemImage: "tram.fill").tag(false)
+                        Label("Bus", systemImage: "bus.fill").tag(true)
+                    }
+                    .pickerStyle(.segmented)
+                    .padding(.bottom, 6)
                 }
-                if let train = answers.train, let station = train.station {
-                    stopCard(train, at: station)
-                        .padding(.bottom, 14)
+                if answers.busPicked {
+                    if let places = answers.busPlaces, !places.isEmpty {
+                        stopsMap
+                            .padding(.bottom, 6)
+                    } else if answers.busPlacesFailed {
+                        Button {
+                            Task { await answers.findBusPlaces() }
+                        } label: {
+                            Label("Couldn't reach Bus Time. Try again", systemImage: "arrow.clockwise")
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 60)
+                    } else if answers.busPlaces == nil, answers.home != nil {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                            Text("Finding bus stops…").foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 60)
+                    }
+                    if let bus = answers.bus {
+                        busCard(bus)
+                            .padding(.bottom, 14)
+                    }
+                } else {
+                    if !answers.nearby.isEmpty {
+                        stopsMap
+                            .padding(.bottom, 6)
+                    }
+                    if let train = answers.train, let station = train.station {
+                        stopCard(train, at: station)
+                            .padding(.bottom, 14)
+                    }
                 }
                 VStack(spacing: 0) {
                     anotherStop
@@ -569,6 +790,11 @@ struct FirstRunView: View {
         }
         // Again for another station or its lines, not for another way
         .task(id: answers.train.map { "\($0.stationID) \($0.routes)" }) { await fetchTrains() }
+        // Bus stops looked for once Bus is picked
+        .task(id: answers.busPicked) {
+            if answers.busPicked { await answers.findBusPlaces() }
+        }
+        .animation(.default, value: answers.busPicked)
     }
 
     private var walkingPage: some View {
@@ -588,29 +814,11 @@ struct FirstRunView: View {
                 .background(Self.faint, in: Self.card)
                 .padding(.bottom, 14)
 
-                cardLabel("Comfortable walk to or from a ride")
-                HStack(spacing: 6) {
-                    ForEach(NewTripView.walkChoices, id: \.minutes) { choice in
-                        let on = choice.minutes == answers.walkMinutes
-                        Button {
-                            answers.walkMinutes = choice.minutes
-                        } label: {
-                            VStack(spacing: 1) {
-                                Text(choice.minutes == 60 ? "60+" : "\(choice.minutes)").font(.subheadline.weight(.semibold))
-                                Text(choice.miles).font(.caption2)
-                                    .foregroundStyle(on ? AnyShapeStyle(.white.opacity(0.8)) : AnyShapeStyle(.secondary))
-                            }
-                            .foregroundStyle(on ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
-                            .frame(maxWidth: .infinity, minHeight: 50)
-                            .background(on ? AnyShapeStyle(.tint) : AnyShapeStyle(.quaternary), in: Capsule())
-                            .contentShape(Capsule())
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(NewTripView.walkLabel(choice.minutes))
-                        .accessibilityAddTraits(on ? .isSelected : [])
-                    }
-                }
-                footnote("Minutes. New Trip offers rides with a walk up to this long at each end.")
+                WalkSlider(minutes: $answers.walkMinutes)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .background(Self.faint, in: Self.card)
+                footnote("New Trip offers rides with a walk up to this long at each end.")
                     .padding(.bottom, 14)
 
                 cardLabel("Accessibility")
@@ -677,7 +885,15 @@ struct FirstRunView: View {
                             Text(row.title)
                             Spacer()
                             if let routes = row.routes {
-                                LineBullets(routes: routes, size: 20)
+                                if routes.first.flatMap(BusLeg.line(of:)) != nil {
+                                    HStack(spacing: 2) {
+                                        ForEach(routes.compactMap(BusLeg.line(of:)).prefix(3), id: \.self) {
+                                            BusBadge(line: $0, size: 20)
+                                        }
+                                    }
+                                } else {
+                                    LineBullets(routes: routes, size: 20)
+                                }
                             }
                             Text(row.value).foregroundStyle(.secondary)
                         }
@@ -720,6 +936,11 @@ struct FirstRunView: View {
         }
         if answers.noStop {
             rows.append(("tram.fill", "Your stop", "None", nil))
+        } else if answers.busPicked, let bus = answers.bus {
+            // Bus lines as routes marked a bus's, for their badges
+            rows.append(("bus.fill", "Your stop", bus.stopName, bus.allLines.map { BusLeg.prefix + $0 }))
+            rows.append(bus.bothWays && bus.otherStop != nil ? ("arrow.up.arrow.down", "Way", "Both ways", nil)
+                                                             : ("arrow.up", "Way", "Toward \(bus.shortWayName)", nil))
         } else if let train = answers.train {
             rows.append(("tram.fill", "Your stop", train.station?.name ?? "", train.routes))
             rows.append(answers.bothWays ? ("arrow.up.arrow.down", "Way", "Both ways", nil)
@@ -765,17 +986,41 @@ struct FirstRunView: View {
         done()
     }
 
-    /// Looks `result` up and makes it Home, or marks it as not found near the subway.
+    /// Looks `result` up and makes it Home, or marks it as not found near the subway, or as
+    /// unreachable if Apple Maps couldn't be asked.
     private func pick(_ result: MKLocalSearchCompletion) {
         guard looking == nil else { return }
         looking = result
+        unreachable.remove(result)
         Task {
             defer { looking = nil }
-            guard let found = await HomeSearch.place(for: result) else {
+            let found: (place: TripPlace, isHotel: Bool)?
+            do {
+                found = try await HomeSearch.place(for: result)
+            } catch {
+                unreachable.insert(result)
+                return
+            }
+            guard let found else {
                 notFound.insert(result)
                 return
             }
             answers.setHome(found.place, isHotel: found.isHotel)
+            laterDay = false
+            search.query = ""
+            searching = false
+        }
+    }
+
+    /// AutoFill's (or a pasted) address made Home at once, if it's found in New York near the
+    /// subway; otherwise left to the suggestions. Not once one's been tapped.
+    private func lookUp(_ typed: String) {
+        lookingUp = true
+        Task {
+            defer { lookingUp = false }
+            guard let place = await HomeSearch.place(forAddress: typed),
+                  search.query == typed, looking == nil else { return }
+            answers.setHome(place, isHotel: false)
             laterDay = false
             search.query = ""
             searching = false
@@ -797,7 +1042,8 @@ struct FirstRunView: View {
                 }
             }
             for await (direction, found) in group {
-                if let found { trains[direction] = found }
+                // Not the last station's, landing after another's picked
+                if let found, !Task.isCancelled { trains[direction] = found }
             }
         }
     }
@@ -828,6 +1074,9 @@ struct FirstRunView: View {
                 .onSubmit {
                     if let first = search.results.first { pick(first) }
                 }
+                .onChange(of: search.query) { before, typed in
+                    if HomeSearch.arrivedWhole(typed, after: before) { lookUp(typed) }
+                }
             if !search.query.isEmpty {
                 Button {
                     search.query = ""
@@ -841,6 +1090,20 @@ struct FirstRunView: View {
         .padding(.horizontal, 16)
         .frame(minHeight: 52)
         .background(Self.faint, in: Capsule())
+    }
+
+    /// In place of suggestions: still searching, or none found.
+    private func searchNote(_ text: String, finding: Bool) -> some View {
+        HStack(spacing: 12) {
+            if finding { ProgressView() }
+            Text(text)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .frame(minHeight: 52)
+        .background(Self.faint, in: Self.card)
     }
 
     /// MapKit's suggestions for what's typed, each looked up when tapped.
@@ -860,7 +1123,9 @@ struct FirstRunView: View {
                             .accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: 1) {
                             Text(result.title).font(.headline)
-                            Text(notFound.contains(result) ? "Not found near the subway" : HomeSearch.shortened(result.subtitle))
+                            Text(notFound.contains(result) ? "Not found near the subway"
+                                 : unreachable.contains(result) ? "Couldn't reach Apple Maps"
+                                 : HomeSearch.shortened(result.subtitle))
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
                         }
@@ -972,7 +1237,7 @@ struct FirstRunView: View {
 
     /// Home and the stations nearest it; a tap on one picks it.
     private var stopsMap: some View {
-        Map(initialPosition: .automatic, interactionModes: []) {
+        Map(position: $stopsPosition, interactionModes: []) {
             if let point = answers.home?.point {
                 Annotation(answers.visiting ? "Hotel" : "Home",
                            coordinate: CLLocationCoordinate2D(latitude: point.latitude, longitude: point.longitude)) {
@@ -984,7 +1249,32 @@ struct FirstRunView: View {
                         .overlay(Circle().stroke(.white, lineWidth: 2))
                 }
             }
-            ForEach(answers.nearby) { near in
+            if answers.busPicked {
+                ForEach(answers.busPlaces ?? [], id: \.self) { place in
+                    if let stop = place.ways.first?.stop {
+                        let chosen = !answers.noStop && answers.busPlace == place
+                        Annotation(place.name, coordinate: CLLocationCoordinate2D(latitude: stop.latitude,
+                                                                                  longitude: stop.longitude)) {
+                            Button {
+                                answers.choose(place)
+                            } label: {
+                                HStack(spacing: 2) {
+                                    ForEach(place.lines(at: .now).prefix(3).map(\.line), id: \.self) {
+                                        BusBadge(line: $0, size: chosen ? 24 : 18)
+                                    }
+                                }
+                                .padding(chosen ? 3 : 0)
+                                .background(chosen ? Color.white : Color.clear, in: RoundedRectangle(cornerRadius: 9))
+                                .overlay(RoundedRectangle(cornerRadius: 9)
+                                    .stroke(chosen ? Color.accentColor : Color.clear, lineWidth: 3))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(place.name)
+                        }
+                    }
+                }
+            }
+            ForEach(answers.busPicked ? [] : answers.nearby) { near in
                 let chosen = !answers.noStop && answers.train?.station?.id == near.station.id
                 Annotation(near.station.name, coordinate: near.station.coordinate) {
                     Button {
@@ -1001,6 +1291,12 @@ struct FirstRunView: View {
             }
         }
         .mapStyle(.standard(pointsOfInterest: .excludingAll))
+        // A little further out turned, for the corners of what it fitted
+        .turnsNorth($stopsPosition, widening: 1.3)
+        // Fitted again round new stations, or bus stops
+        .onChange(of: answers.nearby.map(\.id)) { stopsPosition = .automatic }
+        .onChange(of: answers.busPicked) { stopsPosition = .automatic }
+        .onChange(of: answers.busPlaces?.count) { stopsPosition = .automatic }
         .frame(height: 140)
         .clipShape(Self.card)
     }
@@ -1054,9 +1350,122 @@ struct FirstRunView: View {
         .overlay(Self.card.strokeBorder(picked ? AnyShapeStyle(.tint) : AnyShapeStyle(.clear), lineWidth: 2))
     }
 
+    /// A bus stop: its lines' badges, the walk, then with more than one line which you ride (any,
+    /// ticked as tiles), then which way. Each way is its own stop, one each side of the street, so
+    /// each says which side; Both ways keeps the two. A stop picked from Another stop, not among
+    /// those found near Home, shows just its way.
+    private func busCard(_ bus: BusChoice) -> some View {
+        let picked = !answers.noStop
+        let place = answers.busPlace
+        let allLines = place?.lines(at: .now).map(\.line) ?? bus.allLines
+        let lines = bus.allLines
+        return VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                HStack(spacing: 3) {
+                    ForEach(lines.prefix(3), id: \.self) { BusBadge(line: $0, size: lines.count > 1 ? 32 : 40) }
+                }
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(bus.stopName).font(.title3.weight(.semibold)).lineLimit(2)
+                    if let minutes = place?.walkMinutes {
+                        Label("\(minutes) min walk from \(answers.visiting ? "your hotel" : "home")", systemImage: "figure.walk")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(16)
+            .accessibilityElement(children: .combine)
+            if let place, allLines.count > 1 {
+                Divider().padding(.leading, 16)
+                cardLabel("Which lines do you ride? One or more")
+                    .padding(.horizontal, 12)
+                    .padding(.top, 12)
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
+                    ForEach(place.lines(at: .now), id: \.line) { pick in
+                        busLineTile(pick, on: lines.contains(pick.line)) {
+                            var chosen = lines.contains(pick.line) ? lines.filter { $0 != pick.line } : lines + [pick.line]
+                            // Never none; in the stop's order
+                            guard !chosen.isEmpty else { return }
+                            chosen = allLines.filter(chosen.contains)
+                            // The same way, found among the new lines' ways, whose order can differ
+                            let index = place.ways(for: chosen).firstIndex { $0.stop.id == bus.stop.id } ?? 0
+                            answers.bus = place.choice(lines: chosen, way: index, both: bus.bothWays)
+                        }
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+            }
+            Divider().padding(.leading, 16)
+            cardLabel("Which way do you ride?")
+                .padding(.horizontal, 12)
+                .padding(.top, 12)
+                .padding(.bottom, 2)
+            if let place {
+                let ways = place.ways(for: lines)
+                ForEach(ways.indices, id: \.self) { index in
+                    let way = ways[index]
+                    if index > 0 { Divider().padding(.leading, 52) }
+                    choiceRow(index == 0 ? "arrow.up" : "arrow.down", "Toward \(place.going(way, lines: lines))",
+                              place.detail(way, index: index, lines: lines, now: .now),
+                              on: picked && !bus.bothWays && bus.stop.id == way.stop.id) {
+                        answers.bus = place.choice(lines: lines, way: index, both: false)
+                        answers.noStop = false
+                    }
+                }
+                if ways.count == 2 {
+                    Divider().padding(.leading, 52)
+                    choiceRow("arrow.up.arrow.down", "Both ways", "The medium widget shows the next bus each way",
+                              on: picked && bus.bothWays) {
+                        let index = ways.firstIndex { $0.stop.id == bus.stop.id } ?? 0
+                        answers.bus = place.choice(lines: lines, way: index, both: true)
+                        answers.noStop = false
+                    }
+                }
+            } else {
+                choiceRow("arrow.up", bus.bothWays && bus.otherStop != nil ? "Both ways" : "Toward \(bus.shortWayName)",
+                          nil, on: picked) {
+                    answers.noStop = false
+                }
+            }
+        }
+        .glassEffect(.regular, in: Self.card)
+        .overlay(Self.card.strokeBorder(picked ? AnyShapeStyle(.tint) : AnyShapeStyle(.clear), lineWidth: 2))
+    }
+
+    /// A line at the bus stop, ticked while it's ridden.
+    private func busLineTile(_ pick: NearbyBusPick, on: Bool, toggle: @escaping () -> Void) -> some View {
+        Button(action: toggle) {
+            HStack(spacing: 8) {
+                BusBadge(line: pick.line, size: 26)
+                Text(pick.ways.map(\.name).joined(separator: " – "))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                Spacer(minLength: 0)
+                Image(systemName: on ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(on ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity)
+            .background(on ? Color.accentColor.opacity(0.1) : Color.primary.opacity(0.05),
+                        in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(on ? AnyShapeStyle(.tint) : AnyShapeStyle(.clear), lineWidth: 1.5))
+            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(BusBadge.spokenName(pick.line))
+        .accessibilityAddTraits(on ? .isSelected : [])
+    }
+
     /// The train picker, for a stop that isn't on the map.
     private var anotherStop: some View {
-        let others = answers.nearby.map(\.station).filter { $0.id != answers.train?.stationID }.map(\.name)
+        let others = answers.busPicked
+            ? (answers.busPlaces ?? []).filter { $0 != answers.busPlace }.map(\.name)
+            : answers.nearby.map(\.station).filter { $0.id != answers.train?.stationID }.map(\.name)
         return Button {
             choosingTrain = true
         } label: {
@@ -1064,7 +1473,9 @@ struct FirstRunView: View {
                 Image(systemName: "magnifyingglass").frame(width: 24).accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(answers.train == nil ? "Choose a stop" : "Another stop")
-                    Text(others.isEmpty ? "Any station, line or direction" : "\(others.joined(separator: ", ")), or any station")
+                    Text(answers.busPicked
+                         ? (others.isEmpty ? "Any bus line or stop" : "\(others.joined(separator: ", ")), or any bus line")
+                         : (others.isEmpty ? "Any station, line or direction" : "\(others.joined(separator: ", ")), or any station"))
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }

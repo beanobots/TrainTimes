@@ -65,13 +65,14 @@ actor TransitRoutes {
     }
 
     /// Google's routes from `from` to `to` leaving at `departure`, best first, for `client`; by
-    /// bus too with `bus`. A request counts toward the limits whether or not Google finds a route.
+    /// bus too with `bus`, or by bus alone without `subway`. A request counts toward the limits
+    /// whether or not Google finds a route.
     func routes(from: (Double, Double), to: (Double, Double), departure: Date, client: String,
-                bus: Bool = false, now: Date = .now) async -> Outcome {
+                bus: Bool = false, subway: Bool = true, now: Date = .now) async -> Outcome {
         guard await perClient.take(client, now: now), await everyone.take("everyone", now: now) else {
             return .limited(retryAfter: DailyLimiter.secondsUntilReset(now: now))
         }
-        let request = Self.request(from: from, to: to, departure: departure, key: key, bus: bus)
+        let request = Self.request(from: from, to: to, departure: departure, key: key, bus: bus, subway: subway)
         guard let (data, status) = try? await fetch(request) else {
             Log.error("routes: Google unreachable")
             return .unavailable
@@ -83,11 +84,12 @@ actor TransitRoutes {
         return .routes(routes)
     }
 
-    /// A transit request by subway alone, or with `bus` by subway and bus, with Google's
+    /// A transit request by subway alone, or with `bus` by subway and bus (by bus alone without
+    /// `subway`; `subway` alone counts without `bus`), with Google's
     /// alternatives, asking only for the rides' details (the field mask), which keeps it Google's
     /// cheapest kind of request.
     static func request(from: (Double, Double), to: (Double, Double), departure: Date, key: String,
-                        bus: Bool = false) -> URLRequest {
+                        bus: Bool = false, subway: Bool = true) -> URLRequest {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
         request.timeoutInterval = 10
@@ -103,7 +105,7 @@ actor TransitRoutes {
             "travelMode": "TRANSIT",
             "departureTime": ISO8601DateFormatter().string(from: departure),
             "computeAlternativeRoutes": true,
-            "transitPreferences": ["allowedTravelModes": bus ? ["SUBWAY", "BUS"] : ["SUBWAY"]],
+            "transitPreferences": ["allowedTravelModes": bus ? (subway ? ["SUBWAY", "BUS"] : ["BUS"]) : ["SUBWAY"]],
         ]
         request.httpBody = try? JSONSerialization.data(withJSONObject: body, options: .sortedKeys)
         return request

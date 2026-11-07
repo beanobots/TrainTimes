@@ -1,4 +1,5 @@
 import CoreLocation
+import MapKit
 
 /// Your location for the Nearby widget, found on each reload using the app's permission
 /// (While Using the App or Widgets).
@@ -131,15 +132,15 @@ final class NearbyLocator: NSObject, CLLocationManagerDelegate {
         Task { @MainActor in self.finish(nil) }
     }
 
-    /// The neighborhood name, e.g. "Park Slope", or nil. Only re-geocoded after you've moved
+    /// The borough or city name, e.g. "Brooklyn", or nil. Only re-geocoded after you've moved
     /// 250 m from the saved place, since Apple rate-limits lookups.
     static func placeName(for location: CLLocation) async -> String? {
         if let saved = SharedStore.loadPlace(), saved.name != nil,
            CLLocation(latitude: saved.latitude, longitude: saved.longitude).distance(from: location) < 250 {
             return saved.name
         }
-        let placemark = try? await CLGeocoder().reverseGeocodeLocation(location).first
-        let name = placemark?.subLocality ?? placemark?.locality
+        let item = try? await MKReverseGeocodingRequest(location: location)?.mapItems.first
+        let name = item?.addressRepresentations?.cityName
         SharedStore.savePlace(SharedStore.Place(latitude: location.coordinate.latitude,
                                                 longitude: location.coordinate.longitude, name: name))
         return name

@@ -1,8 +1,8 @@
 import SwiftUI
 import UIKit
 
-/// The app's tabs (Liquid Glass bar on iOS 26): New Trip (A to B, for Transit Directions), Nearby
-/// (trains at nearby stations), Widgets (setup), and Settings.
+/// The app's tabs (Liquid Glass bar on iOS 26): Nearby (trains at nearby stations), Navigate
+/// (A to B, for Transit Directions), Routes (widget setup), and Settings.
 struct AppTabs: View {
     private enum AppTab: Hashable { case newTrip, live, widgets, settings }
 
@@ -35,13 +35,13 @@ struct AppTabs: View {
             if picked == .live { nearbyTaps += 1 }
             tab = picked
         })) {
-            Tab("Nearby", systemImage: "location.fill", value: AppTab.live) {
+            Tab("Nearby", systemImage: "circle.inset.filled", value: AppTab.live) {
                 LiveView(allowingLocation: $allowingLocation, recenterRequests: nearbyTaps)
             }
-            Tab("New Trip", systemImage: "point.topleft.down.to.point.bottomright.curvepath.fill", value: AppTab.newTrip) {
+            Tab("Navigate", systemImage: "location.fill", value: AppTab.newTrip) {
                 NewTripView(showing: tripShowing)
             }
-            Tab("Widgets", systemImage: "app", value: AppTab.widgets) {
+            Tab("Routes", systemImage: "point.topleft.down.to.point.bottomright.curvepath.fill", value: AppTab.widgets) {
                 WidgetsView()
             }
             Tab("Settings", systemImage: "gearshape", value: AppTab.settings) {
@@ -71,6 +71,8 @@ struct AppTabs: View {
         }
         .onChange(of: scenePhase, initial: true) { _, phase in
             if phase == .active, !settingUp, VisitStay.isOver { stayOver = true }
+            // Settings' Citi Bike kinds, for the widgets; setup may have just set them
+            if phase == .active { settings.shareBikeKinds() }
         }
         .sheet(item: $openStation) { station in
             StationWidgetPicker(station: station)
@@ -83,8 +85,14 @@ struct AppTabs: View {
         // restored on a relaunch, which opens on Nearby
         .onChange(of: walk.session != nil, initial: true) { _, walking in
             if walking { tab = .newTrip }
+            // Its map's drawn upright: turned back if on its side, and kept so till it's over
+            Sideways.lockUpright(walking)
         }
         // Also when the tap launched the app, so it was set before this appeared
+        // The bus home stop from Spotlight: Nearby opens it
+        .onChange(of: opening.busStop != nil, initial: true) { _, opening in
+            if opening { afterSheets { tab = .live } }
+        }
         .onChange(of: opening.station, initial: true) { _, station in
             guard let station else { return }
             opening.station = nil
@@ -111,7 +119,7 @@ struct AppTabs: View {
     /// place already, from before it came.
     private func startFirstRun() {
         guard !firstRunDone else { return }
-        if settings.settings.defaultTrain != nil || !SavedPlaces.shared.isEmpty {
+        if settings.settings.defaultTrain != nil || settings.settings.defaultBus != nil || !SavedPlaces.shared.isEmpty {
             firstRunDone = true
         } else {
             settingUp = true

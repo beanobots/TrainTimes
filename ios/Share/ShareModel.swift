@@ -55,13 +55,21 @@ final class ShareModel {
     func load() async {
         guard case .loading = state else { return }
         var link: MapsLink?
+        var unreachable = false
         for url in await sharedLinks(in: attachments) {
-            if let found = await Self.directions(in: url) {
-                link = found
-                break
+            do {
+                if let found = try await Self.directions(in: url) {
+                    link = found
+                    break
+                }
+            } catch {
+                unreachable = true
             }
         }
         guard let link else {
+            if unreachable {
+                return fail("Can't Reach the Internet", "Leeway needs the internet to open this link. Try again when you're online.")
+            }
             return fail("Not Transit Directions", "Share directions or a place from Apple Maps or Google Maps.")
         }
         async let start = Self.location(of: link.origin ?? .currentLocation)
@@ -127,10 +135,10 @@ final class ShareModel {
         state = .failed(title: title, message: message)
     }
 
-    /// The directions in `url`, expanding a short link first.
-    private static func directions(in url: URL) async -> MapsLink? {
+    /// The directions in `url`, expanding a short link first; throws if the link can't be reached.
+    private static func directions(in url: URL) async throws -> MapsLink? {
         guard MapsLink.isShortLink(url) else { return MapsLink(url: url) }
-        guard let (data, response) = try? await URLSession.shared.data(from: url) else { return nil }
+        let (data, response) = try await URLSession.shared.data(for: URLRequest(url: url, timeoutInterval: 10))
         var candidates = [response.url].compactMap { $0 }
         // Google's consent page carries on to the directions
         if let final = response.url, let next = URLComponents(url: final, resolvingAgainstBaseURL: false)?

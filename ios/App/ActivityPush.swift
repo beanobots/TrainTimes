@@ -128,10 +128,13 @@ enum ActivityPush {
     }
 
     /// The background refresh: new times straight from the MTA, another try at the server, and
-    /// another refresh later while that still hasn't worked.
+    /// another refresh later while that still hasn't worked. The next is asked for first, so a
+    /// slow network running this past iOS's time for it doesn't lose it.
     static func backgroundRefresh() async {
+        scheduleRefreshIfNeeded()
         await TrainActivityController.refresh()
         resume()
+        guard !Task.isCancelled else { return }
         await retry(force: true)
         scheduleRefreshIfNeeded()
     }
@@ -193,7 +196,9 @@ enum ActivityPush {
             alertKinds: alertKinds,
             state: activity.content.state,
             change: activity.attributes.change,
-            widgetToken: widgetToken
+            widgetToken: widgetToken,
+            // Without its changes to trains, which the server doesn't use and refuses
+            bus: activity.attributes.bus.map { var bus = $0; bus.changes = nil; return bus }
         )
         let prefix = String(token.prefix(8))
         do {

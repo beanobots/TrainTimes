@@ -133,17 +133,21 @@ enum TimelinePlan {
     /// doesn't postpone it: 2 minutes later, or when showing `old` times, as long as they were old,
     /// capped at `reloadInterval` (the MTA can be unreachable for a whole ride underground, and
     /// reloads are budgeted daily). Sooner if entries run out of trains (`runsOut`) or commuting
-    /// hours switch (`switches`); immediately if not `complete` (see `firstDrawWait`); never
-    /// within a minute. Times or failures after `now` (clock set back) count as now.
+    /// hours switch (`switches`); immediately if not `complete` (see `firstDrawWait`), unless the
+    /// times before these were fetched (`previous`) within two `reloadInterval`s: Transit
+    /// Directions always waits only `firstDrawWait`, and the widget has no other lines' feeds
+    /// cached, so on a slow connection every board comes back incomplete, and retrying each
+    /// minute would spend the daily reload budget. Never within a minute. Times or failures
+    /// after `now` (clock set back) count as now.
     static func reload(now: Date, fetched: Date?, old: Date? = nil, failed: Date? = nil, runsOut: Date?,
-                       switches: Date?, complete: Bool = true) -> Date {
+                       switches: Date?, complete: Bool = true, previous: Date? = nil) -> Date {
         let tried = min(failed ?? now, now)
         let retry = old.map { min(reloadInterval(at: tried), max(2 * 60, tried.timeIntervalSince($0))) } ?? 2 * 60
         var reload = fetched.map { $0 > now ? now : $0.addingTimeInterval(reloadInterval(at: now)) }
             ?? tried.addingTimeInterval(retry)
         if let runsOut { reload = min(reload, runsOut) }
         if let switches { reload = min(reload, switches) }
-        if !complete { reload = now }
+        if !complete, !(previous?.isWithin(2 * reloadInterval(at: now), before: now) ?? false) { reload = now }
         return max(reload, now.addingTimeInterval(60))
     }
 

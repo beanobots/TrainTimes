@@ -229,8 +229,9 @@ final class Diagnostics: NSObject, MXMetricManagerSubscriber, @unchecked Sendabl
             do {
                 try await PushServer.shared.sendDiagnostics(body)
                 log.info("Sent a report")
-            } catch PushServer.Failure.unavailable, PushServer.Failure.refused(404) {
-                // Out of reach, over today's limit, or a server from before reports: later
+            } catch PushServer.Failure.unavailable, PushServer.Failure.refused(404), PushServer.Failure.refused(401) {
+                // Out of reach, over today's limit, a server from before reports, or not yet
+                // trusting a new App Attest key: later
                 return
             } catch {
                 // Refused outright, or no App Attest here (the simulator): it never will be taken

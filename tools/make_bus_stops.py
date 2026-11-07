@@ -10,19 +10,20 @@ A line's stops are those of one trip of each shape it runs, which covers its
 branches and short turns without reading every trip. Written as
 {"lines": [names], "stops": [[latitude, longitude, line, line...], ...]}, the
 position in hundred-thousandths of a degree and each line its place in
-"lines", named as make_bus_shapes.py names them ("M15+").
+"lines", named as make_bus_shapes.py names them, by route_short_name ("Q6", "M15+").
 """
 import csv
 import json
 import sys
 from collections import defaultdict
 
-from make_bus_shapes import canonical
+from make_bus_shapes import canonical, line_names
 
 
 def main(target_dir, feeds):
     stops = {}  # (latitude, longitude) in 1e-5 degrees: set of lines
     for feed in feeds:
+        line_of = line_names(feed)
         # One trip of each line's each shape
         sample = {}  # trip id: line
         seen = set()
@@ -31,7 +32,7 @@ def main(target_dir, feeds):
                 key = (trip["route_id"], trip.get("shape_id"))
                 if key not in seen:
                     seen.add(key)
-                    sample[trip["trip_id"]] = canonical(trip["route_id"])
+                    sample[trip["trip_id"]] = line_of.get(trip["route_id"]) or canonical(trip["route_id"])
         places = {}
         with open(f"{feed}/stops.txt", encoding="utf-8-sig", newline="") as file:
             for stop in csv.DictReader(file):

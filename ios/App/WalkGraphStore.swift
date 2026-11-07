@@ -11,6 +11,16 @@ import UIKit
 /// memory's short.
 actor WalkGraphStore {
     static let shared = WalkGraphStore()
+    /// Long walks' own (walking all the way across town, seconds to route unoptimised), so
+    /// the short ones to and from the trains, waited on by the map and Go, aren't behind them.
+    static let long = WalkGraphStore()
+    /// Metres straight from start to end past which a walk's routed on `long`.
+    static let longWalk = 3_000.0
+
+    /// The store for a walk from `start` to `end`.
+    static func store(from start: Walk.Point, to end: Walk.Point) -> WalkGraphStore {
+        start.metres(to: end) > longWalk ? long : shared
+    }
 
     private var database: OpaquePointer?
     private var opened = false
@@ -165,9 +175,9 @@ actor WalkGraphStore {
         sqlite3_finalize(statement)
         database = handle
         // Let the tiles go when memory's short
-        Task { @MainActor in
+        Task { @MainActor [self] in
             for await _ in NotificationCenter.default.notifications(named: UIApplication.didReceiveMemoryWarningNotification) {
-                await WalkGraphStore.shared.drop()
+                await self.drop()
             }
         }
         return handle

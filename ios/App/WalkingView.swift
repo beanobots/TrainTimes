@@ -12,7 +12,9 @@ struct WalkingView: View {
     /// Following you (or the train) by `follow()`, turned as `turn` says, until moved by hand.
     @State private var camera = MapCameraPosition.userLocation(fallback: .automatic)
     @State private var following = true
-    @State private var turn = MapTurn.heading
+    @State private var turn = MapTurn.north
+    /// Which north `turn`'s north is: Settings' NY Special.
+    @AppStorage(MapNorth.key) private var nyNorth = false
     @State private var compass = CompassHeading()
     /// The heading the map's turned to while following yours, smoothed from the compass's.
     @State private var shownHeading: Double?
@@ -164,24 +166,33 @@ struct WalkingView: View {
                 UserAnnotation()
             }
             if session.walk != nil {
-                // What's left of it, from where you are
-                let left = drawnPath.map(\.coordinate)
-                MapPolyline(coordinates: left)
-                    .stroke(Self.casing, style: StrokeStyle(lineWidth: Self.walkWidth + 4, lineCap: .round, lineJoin: .round))
-                MapPolyline(coordinates: left)
-                    .stroke(Color.accentColor, style: StrokeStyle(lineWidth: Self.walkWidth, lineCap: .round, lineJoin: .round))
+                // What's left of it, from where you are, in its two pieces (`drawnPieces`): each
+                // kept by its place, so the rest's lines stay as they are while the lead's moves
+                let pieces = drawnPieces
+                ForEach(pieces.indices, id: \.self) { index in
+                    MapPolyline(coordinates: pieces[index])
+                        .stroke(Self.casing, style: StrokeStyle(lineWidth: Self.walkWidth + 4, lineCap: .round, lineJoin: .round))
+                }
+                ForEach(pieces.indices, id: \.self) { index in
+                    MapPolyline(coordinates: pieces[index])
+                        .stroke(Color.accentColor, style: StrokeStyle(lineWidth: Self.walkWidth, lineCap: .round, lineJoin: .round))
+                }
                 // Marks down its middle, so it reads as a way to go at street level
-                MapPolyline(coordinates: left)
-                    .stroke(.white.opacity(0.85), style: StrokeStyle(lineWidth: 2, lineCap: .round, dash: [3, 9]))
+                ForEach(pieces.indices, id: \.self) { index in
+                    MapPolyline(coordinates: pieces[index])
+                        .stroke(.white.opacity(0.85), style: StrokeStyle(lineWidth: 2, lineCap: .round, dash: [3, 9]))
+                }
                 // Where it crosses a street, once on the sidewalk: barred like the crosswalk
                 ForEach(Array((session.walk?.crossings ?? []).enumerated()), id: \.offset) { _, crossing in
                     MapPolyline(coordinates: crossing.map(\.coordinate))
                         .stroke(.white, style: StrokeStyle(lineWidth: Self.walkWidth - 2, lineCap: .butt, dash: [2, 2.5]))
                 }
                 // Faintly over the buildings too, so the way round a corner shows through them
-                MapPolyline(coordinates: left)
-                    .stroke(Color.accentColor.opacity(0.3), style: StrokeStyle(lineWidth: Self.walkWidth, lineCap: .round, lineJoin: .round))
-                    .mapOverlayLevel(level: .aboveLabels)
+                ForEach(pieces.indices, id: \.self) { index in
+                    MapPolyline(coordinates: pieces[index])
+                        .stroke(Color.accentColor.opacity(0.3), style: StrokeStyle(lineWidth: Self.walkWidth, lineCap: .round, lineJoin: .round))
+                        .mapOverlayLevel(level: .aboveLabels)
+                }
             }
             // The next turn, as a sign standing at its corner
             if isWalking, let turn = nextTurn {
@@ -265,7 +276,13 @@ struct WalkingView: View {
             }
         }
         .onAppear {
-            compass.start()
+            // Not shown in the background (a walk restored as iOS relaunches the app for your
+            // location): the compass waits until it's opened
+            if scenePhase == .background {
+                wasInBackground = true
+            } else {
+                compass.start()
+            }
             startOver()
         }
         .onDisappear { compass.stop() }
@@ -390,6 +407,16 @@ struct WalkingView: View {
         isOnPath ? Self.path(session.pathLeft, from: ahead) : session.pathLeft
     }
 
+    /// `drawnPath` for the map, in two: the rest from its second point on, which `ahead` gliding
+    /// four times a second doesn't move (only a fix, or passing that point, does), and before it
+    /// the short lead from where you're guessed to be up to it. Drawn as one, every tick remade the
+    /// whole way left's lines; this way only the lead's are. One piece for a path of a point or two.
+    private var drawnPieces: [[CLLocationCoordinate2D]] {
+        let path = drawnPath.map(\.coordinate)
+        guard path.count > 2 else { return path.count > 1 ? [path] : [] }
+        return [Array(path.dropFirst()), Array(path.prefix(2))]
+    }
+
     /// Moves where you're shown on a tick: along the way at GPS's speed since the last fix, up to
     /// `guessAhead`, then eased toward that, so you glide between fixes rather than jump to each.
     private func glide() {
@@ -479,8 +506,7 @@ struct WalkingView: View {
     private var heading: Double {
         switch turn {
         case .heading: shownHeading ?? 0
-        case .north: 0
-        case .manhattan: MapTurn.manhattanNorth
+        case .north: MapNorth.heading(ny: nyNorth)
         }
     }
 
@@ -528,7 +554,7 @@ struct WalkingView: View {
             longitude: coordinate.longitude + meters * sin(angle) / (Earth.metresPerDegree * cos(coordinate.latitude * .pi / 180)))
     }
 
-    /// The compass button: your heading, north up, NY North, round again. Following you (or the
+    /// The compass button: your heading, or north up (NY North, if Settings says), back again. Following you (or the
     /// train) again too, if the map's been moved off.
     private var turnButton: some View {
         Button {
@@ -542,16 +568,16 @@ struct WalkingView: View {
                     Image(systemName: "location.north.line.fill")
                         .rotationEffect(.degrees(-heading))
                         .foregroundStyle(.red)
-                case .north:
-                    Text("N")
-                        .font(.system(size: 17, weight: .bold))
-                case .manhattan:
+                case .north where nyNorth:
                     VStack(spacing: -2) {
                         Image(systemName: "arrow.up")
                             .font(.system(size: 11, weight: .bold))
                         Text("NY")
                             .font(.system(size: 12, weight: .heavy))
                     }
+                case .north:
+                    Text("N")
+                        .font(.system(size: 17, weight: .bold))
                 }
             }
             .frame(width: 30, height: 30)
@@ -559,7 +585,7 @@ struct WalkingView: View {
         .buttonStyle(.glass)
         .buttonBorderShape(.circle)
         .accessibilityLabel("Map direction")
-        .accessibilityValue(turn.label)
+        .accessibilityValue(turn.label(ny: nyNorth))
         .accessibilityHint("Changes which way up the map is")
     }
 
@@ -668,6 +694,11 @@ struct WalkingView: View {
 
     @ViewBuilder private func bottomCard(now: Date) -> some View {
         VStack(alignment: .leading, spacing: 12) {
+            // Why turns and getting there go untold: Approximate Location, even for the walk
+            if session.isApproximate && (session.stage == .toTrain || session.stage == .fromTrain) {
+                Label("Precise Location is off", systemImage: "location.slash")
+                    .font(.footnote).foregroundStyle(.orange)
+            }
             switch session.stage {
             case .toTrain:
                 if let faster = session.faster { fasterCard(faster) }

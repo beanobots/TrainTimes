@@ -86,6 +86,9 @@ actor BusTime {
     }
 
     static let base = URL(string: "https://bustime-classic.mta.info")!
+    /// The poller's client, for bus countdowns' pushes: not held to a client's daily limit, as it
+    /// asks for everyone's countdowns; still to everyone's.
+    static let pollerClient = "poller"
     /// How long a stop found for a line and place is kept, and not finding one.
     static let stopLifetime: TimeInterval = 86400
     static let noStopLifetime: TimeInterval = 3600
@@ -124,7 +127,8 @@ actor BusTime {
     /// The next buses on `line` (Google's name for it) at its stop nearest `point`, soonest first,
     /// for `client`.
     func arrivals(line: String, near point: (Double, Double), client: String, now: Date = .now) async -> Outcome {
-        let wanted = Self.canonical(line)
+        // Unpadded: an app whose lines were the GTFS's route ids asks for the Q6 as "Q06"
+        let wanted = Self.unpadded(Self.canonical(line))
         let place = "\(wanted) " + String(format: "%.4f,%.4f", point.0, point.1)
         let found: (stop: Stop, lineRef: String)
         if let cached = stops[place], cached.until > now {
@@ -180,6 +184,19 @@ actor BusTime {
         }
         // Not a bus that's been and gone since they were read
         return arrivals.filter { ($0.expected ?? $0.aimed ?? now) > now.addingTimeInterval(-60) }
+    }
+
+    /// Every line's next buses at stop `id` (the MTA's stop code), for bus countdowns
+    /// (`Poller.liveBuses`): one ask for all the lines there, however many countdowns there are
+    /// at it, kept `arrivalsLifetime` and shared with Nearby's.
+    func everyLine(atStop id: String, client: String, now: Date = .now) async -> Result<[Arrival], Failure> {
+        guard Self.isStopCode(id) else { return .failure(.unavailable) }
+        return await everyLine(at: id, client: client, now: now)
+    }
+
+    /// Whether `id` could be a stop code: digits, ten at most.
+    static func isStopCode(_ id: String) -> Bool {
+        (1...10).contains(id.count) && id.allSatisfy { $0.isASCII && $0.isNumber }
     }
 
     /// `arrivals(at:lineRef:client:now:)` on every line, as a result, for `nearbyPlaces`' task
@@ -278,7 +295,8 @@ actor BusTime {
     private func get(_ request: URLRequest, for client: String, now: Date) async throws(Failure) -> Data {
         let id = request.url?.absoluteString ?? ""
         if let under = asking[id] { return try await under.value.get() }
-        guard await perClient.take(client, now: now), await everyone.take("everyone", now: now) else {
+        guard client == Self.pollerClient ? true : await perClient.take(client, now: now),
+              await everyone.take("everyone", now: now) else {
             throw .limited(retryAfter: DailyLimiter.secondsUntilReset(now: now))
         }
         // Asked for by another while counting
@@ -309,6 +327,15 @@ actor BusTime {
         return name
     }
 
+    /// `line` (`canonical`) without its number's leading zeros, as Bus Time names lines ("Q6")
+    /// and the GTFS's route ids don't ("Q06"): what lines are matched by. The bundled data now
+    /// names lines by route_short_name ("Q6") too; kept for apps that saved a "Q06".
+    static func unpadded(_ line: String) -> String {
+        let letters = line.prefix { $0.isLetter }
+        let digits = line.dropFirst(letters.count).drop { $0 == "0" }
+        return String(letters) + digits
+    }
+
     /// `line` if it could be a bus line's name: letters, digits, spaces, "-" and "+", 16 at most.
     static func validLine(_ line: String) -> String? {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -318,13 +345,13 @@ actor BusTime {
         return trimmed
     }
 
-    /// The stop in `candidates` nearest `point` that a line named `wanted` (`canonical`) stops at,
-    /// within `matchRange`, with Bus Time's id for the line.
+    /// The stop in `candidates` nearest `point` that a line named `wanted` (`canonical`, and
+    /// `unpadded` too) stops at, within `matchRange`, with Bus Time's id for the line.
     static func nearest(serving wanted: String, to point: (Double, Double),
                         in candidates: [Candidate]) -> (stop: Stop, lineRef: String)? {
         candidates.compactMap { candidate -> (Stop, String, Double)? in
             guard let line = candidate.lines.first(where: {
-                canonical($0.name) == wanted || canonical(Self.bare($0.ref)) == wanted
+                unpadded(canonical($0.name)) == unpadded(wanted) || unpadded(canonical(Self.bare($0.ref))) == unpadded(wanted)
             }) else { return nil }
             let distance = meters(from: point, to: (candidate.stop.latitude, candidate.stop.longitude))
             return distance <= matchRange ? (candidate.stop, line.ref, distance) : nil
@@ -355,11 +382,14 @@ actor BusTime {
         ])
     }
 
-    /// The next few buses at one stop, on one line or (`lineRef` nil) every line.
+    /// The next few buses at one stop, on one line or (`lineRef` nil) every line. Every line's
+    /// asks for at least 3 of each line's too: MaximumStopVisits counts every line's together,
+    /// so at a busy stop one line's could otherwise all be crowded out. Bus Time goes past the
+    /// maximum to give each line its minimum.
     static func arrivalsRequest(stop: String, lineRef: String?, key: String) -> URLRequest {
         request("api/siri/stop-monitoring.json", [
             ("key", key), ("version", "2"), ("MonitoringRef", stop),
-        ] + (lineRef.map { [("LineRef", $0)] } ?? []) + [
+        ] + (lineRef.map { [("LineRef", $0)] } ?? [("MinimumStopVisitsPerLine", "3")]) + [
             ("MaximumStopVisits", "6"), ("MaximumNumberOfCallsOnwards", "1"),
         ])
     }

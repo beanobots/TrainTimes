@@ -109,6 +109,12 @@ enum ServerRoutes {
     /// a 200, or it doesn't read.
     static func fetch<T: Decodable>(_ type: T.Type, with request: URLRequest,
                                     decoder: JSONDecoder = JSONDecoder()) async -> T? {
+        await fetched(type, with: request, decoder: decoder).value
+    }
+
+    /// `fetch`'s answer, and the status it came with (0 with none).
+    static func fetched<T: Decodable>(_ type: T.Type, with request: URLRequest,
+                                      decoder: JSONDecoder = JSONDecoder()) async -> (value: T?, status: Int) {
         // Only which of the server's paths it is in the log: not its query, which can say where
         // someone is or is going, nor the rest of its path, which can hold a push token
         let path = request.url.flatMap { $0.pathComponents.dropFirst().first }.map { "/" + $0 } ?? "?"
@@ -117,18 +123,18 @@ enum ServerRoutes {
             (data, response) = try await TrainService.serverSession.data(for: request)
         } catch {
             log.notice("\(path, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            return nil
+            return (nil, 0)
         }
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard status == 200 else {
             log.notice("\(path, privacy: .public): status \(status)")
-            return nil
+            return (nil, status)
         }
         do {
-            return try decoder.decode(type, from: data)
+            return (try decoder.decode(type, from: data), status)
         } catch {
             log.error("\(path, privacy: .public): unreadable, \(error.localizedDescription, privacy: .public)")
-            return nil
+            return (nil, status)
         }
     }
 
@@ -140,12 +146,18 @@ enum ServerRoutes {
     private static let matchRange: Double = 400
 
     /// Google's routes from `start` to `end` leaving at `departure`, best first, by bus too with
-    /// `buses`; nil if the server can't be reached, refuses (e.g. over its daily limit) or has no
-    /// Google key.
+    /// `buses`, and without trains with `subway` off; nil if the server can't be reached, refuses
+    /// (e.g. over its daily limit) or has no Google key.
     static func routes(from start: CLLocation, to end: CLLocation, at departure: Date = .now,
-                       buses: Bool = false) async -> [Route]? {
+                       buses: Bool = false, subway: Bool = true) async -> [Route]? {
+        await fetchRoutes(from: start, to: end, at: departure, buses: buses, subway: subway).routes
+    }
+
+    /// `routes`, and whether the server refused them as over its daily limit (a 429).
+    static func fetchRoutes(from start: CLLocation, to end: CLLocation, at departure: Date = .now,
+                            buses: Bool = false, subway: Bool = true) async -> (routes: [Route]?, overLimit: Bool) {
         guard let baseURL, var components = URLComponents(url: baseURL.appendingPathComponent("routes"),
-                                                          resolvingAgainstBaseURL: false) else { return nil }
+                                                          resolvingAgainstBaseURL: false) else { return (nil, false) }
         let point = { (location: CLLocation) in
             String(format: "%.6f,%.6f", location.coordinate.latitude, location.coordinate.longitude)
         }
@@ -154,11 +166,14 @@ enum ServerRoutes {
             URLQueryItem(name: "to", value: point(end)),
             URLQueryItem(name: "at", value: String(Int(departure.timeIntervalSince1970))),
         ] + (buses ? [URLQueryItem(name: "bus", value: "1")] : [])
-        guard let url = components.url else { return nil }
+            // Only said when off, for servers from before it, which send trains always
+            + (subway ? [] : [URLQueryItem(name: "subway", value: "0")])
+        guard let url = components.url else { return (nil, false) }
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 8)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         struct Response: Decodable { var routes: [Route] }
-        return await fetch(Response.self, with: request)?.routes
+        let answer = await fetched(Response.self, with: request)
+        return (answer.value?.routes, answer.status == 429)
     }
 
     /// The most trips `plan` offers, Google's and the app's together.
@@ -303,14 +318,21 @@ enum ServerRoutes {
             else { return }
             planned.append(Planned(choice: .train(trip.option), trip: trip))
         }
+        // In step-free mode, Google's trains as `TripPlanner.stepFree(_:)` takes them, as the
+        // app's own are; a bus is step-free itself
+        let stepFree = SharedStore.loadSettings().stepFree
         for route in google {
             if let trip = busTrip(from: route) {
                 guard !ridesBack(trip, from: start, within: walkRange) else { continue }
+                if stepFree, let train = trip.train, let end = train.endStation,
+                   TripPlanner.stepFree(TripPlanner.Trip(selection: train.selection, change: train.change,
+                                                         destination: end)) == nil { continue }
                 let key = "\(trip.bus.line) \(trip.bus.from.name) \(trip.train?.selection.trainID ?? "") \(trip.onward?.line ?? "")"
                 if seen.insert(key).inserted { planned.append(Planned(choice: .bus(trip))) }
             } else if !route.legs.contains(where: \.isBus), let trip = trips(from: [route]).first,
                       !TripPlanner.ridesBack(trip) {
-                add(trip)
+                guard let kept = stepFree ? TripPlanner.stepFree(trip) : trip else { continue }
+                add(kept)
             }
         }
         TripPlanner.ranked(TripPlanner.plan(from: start, to: end, at: now, walkRange: walkRange), from: start, to: end, at: now)

@@ -69,6 +69,7 @@ private actor FakeBusTime {
     }
 
     func set(status: Int) { self.status = status }
+    func set(arrivals: String) { self.arrivals = arrivals }
     func count(_ part: String) -> Int { asked.filter { $0.contains(part) }.count }
 }
 
@@ -151,6 +152,8 @@ private actor FakeBusTime {
         #expect(query.contains("LineRef=MTA%20NYCT_M15%2B"))
         #expect(query.contains("MonitoringRef=401234"))
         #expect(query.contains("version=2"))
+        // One line's: no per-line minimum
+        #expect(!query.contains("MinimumStopVisitsPerLine"))
         #expect(request.url?.host == BusTime.base.host)
         let stops = try #require(BusTime.stopsRequest(near: boarding, key: "k").url)
         #expect(stops.path == "/api/where/stops-for-location.json")
@@ -232,6 +235,9 @@ private actor FakeBusTime {
 
         let every = try #require(BusTime.arrivalsRequest(stop: "308209", lineRef: nil, key: "k").url?.query)
         #expect(!every.contains("LineRef"))
+        // Each line's buses, however many lines there are
+        #expect(every.contains("MinimumStopVisitsPerLine=3"))
+        #expect(every.contains("MaximumStopVisits=6"))
         let wide = try #require(BusTime.stopsRequest(near: boarding, key: "k", nearby: true).url?.query)
         #expect(wide.contains("latSpan=0.009"))
 
@@ -375,5 +381,69 @@ private actor FakeBusTime {
                 }
             }
         }
+    }
+}
+
+@Suite struct BusCountdownBusTimeTests {
+    @Test func thePollerIsntHeldToAClientsDailyLimit() async {
+        let fake = FakeBusTime(now: now)
+        let buses = BusTime(key: "k", perClientPerDay: 1, perDay: 100) { await fake.answer($0) }
+        // A stop and its buses: two asks, over a client's one, and still answered
+        guard case .arrivals = await buses.arrivals(line: "B63", near: boarding, client: BusTime.pollerClient, now: now) else {
+            Issue.record("expected arrivals"); return
+        }
+    }
+
+    @Test func liveBusesAsksEachStopOnceForEveryLine() async {
+        let fake = FakeBusTime(now: now)
+        let busTime = BusTime(key: "k") { await fake.answer($0) }
+        let stop = BusStop(id: "308209", name: "5 AV/UNION ST", latitude: boarding.0, longitude: boarding.1)
+        let one = BusChoice(line: "B63", stop: stop)
+        // At the same stop, with a line that has no buses there
+        let two = BusChoice(line: "B63", lines: ["B63", "B67"], stop: stop)
+        let buses = await Poller.liveBuses(from: busTime)([one, two], now)
+        #expect(await fake.count("stop-monitoring") == 1)
+        #expect(await fake.count("stops-for-location") == 0)
+        let found = buses[Poller.busKey(one)] ?? []
+        #expect(!found.isEmpty)
+        #expect(found.allSatisfy { BusTime.canonical($0.line) == "B63" })
+        #expect(found == found.sorted { $0.time < $1.time })
+        #expect(buses[Poller.busKey(two)] == found)
+        // Not a stop code: not asked
+        let odd = BusChoice(line: "B63", stop: BusStop(id: "x&y", name: "", latitude: boarding.0, longitude: boarding.1))
+        #expect(await Poller.liveBuses(from: busTime)([odd], now).isEmpty)
+    }
+
+    @Test func aLocalAndItsSelectBusAtOneStopAreKeptApart() {
+        let stop = BusStop(id: "401906", name: "1 AV/E 14 ST", latitude: 40.7317, longitude: -73.9817)
+        let local = BusChoice(line: "M15", stop: stop)
+        let sbs = BusChoice(line: "M15-SBS", stop: stop)
+        #expect(Poller.busKey(local) != Poller.busKey(sbs))
+        // However it's written
+        #expect(Poller.busKey(sbs) == Poller.busKey(BusChoice(line: "M15+", stop: stop)))
+    }
+
+    @Test func linesMatchWithOrWithoutTheirNumbersLeadingZeros() async {
+        #expect(BusTime.unpadded("Q06") == "Q6")
+        #expect(BusTime.unpadded("Q6") == "Q6")
+        #expect(BusTime.unpadded("BX1") == "BX1")
+        #expect(BusTime.unpadded("B103") == "B103")
+        #expect(BusTime.unpadded("M15+") == "M15+")
+        #expect(BusTime.unpadded("SIM1C") == "SIM1C")
+        // A Q6 countdown picked from the app's lines ("Q06", the GTFS's) gets Bus Time's "Q6"s
+        let fake = FakeBusTime(now: now)
+        await fake.set(arrivals: siri(now: now).replacingOccurrences(of: "B63", with: "Q6"))
+        let busTime = BusTime(key: "k") { await fake.answer($0) }
+        let stop = BusStop(id: "505334", name: "SUTPHIN BL/JAMAICA AV", latitude: 40.70, longitude: -73.81)
+        let padded = BusChoice(line: "Q06", stop: stop)
+        let buses = await Poller.liveBuses(from: busTime)([padded], now)
+        #expect(buses[Poller.busKey(padded)]?.count == 3)
+        // And a stop for "Q06", as an app that saved the GTFS's id asks GET /buses, is the Q6's
+        let q6 = BusTime.Candidate(stop: BusTime.Stop(id: "505334", name: "SUTPHIN BL/JAMAICA AV", latitude: 40.70,
+                                                      longitude: -73.81, direction: "E"),
+                                   lines: [BusTime.Candidate.Line(ref: "MTA NYCT_Q6", name: "Q6")])
+        #expect(BusTime.nearest(serving: "Q06", to: (40.70, -73.81), in: [q6])?.lineRef == "MTA NYCT_Q6")
+        #expect(BusTime.nearest(serving: "Q6", to: (40.70, -73.81), in: [q6])?.lineRef == "MTA NYCT_Q6")
+        #expect(BusTime.nearest(serving: "Q60", to: (40.70, -73.81), in: [q6]) == nil)
     }
 }

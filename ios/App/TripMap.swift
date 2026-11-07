@@ -28,9 +28,10 @@ struct TripMap: View {
     @State private var sideInsets: CGFloat = 0
     /// The room over the map's top, under what's over it, which framing keeps the trips clear of.
     @State private var topInset: CGFloat = 0
-    /// Map points the map shows top to bottom, once it's settled, to keep lines side by side the
-    /// same points apart however far it's zoomed.
-    @State private var shownHeight: Double?
+    /// Map points a point is on the map, followed a step at a time as it moves (`LineScale`), to
+    /// keep lines side by side the same points apart however far it's zoomed.
+    @State private var linesScale: Double?
+    @AppStorage(MapNorth.key) private var nyNorth = false
 
     /// Each trip's rides and what the map covers, worked out once for each set of trips and ends
     /// rather than on every redraw, as following a ride's track (`TrackShapes`) takes a while.
@@ -54,33 +55,35 @@ struct TripMap: View {
         var fromTrain: [CLLocationCoordinate2D]?
     }
 
-    /// The trips as drawn.
+    /// The picked trip as drawn.
     private struct Drawn {
-        var rides: [[SharedTrip.Option.Ride]]
-        var otherChanges: [[SharedTrip.Option.OtherChange]]
-        /// For each trip's other change stations, your train's ride there, where it's drawn
-        /// (`Beside`).
-        var beside: [[Beside]]
-        /// For each trip's other change stations, for each of its rides, as `laneOffsets` and
-        /// `stations` are for its own rides.
-        var otherLaneOffsets: [[[[[Double]]]]]
-        var otherStations: [[[[StationStop]]]]
+        var rides: [SharedTrip.Option.Ride]
+        var otherChanges: [SharedTrip.Option.OtherChange]
+        /// For its other change stations, your train's ride there, where it's drawn (`Beside`).
+        var beside: [Beside]
+        /// For its other change stations, for each of its rides, as `laneOffsets` and `stations`
+        /// are for its own rides.
+        var otherLaneOffsets: [[[[Double]]]]
+        var otherStations: [[[StationStop]]]
         /// Each ride's bullets' place, clear of its stations, the other change stations and both
         /// ends (`Ride.bulletAt(avoiding:)`).
-        var bullets: [[Bullet?]]
-        /// For each trip's rides, for each of its lines (`Ride.tracks`), points to the right of
-        /// each of its points to draw it, beside the others where they run together.
-        var laneOffsets: [[[[Double]]]]
-        /// For each trip's rides, its stations, each with where its lines stop there
-        /// (`StationStop`), for its dot to reach across them all.
-        var stations: [[[StationStop]]]
-        /// What the map covers for each trip.
-        var areas: [MKMapRect]
+        var bullets: [Bullet?]
+        /// For its rides, for each of its lines (`Ride.tracks`), points to the right of each of
+        /// its points to draw it, beside the others where they run together.
+        var laneOffsets: [[[Double]]]
+        /// For its rides, its stations, each with where its lines stop there (`StationStop`),
+        /// for its dot to reach across them all.
+        var stations: [[StationStop]]
+        /// What the map covers for it.
+        var area: MKMapRect
         /// Counts up with each new `Drawn`, to tell the map's lines from the last ones'.
         var version: Int
     }
 
-    /// Holds the last `Drawn` and what it was for. Not observed: filling it in doesn't redraw.
+    /// Holds each trip's `Drawn` as it's picked, for the trips and ends they're for. Only the
+    /// picked one's worked out, as only it's drawn: working out every trip's as they came in, on
+    /// the main thread, hitched New Trip. Kept for the trips, so picking one again is instant.
+    /// Not observed: filling it in doesn't redraw.
     private final class Cache {
         private struct Key: Equatable {
             var options: [ServerRoutes.Choice]
@@ -89,56 +92,53 @@ struct TripMap: View {
         }
 
         private var key: Key?
-        private var drawn: Drawn?
+        private var drawn: [Int: Drawn] = [:]
         private var version = 0
 
-        func drawn(options: [ServerRoutes.Choice], start: CLLocationCoordinate2D?, end: CLLocationCoordinate2D?) -> Drawn {
+        func drawn(options: [ServerRoutes.Choice], picked: Int, start: CLLocationCoordinate2D?,
+                   end: CLLocationCoordinate2D?) -> Drawn {
             let key = Key(options: options, start: start.map { [$0.latitude, $0.longitude] },
                           end: end.map { [$0.latitude, $0.longitude] })
-            if let drawn, key == self.key { return drawn }
-            let rides = options.map(\.rides)
+            if key != self.key {
+                self.key = key
+                drawn = [:]
+            }
+            if let known = drawn[picked] { return known }
+            let option = options.indices.contains(picked) ? options[picked] : nil
+            let rides = option?.rides ?? []
             // Points close enough together to move off the lines they run along smoothly
-            let otherChanges = options.map(\.otherChanges).map { changes in
-                changes.map { change in
-                    var change = change
-                    change.rides = change.rides.map { ride in
-                        var ride = ride
-                        ride.coordinates = TripMap.densified(ride.coordinates)
-                        return ride
-                    }
-                    return change
+            let otherChanges = (option?.otherChanges ?? []).map { change in
+                var change = change
+                change.rides = change.rides.map { ride in
+                    var ride = ride
+                    ride.coordinates = TripMap.densified(ride.coordinates)
+                    return ride
                 }
+                return change
             }
             // Each line of them on its own, for moving clear of the trip's own lines
-            let beside = zip(rides, otherChanges).map { rides, changes in
-                TripMap.beside(changes.map { change in change.rides.flatMap(TripMap.lines(of:)) }, of: rides)
+            let beside = TripMap.beside(otherChanges.map { change in change.rides.flatMap(TripMap.lines(of:)) }, of: rides)
+            let otherLaneOffsets = otherChanges.map { change in
+                change.rides.map { TripMap.laneOffsets($0.tracks, width: Double(TripMap.sideBySideWidth)) }
             }
-            let otherLaneOffsets = otherChanges.map { changes in
-                changes.map { change in change.rides.map { TripMap.laneOffsets($0.tracks, width: Double(TripMap.sideBySideWidth)) } }
-            }
-            let otherStations = otherChanges.map { changes in changes.map { $0.rides.map(TripMap.stationStops) } }
+            let otherStations = otherChanges.map { $0.rides.map(TripMap.stationStops) }
             let ends = [start, end].compactMap { $0 }
-            let bullets = zip(rides, otherChanges).map { rides, changes in
-                rides.map { $0.bulletAt(avoiding: changes.map(\.coordinate) + ends) }
-            }
-            let laneOffsets = rides.map { rides in
-                rides.map { TripMap.laneOffsets($0.tracks, width: Double(TripMap.sideBySideWidth)) }
-            }
-            let stations = rides.map { rides in rides.map(TripMap.stationStops) }
-            let areas = zip(rides, otherChanges).map { rides, changes in
-                TripMap.area(rides: [rides], otherChanges: [changes], start: start, end: end)
-            }
+            let bullets = rides.map { $0.bulletAt(avoiding: otherChanges.map(\.coordinate) + ends) }
+            let laneOffsets = rides.map { TripMap.laneOffsets($0.tracks, width: Double(TripMap.sideBySideWidth)) }
+            let stations = rides.map(TripMap.stationStops)
+            // None picked (no trips): the whole world, as before
+            let area = option == nil ? MKMapRect.world
+                : TripMap.area(rides: [rides], otherChanges: [otherChanges], start: start, end: end)
             version += 1
-            let drawn = Drawn(rides: rides, otherChanges: otherChanges, beside: beside, otherLaneOffsets: otherLaneOffsets,
-                              otherStations: otherStations, bullets: bullets, laneOffsets: laneOffsets,
-                              stations: stations, areas: areas, version: version)
-            self.key = key
-            self.drawn = drawn
-            return drawn
+            let made = Drawn(rides: rides, otherChanges: otherChanges, beside: beside, otherLaneOffsets: otherLaneOffsets,
+                             otherStations: otherStations, bullets: bullets, laneOffsets: laneOffsets,
+                             stations: stations, area: area, version: version)
+            drawn[picked] = made
+            return made
         }
     }
 
-    private var drawn: Drawn { cache.drawn(options: options, start: start, end: end) }
+    private var drawn: Drawn { cache.drawn(options: options, picked: picked, start: start, end: end) }
 
     /// The picked trip's walk all the way, if it's that.
     private var pickedWalk: Walk? {
@@ -168,7 +168,7 @@ struct TripMap: View {
 
     /// Where the picked trip's walks at either end go from and to.
     private var walkEnds: WalkEnds {
-        let rides = drawn.rides.indices.contains(picked) ? drawn.rides[picked] : []
+        let rides = drawn.rides
         let pair = { (coordinate: CLLocationCoordinate2D?) in coordinate.map { [$0.latitude, $0.longitude] } }
         return WalkEnds(start: pair(start), firstStation: pair(rides.first?.coordinates.first),
                         lastStation: pair(rides.last?.coordinates.last), end: pair(end))
@@ -180,7 +180,10 @@ struct TripMap: View {
         guard let from, let to, from.count == 2, to.count == 2 else { return nil }
         let start = CLLocationCoordinate2D(latitude: from[0], longitude: from[1])
         let end = CLLocationCoordinate2D(latitude: to[0], longitude: to[1])
-        guard let walk = try? await WalkingDirections.walk(from: start, to: end) else { return nil }
+        // No walk to ask Apple Maps for where there's none, as your own bike's ride from your
+        // door: drawn straight, without using up its directions for the trip's
+        guard MKMapPoint(start).distance(to: MKMapPoint(end)) > 25,
+              let walk = try? await WalkingDirections.walk(from: start, to: end) else { return nil }
         let points = walk.points.map(\.coordinate)
         return points.isEmpty ? nil : [start] + points + [end]
     }
@@ -193,6 +196,9 @@ struct TripMap: View {
         var topInset: CGFloat
         var bottomInset: CGFloat
         var covered: CGFloat
+        /// The map's size, as it's only measured once it's shown
+        var width: CGFloat
+        var height: CGFloat
     }
 
     /// What to frame for `area` to show clear of `covered`: `area`, in the room over it, with
@@ -205,10 +211,21 @@ struct TripMap: View {
                          width: Double(wide) * scale, height: Double(safe) * scale)
     }
 
+    /// `area` framed clear of `covered`, turned NY North if Settings says. A camera for the room
+    /// as measured, north up too: as `.rect`, framing again for new room was the same rect, which
+    /// MapKit never saw, so a map framed while the cards over it were still settling (with
+    /// little room) stayed zoomed right out, Perth Amboy to Stamford.
+    private func framing(_ area: MKMapRect) -> MapCameraPosition {
+        let room = MapRoom(size: CGSize(width: width, height: height),
+                           insets: EdgeInsets(top: topInset, leading: sideInsets / 2, bottom: bottomInset, trailing: sideInsets / 2))
+        return MapNorth.position(fitting: area, heading: MapNorth.heading(ny: nyNorth), in: room, covered: covered,
+                                 northUp: true)
+            ?? .rect(framed(area))
+    }
+
     /// What the map covers for the picked trip.
     private var area: MKMapRect {
-        let areas = drawn.areas
-        return areas.indices.contains(picked) ? areas[picked] : .world
+        drawn.area
     }
 
     /// Under the picked trip's lines, to lift them off the map's roads.
@@ -263,26 +280,27 @@ struct TripMap: View {
     /// Points another ride moves out by each meter, coming off or going back to where it runs
     /// along another: a full move out over a few hundred meters.
     private static let besideSlope: Double = 0.03
+    /// How far out another ride may move, at most, for how far along it is from its nearer end.
+    private static let besideReach: Double = 0.2
 
     var body: some View {
         let drawn = drawn
-        let rides = drawn.rides
-        let pickedRides = rides.indices.contains(picked) ? rides[picked] : []
-        let others = drawn.otherChanges.indices.contains(picked) ? drawn.otherChanges[picked] : []
-        let area = area
-        let mapPointsPerPoint = height > 0 ? (shownHeight ?? area.height) / Double(height) : 0
+        let pickedRides = drawn.rides
+        let others = drawn.otherChanges
+        let area = drawn.area
+        let mapPointsPerPoint = height > 0 ? linesScale ?? area.height / Double(height) : 0
         let widths = Widths(metersPerPoint: mapPointsPerPoint / MKMapPointsPerMeterAtLatitude(area.origin.coordinate.latitude))
-        let beside = drawn.beside.indices.contains(picked) ? drawn.beside[picked] : []
-        let bullets = drawn.bullets.indices.contains(picked) ? drawn.bullets[picked] : []
-        let laneOffsets = drawn.laneOffsets.indices.contains(picked) ? drawn.laneOffsets[picked] : []
-        let stationStops = drawn.stations.indices.contains(picked) ? drawn.stations[picked] : []
-        let otherLaneOffsets = drawn.otherLaneOffsets.indices.contains(picked) ? drawn.otherLaneOffsets[picked] : []
-        let otherStations = drawn.otherStations.indices.contains(picked) ? drawn.otherStations[picked] : []
+        let beside = drawn.beside
+        let bullets = drawn.bullets
+        let laneOffsets = drawn.laneOffsets
+        let stationStops = drawn.stations
+        let otherLaneOffsets = drawn.otherLaneOffsets
+        let otherStations = drawn.otherStations
         // New lines for new trips or another picked, rather than MapKit keeping the last ones'
         // colours for lines in the same place in the list
         // and for each zoom, as lines side by side are moved apart by points: MapKit kept a line's
         // last shape while its id stayed, drawing it apart from the others' and its stations
-        let zoom = mapPointsPerPoint > 0 ? Int((log2(mapPointsPerPoint) * 4).rounded()) : 0
+        let zoom = LineScale.id(of: mapPointsPerPoint)
         let tag = "\(drawn.version)-\(picked)-\(zoom)"
         // Your train on to each other change station, moved out beside the trip's other lines it
         // runs along, and drawn in pieces, without where it'd only be drawn over itself
@@ -301,7 +319,16 @@ struct TripMap: View {
             guard beside.indices.contains(index), beside[index].out.count == line.count else {
                 return [(color: color, line: Self.offset(line, by: lanes.map { $0 * widths.scale * mapPointsPerPoint }))]
             }
-            let outs = zip(lanes, beside[index].out).map { ($0 + $1) * widths.scale * mapPointsPerPoint }
+            // Out by points, but no further than a fifth of the way back to either end: zoomed
+            // out, a short ride's points out were longer than it, and it looped off round its curves
+            let points = line.map(MKMapPoint.init)
+            var along = [0.0]
+            for (a, b) in zip(points, points.dropFirst()) { along.append(along[along.count - 1] + hypot(b.x - a.x, b.y - a.y)) }
+            let total = along[along.count - 1]
+            let outs = zip(zip(lanes, beside[index].out), along).map { pair, at in
+                pair.0 * widths.scale * mapPointsPerPoint
+                    + min(pair.1 * widths.scale * mapPointsPerPoint, min(at, total - at) * Self.besideReach)
+            }
             return Self.pieces(of: line.count, without: beside[index].hidden).map { run in
                 (color: color, line: Self.offset(Array(line[run]), by: Array(outs[run])))
             }
@@ -435,7 +462,9 @@ struct TripMap: View {
                 let index = keyed.index
                 let ride = pickedRides[index]
                 if let bullet = bullets.indices.contains(index) ? bullets[index] : nil {
-                    Annotation("", coordinate: Self.place(of: bullet, mapPointsPerPoint: mapPointsPerPoint)) {
+                    // Centred on its line: pushed aside where its stations were close, it stood a
+                    // fixed few points off, a mile or more zoomed out, nowhere near the line
+                    Annotation("", coordinate: bullet.coordinate, anchor: .center) {
                         if ride.isBike {
                             BikeBullet(size: 20, electric: ride.route == CitiBike.Kind.eBike.rawValue, own: ride.isOwnBike)
                                 .overlay(Circle().stroke(.white, lineWidth: 2))
@@ -483,6 +512,7 @@ struct TripMap: View {
         }
         .mapStyle(.standard(emphasis: .muted, pointsOfInterest: .excludingAll))
         .mapControlVisibility(.hidden)
+        .turnsNorth($position)
         .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
             height = size.height
             width = size.width
@@ -497,9 +527,12 @@ struct TripMap: View {
         // New trips, or something opened or closed over them: frame them, wherever the map
         // was moved
         .task(id: Framing(options: options, picked: picked, topInset: topInset, bottomInset: bottomInset,
-                          covered: covered)) {
+                          covered: covered, width: width, height: height)) {
             bounds = nil
-            withAnimation(.smooth) { position = .rect(framed(self.area)) }
+            // A new map's put there at once: animated, it set off from MapKit's own view, and its
+            // lines, moved apart for that zoom, were drawn off their tracks until it settled
+            let framed = framing(self.area)
+            if position == .automatic { position = framed } else { withAnimation(.smooth) { position = framed } }
         }
         // The picked trip's walks along the streets, both asked for at once (cached for the
         // session, so picking a trip again is quick)
@@ -514,8 +547,16 @@ struct TripMap: View {
         }
         // Once framed, it can be moved and zoomed in, but not out or away from the trips, so it
         // only ever loads the trips' area
+        .onMapCameraChange(frequency: .continuous) { context in
+            let scale = LineScale.step(MapNorth.mapPointsPerPoint(context, height: height), from: linesScale ?? 0)
+            if scale != linesScale { linesScale = scale }
+        }
         .onMapCameraChange(frequency: .onEnd) { context in
-            shownHeight = context.rect.height
+            // Where it settled, as the last continuous change can be from partway through moving
+            // there, which left lines side by side moved apart for the wrong zoom, off their tracks
+            // the nearest step, without the hold that keeps it from flickering while it moves
+            let scale = LineScale.step(MapNorth.mapPointsPerPoint(context, height: height), from: 0)
+            if scale != linesScale { linesScale = scale }
             let area = self.area
             guard bounds == nil,
                   context.rect.insetBy(dx: -area.width * 0.05, dy: -area.height * 0.05).contains(area) else { return }
@@ -525,26 +566,10 @@ struct TripMap: View {
     }
 
     /// Where a ride's bullets go: on its line, with `room` meters from the nearest station
-    /// or other dot, and the way to the line's left, to stand them beside it where that's too
-    /// little for them.
+    /// or other dot.
     struct Bullet {
         var coordinate: CLLocationCoordinate2D
         var room: Double
-        var left: (x: Double, y: Double)
-    }
-
-    /// Points of room a bullet needs either side of it on its line, about its own size.
-    private static let bulletRoom: Double = 16
-    /// Points from its line a bullet stands where it hasn't that room, clear of the line's casing.
-    private static let bulletAside: Double = 17
-
-    /// `bullet`'s place as drawn, at `mapPointsPerPoint`: on its line, or beside it, to the left
-    /// (as other change stations' rides go to the right), where its stations are too close.
-    private static func place(of bullet: Bullet, mapPointsPerPoint: Double) -> CLLocationCoordinate2D {
-        let room = bullet.room * MKMapPointsPerMeterAtLatitude(bullet.coordinate.latitude) / mapPointsPerPoint
-        guard mapPointsPerPoint > 0, room < bulletRoom else { return bullet.coordinate }
-        let point = MKMapPoint(bullet.coordinate), aside = bulletAside * mapPointsPerPoint
-        return MKMapPoint(x: point.x + bullet.left.x * aside, y: point.y + bullet.left.y * aside).coordinate
     }
 
     /// Meters apart a ride's lines may be that are taken to run together: wider than
@@ -567,11 +592,24 @@ struct TripMap: View {
         let grids = lines.map { SegmentGrid($0, cell: reach) }
         return lines.indices.map { lane in
             let points = lines[lane]
-            // Where it'd be at each point: its place among the lines there
-            let target = points.map { point -> Double in
-                let together = lines.indices.filter { $0 == lane || grids[$0].isNear(point, within: reach) }
-                let place = together.firstIndex(of: lane) ?? 0
-                return (Double(place) - Double(together.count - 1) / 2) * width
+            // Where it'd be at each point: its place among the lines there, left to right as
+            // their tracks are, so one whose track runs east of the others is drawn east of them
+            // (by the list, the D was drawn west of the N and Q from DeKalb Av to Grand St, as
+            // its track went east, and the lines crossed); on the same track, as listed
+            let tie = 5 * perMeter
+            let target = points.indices.map { index -> Double in
+                let point = points[index]
+                let before = points[max(0, index - 1)], after = points[min(points.count - 1, index + 1)]
+                let dx = after.x - before.x, dy = after.y - before.y, run = hypot(dx, dy)
+                var count = 1, place = 0
+                for other in lines.indices where other != lane {
+                    guard let near = grids[other].nearest(to: point, within: reach) else { continue }
+                    count += 1
+                    // How far to this line's right the other's track is
+                    let right = run > 0 ? ((near.x - point.x) * -dy + (near.y - point.y) * dx) / run : 0
+                    if right < -tie || (abs(right) <= tie && other < lane) { place += 1 }
+                }
+                return (Double(place) - Double(count - 1) / 2) * width
             }
             // Blended: the mean over `laneBlend` meters around each point
             var along = [0.0]
@@ -991,7 +1029,12 @@ struct TripMap: View {
 
         /// Whether `point` is within `reach` map points (at most a square's side) of the line.
         func isNear(_ point: MKMapPoint, within reach: Double) -> Bool {
-            let squaredReach = reach * reach
+            nearest(to: point, within: reach) != nil
+        }
+
+        /// The line's nearest point to `point`, if within `reach` map points (at most a square's side).
+        func nearest(to point: MKMapPoint, within reach: Double) -> MKMapPoint? {
+            var best: (squared: Double, point: MKMapPoint)?
             let center = square(of: point)
             for x in (center.x - 1)...(center.x + 1) {
                 for y in (center.y - 1)...(center.y + 1) {
@@ -1000,12 +1043,15 @@ struct TripMap: View {
                         let dx = b.x - a.x, dy = b.y - a.y
                         let squared = dx * dx + dy * dy
                         let t = squared == 0 ? 0 : max(0, min(1, ((point.x - a.x) * dx + (point.y - a.y) * dy) / squared))
-                        let x = a.x + t * dx - point.x, y = a.y + t * dy - point.y
-                        if x * x + y * y <= squaredReach { return true }
+                        let near = MKMapPoint(x: a.x + t * dx, y: a.y + t * dy)
+                        let x = near.x - point.x, y = near.y - point.y
+                        if x * x + y * y <= reach * reach, x * x + y * y < best?.squared ?? .infinity {
+                            best = (x * x + y * y, near)
+                        }
                     }
                 }
             }
-            return false
+            return best?.point
         }
     }
 
@@ -1068,7 +1114,7 @@ extension SharedTrip.Option {
         func bulletAt(avoiding: [CLLocationCoordinate2D]) -> TripMap.Bullet? {
             let points = coordinates.map(MKMapPoint.init)
             guard let first = points.first else { return nil }
-            guard points.count > 1 else { return TripMap.Bullet(coordinate: first.coordinate, room: 0, left: (0, 0)) }
+            guard points.count > 1 else { return TripMap.Bullet(coordinate: first.coordinate, room: 0) }
             // Map points along the line to the start of each segment
             var starts = [0.0]
             for (a, b) in zip(points, points.dropFirst()) {
@@ -1091,24 +1137,21 @@ extension SharedTrip.Option {
                 }
                 return best.along
             }
-            // The point `distance` along the line, and the way to its left
-            func point(at distance: Double) -> (point: MKMapPoint, left: (x: Double, y: Double)) {
+            // The point `distance` along the line
+            func point(at distance: Double) -> MKMapPoint {
                 let index = max(0, min(points.count - 2, starts.lastIndex { $0 <= distance } ?? 0))
                 let length = starts[index + 1] - starts[index]
                 let t = length > 0 ? (distance - starts[index]) / length : 0
                 let a = points[index], b = points[index + 1]
-                let dx = b.x - a.x, dy = b.y - a.y, run = (dx * dx + dy * dy).squareRoot()
-                let left = run > 0 ? (x: dy / run, y: -dx / run) : (x: 0.0, y: 0.0)
-                return (MKMapPoint(x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t), left)
+                return MKMapPoint(x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t)
             }
             let marks = stops.count > 1 ? stops.map(along).sorted() : [0, starts[starts.count - 1]]
             let avoided = avoiding.map(MKMapPoint.init)
             // Each stretch's middle, and how far it is from its ends and anything avoided
             let middles = zip(marks, marks.dropFirst()).map { from, to in
                 let middle = point(at: (from + to) / 2)
-                return TripMap.Bullet(coordinate: middle.point.coordinate,
-                                      room: avoided.reduce((to - from) / 2) { min($0, $1.distance(to: middle.point)) },
-                                      left: middle.left)
+                return TripMap.Bullet(coordinate: middle.coordinate,
+                                      room: avoided.reduce((to - from) / 2) { min($0, $1.distance(to: middle)) })
             }
             return middles.max { $0.room < $1.room }
         }

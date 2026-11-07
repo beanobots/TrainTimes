@@ -12,10 +12,13 @@ final class NearbyLocation: NSObject, CLLocationManagerDelegate {
     private(set) var location: CLLocation?
     /// The last lookup failed (e.g. indoors, or no simulator location).
     private(set) var failed = false
+    /// Precise Location is on, or not asked yet: off, a fix is only good to a few miles.
+    private(set) var isPrecise: Bool
     private let manager = CLLocationManager()
 
     override init() {
         status = manager.authorizationStatus
+        isPrecise = Self.precise(manager)
         super.init()
         manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
     }
@@ -29,6 +32,10 @@ final class NearbyLocation: NSObject, CLLocationManagerDelegate {
 
     var isAllowed: Bool { status == .authorizedWhenInUse || status == .authorizedAlways }
 
+    private nonisolated static func precise(_ manager: CLLocationManager) -> Bool {
+        manager.authorizationStatus == .notDetermined || manager.accuracyAuthorization == .fullAccuracy
+    }
+
     /// Asks permission the first time; afterwards locates you if allowed.
     func find() {
         if status == .notDetermined {
@@ -41,7 +48,9 @@ final class NearbyLocation: NSObject, CLLocationManagerDelegate {
 
     nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         let status = manager.authorizationStatus
+        let precise = Self.precise(manager)
         Task { @MainActor in
+            self.isPrecise = precise
             // The Nearby widget uses the same permission
             if status != self.status {
                 WidgetCenter.shared.reloadTimelines(ofKind: Nearby.widgetKind)

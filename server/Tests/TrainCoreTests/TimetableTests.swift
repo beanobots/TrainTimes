@@ -91,6 +91,9 @@ private let today = newYork(2026, 10, 22, 7)
         #expect(TimetableBuilder.seconds("25:03:00") == 25 * 3600 + 180)
         #expect(TimetableBuilder.seconds(" 8:00:00") == 8 * 3600)
         #expect(TimetableBuilder.seconds("") == nil)
+        // Garbled, rather than overflowing
+        #expect(TimetableBuilder.seconds("99999999999999999:00:00") == nil)
+        #expect(TimetableBuilder.seconds("-9223372036854775808:00:00") == nil)
     }
 
     @Test func runsServicesByWeekdayDatesAndExceptions() throws {

@@ -18,6 +18,10 @@ struct TrainActivityAttributes: ActivityAttributes {
     var ends: Date? = nil
     /// From a Transfers widget, its change, whose lines' alerts it mentions too; nil otherwise.
     var change: Change? = nil
+    /// A bus home stop's countdown: its lines, stop and way, `selection` then standing for none.
+    /// Its state's routes are the buses' ("bus:B63"). The app keeps it up; the push server has
+    /// only trains.
+    var bus: BusChoice? = nil
 }
 
 // Only the app may start and update Live Activities, so iOS runs these in the app; the widget
@@ -140,6 +144,46 @@ struct ToggleCountdownIntent: LiveActivityIntent {
         }
         #endif
         return .result()
+    }
+}
+
+/// A saved bus widget's walk button: starts the countdown to its bus (the way it shows first), or
+/// stops it if it's this widget's (`TrainActivityController.toggle(bus:widgetID:)`).
+struct ToggleBusCountdownIntent: LiveActivityIntent {
+    static let title: LocalizedStringResource = "I'm on my way"
+    static let isDiscoverable = false
+
+    /// A `TrainEntry.widgetID`.
+    @Parameter(title: "Widget", default: "")
+    var widgetID: String
+
+    /// Its `BusChoice` as JSON.
+    @Parameter(title: "Bus")
+    var bus: String
+
+    init() {}
+
+    init(bus: BusChoice, widgetID: String) {
+        self.widgetID = widgetID
+        self.bus = (try? JSONEncoder().encode(bus)).flatMap { String(data: $0, encoding: .utf8) } ?? ""
+    }
+
+    func perform() async throws -> some IntentResult {
+        #if APP
+        SharedStore.recordTap(\.toggled, for: widgetID)
+        if let choice = try? JSONDecoder().decode(BusChoice.self, from: Data(bus.utf8)) {
+            try await TrainActivityController.toggle(bus: choice, widgetID: widgetID)
+        }
+        #endif
+        return .result()
+    }
+}
+
+extension BusChoice {
+    /// What `SharedStore.Countdown.trainID` holds while this bus is counted down to:
+    /// "bus:B63,B103@308209".
+    var countdownID: String {
+        BusLeg.prefix + allLines.joined(separator: ",") + "@" + stop.id
     }
 }
 

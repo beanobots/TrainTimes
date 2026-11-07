@@ -71,6 +71,7 @@ struct HomeStopPicker: View {
             }
             .navigationDestination(for: Step.self, destination: step)
         }
+        .onAppear { busPicked = bus != nil }
     }
 
     @ViewBuilder private func step(_ step: Step) -> some View {
@@ -126,6 +127,66 @@ struct HomeStopPicker: View {
     }
 }
 
+extension BusChoice {
+    /// `wayName` without its "via": "Bay Ridge Shore Rd", for the home stop's card and countdown.
+    var shortWayName: String {
+        destination.map(BusLineStopsStep.shortName) ?? wayName
+    }
+}
+
+// MARK: - A bus place's ways, for the picker and setup
+
+extension NearbyBusPlace {
+    /// `lines`' buses at `way`, soonest first, those due after `now`.
+    func buses(at way: NearbyBusPick.Way, lines: [String], now: Date) -> [BusArrival] {
+        let keys = Set(lines.map(BusRoutes.key))
+        return way.arrivals.filter { keys.contains(BusRoutes.key($0.line)) && ($0.time ?? .distantPast) > now }
+    }
+
+    /// The ways `lines` run from here: its stops with one of their buses due, else all.
+    func ways(for lines: [String]) -> [NearbyBusPick.Way] {
+        let shown = ways.filter { !buses(at: $0, lines: lines, now: .now).isEmpty }
+        return shown.isEmpty ? ways : shown
+    }
+
+    /// Where `lines`' buses from `way` go, each place once: "Pier 6 / Downtown Brooklyn".
+    func going(_ way: NearbyBusPick.Way, lines: [String]) -> String {
+        var names: [String] = []
+        for bus in buses(at: way, lines: lines, now: .distantPast) {
+            if let destination = bus.destination.map(BusLineStopsStep.shortName), !names.contains(destination) {
+                names.append(destination)
+            }
+        }
+        return names.isEmpty ? way.name : names.prefix(2).joined(separator: " / ")
+    }
+
+    /// "This side · Next: 4 min, 12 min"; with more than one line, each bus's.
+    func detail(_ way: NearbyBusPick.Way, index: Int, lines: [String], now: Date) -> String {
+        let side = index == 0 ? "This side" : "Across the street"
+        let next = buses(at: way, lines: lines, now: now).prefix(2).compactMap { bus -> String? in
+            guard let time = bus.time else { return nil }
+            let minutes = max(0, Int(time.timeIntervalSince(now) / 60))
+            let when = minutes == 0 ? "Now" : "\(minutes) min"
+            return lines.count > 1 ? "\(BusNames.label(bus.line)) \(when)" : when
+        }
+        return next.isEmpty ? side : "\(side) · Next: \(next.joined(separator: ", "))"
+    }
+
+    /// The home stop for `lines` going `index`'s way of `ways(for:)`, with the other way kept for
+    /// Both ways.
+    func choice(lines: [String], way index: Int, both: Bool) -> BusChoice? {
+        let ways = ways(for: lines)
+        guard ways.indices.contains(index), let first = lines.first else { return nil }
+        let way = ways[index]
+        let other = ways.indices.first { $0 != index }.map { ways[$0] }
+        let heading = { (way: NearbyBusPick.Way) in
+            buses(at: way, lines: lines, now: .distantPast).first?.destination ?? way.destination
+        }
+        return BusChoice(line: first, lines: lines.count > 1 ? lines : nil, stop: way.stop, destination: heading(way),
+                         otherStop: other?.stop, otherDestination: other.flatMap(heading), bothWays: both && other != nil)
+    }
+}
+
 // MARK: - Bus steps
 
 /// Bus step 1: the stops near you, each with its lines and walk; typing, the lines it matches, and
@@ -134,6 +195,7 @@ private struct BusHomeStep: View {
     let chosen: BusChoice?
     let pick: (NearbyBusPlace) -> Void
     let line: (String) -> Void
+    @Environment(\.openURL) private var openURL
     @State private var location = NearbyLocation()
     @State private var search = ""
     @State private var places: [NearbyBusPlace]?
@@ -165,7 +227,12 @@ private struct BusHomeStep: View {
             if searched == nil, !location.isAllowed {
                 Section {
                     Button {
-                        location.find()
+                        // Denied: find() asks nothing, so Settings is where to turn it on
+                        if location.status == .denied, let url = URL(string: UIApplication.openSettingsURLString) {
+                            openURL(url)
+                        } else {
+                            location.find()
+                        }
                     } label: {
                         Label("Show stops near you", systemImage: "location")
                     }
@@ -184,7 +251,6 @@ private struct BusHomeStep: View {
                         } label: {
                             placeRow(place)
                         }
-                        .foregroundStyle(.primary)
                     }
                 } header: {
                     Text(searched.map { "Near \($0)" } ?? "Nearby")
@@ -192,6 +258,14 @@ private struct BusHomeStep: View {
             } else if failed {
                 Section {
                     Text("Couldn't reach Bus Time").foregroundStyle(.secondary)
+                }
+            } else if searched == nil, location.failed, location.location == nil {
+                // Allowed, but no fix came: said so, as Nearby does, not "Finding stops…" forever
+                Section {
+                    Label("Couldn't Find You", systemImage: "location.slash").foregroundStyle(.secondary)
+                    Button("Try Again") { location.find() }
+                } footer: {
+                    Text("Your location isn't available right now.")
                 }
             } else if location.isAllowed || searched != nil {
                 Section {
@@ -229,6 +303,8 @@ private struct BusHomeStep: View {
             location.start()
             if location.isAllowed { location.find() }
         }
+        // The bus lines read off the main thread now, not on the first letter typed
+        .task { await Task.detached(priority: .utility) { _ = BusRoutes.lineNames }.value }
         .task(id: location.location.map { "\($0.coordinate.latitude),\($0.coordinate.longitude)" }) {
             guard searched == nil, let here = location.location else { return }
             await find(near: here, named: nil)
@@ -244,6 +320,8 @@ private struct BusHomeStep: View {
         }
         places = nil
         let found = await NearbyBuses.places(near: place, wait: NearbyBuses.appWait)
+        // A later search (or clearing it) took over meanwhile: its stops, not these, go under its header
+        guard searched == name else { return }
         failed = found == nil
         places = found
     }
@@ -369,41 +447,12 @@ private struct BusWayStep: View {
     let lines: [String]
     let current: BusChoice?
     let done: (BusChoice) -> Void
+    @State private var now = Date.now
 
-    private func key(_ line: String) -> String { BusRoutes.key(line) }
+    private var ways: [NearbyBusPick.Way] { place.ways(for: lines) }
 
-    /// The lines' buses at `way`, soonest first.
-    private func buses(at way: NearbyBusPick.Way, now: Date) -> [BusArrival] {
-        let keys = Set(lines.map(key))
-        return way.arrivals.filter { keys.contains(key($0.line)) && ($0.time ?? .distantPast) > now }
-    }
-
-    /// Where the lines' buses from `way` go: each place once, "Pier 6 / Downtown Brooklyn".
-    private func going(_ way: NearbyBusPick.Way) -> String {
-        var names: [String] = []
-        for bus in buses(at: way, now: .distantPast) {
-            if let destination = bus.destination.map(BusNames.destination), !names.contains(destination) {
-                names.append(destination)
-            }
-        }
-        return names.isEmpty ? way.name : names.prefix(2).joined(separator: " / ")
-    }
-
-    /// The ways the lines run from here: the place's stops with one of their buses due.
-    private var ways: [NearbyBusPick.Way] {
-        let shown = place.ways.filter { !buses(at: $0, now: .now).isEmpty }
-        return shown.isEmpty ? place.ways : shown
-    }
-
-    private func choice(_ index: Int, both: Bool) -> BusChoice {
-        let way = ways[index]
-        let other = ways.indices.first { $0 != index }.map { ways[$0] }
-        let first = lines.first ?? ""
-        return BusChoice(line: first, lines: lines.count > 1 ? lines : nil, stop: way.stop,
-                         destination: buses(at: way, now: .distantPast).first?.destination ?? way.destination,
-                         otherStop: other?.stop,
-                         otherDestination: other.flatMap { buses(at: $0, now: .distantPast).first?.destination ?? $0.destination },
-                         bothWays: both && other != nil)
+    private func choice(_ index: Int, both: Bool) -> BusChoice? {
+        place.choice(lines: lines, way: index, both: both)
     }
 
     var body: some View {
@@ -420,23 +469,23 @@ private struct BusWayStep: View {
                 }
                 .accessibilityElement(children: .combine)
             }
-            TimelineView(.periodic(from: .now, by: 15)) { context in
-                Section {
+            Section {
                     ForEach(ways.indices, id: \.self) { index in
                         let way = ways[index]
                         let picked = current.map { !$0.bothWays && $0.stop.id == way.stop.id } ?? false
                         Button {
-                            done(choice(index, both: false))
+                            if let choice = choice(index, both: false) { done(choice) }
                         } label: {
-                            wayRow(symbol: index == 0 ? "arrow.up" : "arrow.down", title: "Toward \(going(way))",
-                                   detail: detail(way, index: index, now: context.date), on: picked)
+                            wayRow(symbol: index == 0 ? "arrow.up" : "arrow.down",
+                                   title: "Toward \(place.going(way, lines: lines))",
+                                   detail: place.detail(way, index: index, lines: lines, now: now), on: picked)
                         }
                         .foregroundStyle(.primary)
                     }
                     if ways.count == 2 {
-                        let picked = current.map { $0.bothWays && ways.contains { way in way.stop.id == $0.stop.id } } ?? false
+                        let picked = current.map { bus in bus.bothWays && ways.contains { $0.stop.id == bus.stop.id } } ?? false
                         Button {
-                            done(choice(0, both: true))
+                            if let choice = choice(0, both: true) { done(choice) }
                         } label: {
                             wayRow(symbol: "arrow.up.arrow.down", title: "Both ways",
                                    detail: "The medium widget shows the next bus each way", on: picked)
@@ -446,24 +495,18 @@ private struct BusWayStep: View {
                 } header: {
                     Text("Which way do you ride?")
                 }
-            }
         }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .principal) { StepTitle(title: "Direction", step: 2) }
         }
-    }
-
-    /// "This side · Next: 4 min, 12 min"; with more than one line, each bus's.
-    private func detail(_ way: NearbyBusPick.Way, index: Int, now: Date) -> String {
-        let side = index == 0 ? "This side" : "Across the street"
-        let next = buses(at: way, now: now).prefix(2).compactMap { bus -> String? in
-            guard let time = bus.time else { return nil }
-            let minutes = max(0, Int(time.timeIntervalSince(now) / 60))
-            let when = minutes == 0 ? "Now" : "\(minutes) min"
-            return lines.count > 1 ? "\(BusNames.label(bus.line)) \(when)" : when
+        // The next buses' minutes, kept current
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(15))
+                now = .now
+            }
         }
-        return next.isEmpty ? side : "\(side) · Next: \(next.joined(separator: ", "))"
     }
 
     private func wayRow(symbol: String, title: String, detail: String, on: Bool) -> some View {
@@ -490,7 +533,7 @@ private struct BusWayStep: View {
 
 /// From a line searched for: its two ways, then its stops in riding order on a line of its own, the
 /// one nearest you marked. A tap on a stop finishes; Both ways keeps the stop across the street too.
-private struct BusLineStopsStep: View {
+struct BusLineStopsStep: View {
     let line: String
     let done: (BusChoice) -> Void
     @State private var location = NearbyLocation()
@@ -513,9 +556,15 @@ private struct BusLineStopsStep: View {
         return [first] + (other.map { [$0] } ?? [])
     }
 
-    /// "Pier 6 – Bay Ridge": where its two ways go.
+    /// A headsign without its "via": "Pier 6 Bklyn Bridge Park".
+    static func shortName(_ headsign: String) -> String {
+        let name = BusNames.destination(headsign)
+        return name.range(of: " via ", options: .caseInsensitive).map { String(name[..<$0.lowerBound]) } ?? name
+    }
+
+    /// "Pier 6 Bklyn Bridge Park – Bay Ridge Shore Rd": where its two ways go.
     static func ends(of line: String) -> String {
-        let names = mainWays(of: line).map { BusNames.destination($0.to) }
+        let names = mainWays(of: line).map { shortName($0.to) }
         return names.isEmpty ? "Bus line" : names.joined(separator: " – ")
     }
 
@@ -541,32 +590,29 @@ private struct BusLineStopsStep: View {
                 Section {
                     Picker("Way", selection: $wayIndex) {
                         ForEach(ways.indices, id: \.self) { index in
-                            Text("To \(BusNames.destination(ways[index].to))").tag(index)
+                            Text("To \(Self.shortName(ways[index].to))").tag(index)
                         }
                     }
                     .pickerStyle(.segmented)
-                    .listRowBackground(Color.clear)
-                    .listRowInsets(EdgeInsets())
+                    Toggle("Both ways", isOn: $both)
+                } footer: {
+                    Text("Both ways keeps the stop you pick and the one across the street.")
                 }
             }
             if let way {
+                // Once, not per row: each would search every stop
+                let nearest = nearest
                 Section {
                     ForEach(Array(way.stops.enumerated()), id: \.offset) { index, stop in
                         Button {
                             done(choice(at: stop, on: way))
                         } label: {
-                            stopRow(stop, first: index == 0, last: index == way.stops.count - 1)
+                            stopRow(stop, first: index == 0, last: index == way.stops.count - 1,
+                                    isNearest: stop.code == nearest)
                         }
                         .foregroundStyle(.primary)
                         .listRowSeparator(.hidden)
                         .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
-                    }
-                    if ways.count == 2 {
-                        Toggle("Both ways", isOn: $both)
-                    }
-                } footer: {
-                    if ways.count == 2 {
-                        Text("Both ways keeps this stop and the one across the street.")
                     }
                 }
             } else {
@@ -593,9 +639,8 @@ private struct BusLineStopsStep: View {
                          otherDestination: other?.to, bothWays: both && across != nil)
     }
 
-    private func stopRow(_ stop: BusRoutes.Stop, first: Bool, last: Bool) -> some View {
-        let isNearest = stop.code == nearest
-        return HStack(spacing: 12) {
+    private func stopRow(_ stop: BusRoutes.Stop, first: Bool, last: Bool, isNearest: Bool) -> some View {
+        HStack(spacing: 12) {
             // The line down the stops, as a route map
             ZStack {
                 Rectangle()

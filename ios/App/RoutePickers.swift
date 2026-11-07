@@ -7,10 +7,20 @@ import SwiftUI
 /// name. With `kind`, straight to that kind's steps, to change a widget's bus or dock.
 struct NewWidgetPicker: View {
     var kind: SavedRouteKind? = nil
+    /// The route whose departure is being changed: its train is ticked and kept as the start,
+    /// and a subway or bus route can switch between Stations and Stops.
+    var editing: SavedWidget? = nil
     let done: (SavedWidget) -> Void
     @Environment(\.dismiss) private var dismiss
     @Environment(SettingsStore.self) private var settings
     @State private var path: [Step] = []
+    /// Stations or Stops, once switched from `kind`'s.
+    @State private var departure: SavedRouteKind?
+
+    /// The train being changed, if `editing` is a subway route.
+    private var editingTrain: Selection? {
+        editing?.kind == .subway ? editing?.selection : nil
+    }
 
     enum Step: Hashable {
         case station
@@ -44,9 +54,32 @@ struct NewWidgetPicker: View {
                 case .bike: path.append(.dock)
                 }
             }
-        case .subway: stationStep
-        case .bus: busStopStep
+        case .subway, .bus:
+            if editing != nil {
+                departureStep
+            } else if kind == .subway {
+                stationStep
+            } else {
+                busStopStep
+            }
         case .bike: dockStep
+        }
+    }
+
+    /// A route's departure: its stations or stops, with a switch between them at the top.
+    @ViewBuilder private var departureStep: some View {
+        let showing = Binding { departure ?? kind ?? .subway } set: { departure = $0 }
+        Group {
+            if showing.wrappedValue == .bus { busStopStep } else { stationStep }
+        }
+        .safeAreaBar(edge: .top) {
+            Picker("Depart from", selection: showing) {
+                Text("Stations").tag(SavedRouteKind.subway)
+                Text("Stops").tag(SavedRouteKind.bus)
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 16)
+            .padding(.bottom, 8)
         }
     }
 
@@ -59,8 +92,11 @@ struct NewWidgetPicker: View {
                 path.append(.direction(station, routes: routes))
             }
         case .direction(let station, let routes):
-            DirectionStep(station: station, routes: routes, current: nil, offersBoth: true, bothCurrent: false) { direction, both in
-                var selection = settings.defaultTrain
+            let same = station.id == editingTrain?.stationID && routes == editingTrain?.routes
+            DirectionStep(station: station, routes: routes, current: same ? editingTrain?.direction : nil,
+                          offersBoth: true, bothCurrent: same && editing?.bothWays == true) { direction, both in
+                // The route's own train kept as the start, so its alert switches stay
+                var selection = editingTrain ?? settings.defaultTrain
                 selection.stationID = station.id
                 selection.routes = routes
                 selection.direction = direction
@@ -80,11 +116,12 @@ struct NewWidgetPicker: View {
     }
 
     private var stationStep: some View {
-        StationStep(chosenID: nil) { station, filter in
+        StationStep(chosenID: editingTrain?.stationID) { station, filter in
             if station.routes.count == 1 {
                 path.append(.direction(station, routes: station.routes))
             } else {
-                let chosen = filter.map { label in station.routes.filter { LineStyle.of($0).label == label } } ?? []
+                let current = station.id == editingTrain?.stationID ? editingTrain?.routes ?? [] : []
+                let chosen = filter.map { label in station.routes.filter { LineStyle.of($0).label == label } } ?? current
                 path.append(.lines(station, chosen: chosen))
             }
         }
@@ -162,7 +199,7 @@ private struct KindStep: View {
             .padding(.top, 12)
         }
         .background(Color(.systemGroupedBackground))
-        .navigationTitle("New Widget")
+        .navigationTitle("New Route")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
             location.start()
@@ -212,11 +249,11 @@ private struct KindStep: View {
 
 /// "0.1 mi".
 private func distance(_ meters: Double) -> String {
-    Measurement(value: meters, unit: UnitLength.meters).formatted(.measurement(width: .abbreviated, usage: .road))
+    Nearby.distance(meters)
 }
 
 /// Where a search for a street or place is, in New York, for stops or docks near it.
-private func searchedPlace(_ text: String) async -> CLLocation? {
+func findPlace(_ text: String) async -> CLLocation? {
     let request = MKLocalSearch.Request()
     request.naturalLanguageQuery = text
     request.region = MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: 40.71, longitude: -73.95),
@@ -228,6 +265,7 @@ private func searchedPlace(_ text: String) async -> CLLocation? {
 /// Bus step 1: the stops near you, or near a street or place searched for, each with its routes.
 private struct BusStopStep: View {
     let pick: (NearbyBusPlace) -> Void
+    @Environment(\.openURL) private var openURL
     @State private var location = NearbyLocation()
     @State private var search = ""
     @State private var places: [NearbyBusPlace]?
@@ -240,7 +278,12 @@ private struct BusStopStep: View {
             if searched == nil, !location.isAllowed {
                 Section {
                     Button {
-                        location.find()
+                        // Denied: find() asks nothing, so Settings is where to turn it on
+                        if location.status == .denied, let url = URL(string: UIApplication.openSettingsURLString) {
+                            openURL(url)
+                        } else {
+                            location.find()
+                        }
                     } label: {
                         Label("Show stops near you", systemImage: "location")
                     }
@@ -268,6 +311,14 @@ private struct BusStopStep: View {
                 Section {
                     Text("Couldn't reach Bus Time").foregroundStyle(.secondary)
                 }
+            } else if searched == nil, location.failed, location.location == nil {
+                // Allowed, but no fix came: said so, as Nearby does, not "Finding stops…" forever
+                Section {
+                    Label("Couldn't Find You", systemImage: "location.slash").foregroundStyle(.secondary)
+                    Button("Try Again") { location.find() }
+                } footer: {
+                    Text("Your location isn't available right now.")
+                }
             } else if location.isAllowed || searched != nil {
                 Section {
                     HStack(spacing: 8) {
@@ -281,7 +332,7 @@ private struct BusStopStep: View {
         .onSubmit(of: .search) {
             let text = search.trimmingCharacters(in: .whitespaces)
             guard !text.isEmpty else { return }
-            Task { await find(near: searchedPlace(text), named: text) }
+            Task { await find(near: findPlace(text), named: text) }
         }
         .onChange(of: search) { _, text in
             // Cleared: back to near you
@@ -314,6 +365,8 @@ private struct BusStopStep: View {
         }
         places = nil
         let found = await NearbyBuses.places(near: place, wait: NearbyBuses.appWait)
+        // Not stops near you landing after a search's, under its "Near …", or the other way round
+        guard searched == name else { return }
         failed = found == nil
         places = found
     }
@@ -515,6 +568,7 @@ private struct BusDirectionStep: View {
 /// each with its bikes, e-bikes and free docks in columns. Typing filters by name too.
 private struct DockStep: View {
     let pick: (DockChoice) -> Void
+    @Environment(\.openURL) private var openURL
     @State private var location = NearbyLocation()
     @State private var search = ""
     @State private var docks: [CitiBike.Dock]?
@@ -529,7 +583,9 @@ private struct DockStep: View {
         let text = search.trimmingCharacters(in: .whitespaces)
         let named = text.isEmpty || searchedPlace != nil ? docks : docks.filter { $0.name.localizedCaseInsensitiveContains(text) }
         guard let origin else { return Array(named.sorted { $0.name < $1.name }.prefix(60)) }
-        return Array(named.sorted { $0.location.distance(from: origin) < $1.location.distance(from: origin) }.prefix(30))
+        // Each dock's distance once, not again at every comparison of the sort
+        return named.map { (dock: $0, meters: $0.location.distance(from: origin)) }
+            .sorted { $0.meters < $1.meters }.prefix(30).map { $0.dock }
     }
 
     var body: some View {
@@ -537,7 +593,12 @@ private struct DockStep: View {
             if search.isEmpty, !location.isAllowed {
                 Section {
                     Button {
-                        location.find()
+                        // Denied: find() asks nothing, so Settings is where to turn it on
+                        if location.status == .denied, let url = URL(string: UIApplication.openSettingsURLString) {
+                            openURL(url)
+                        } else {
+                            location.find()
+                        }
                     } label: {
                         Label("Show docks near you", systemImage: "location")
                     }
@@ -576,7 +637,7 @@ private struct DockStep: View {
             let text = search.trimmingCharacters(in: .whitespaces)
             guard !text.isEmpty else { return }
             Task {
-                if let found = await RoutePickers.searchedPlace(text) { searchedPlace = (text, found) }
+                if let found = await findPlace(text) { searchedPlace = (text, found) }
             }
         }
         .onChange(of: search) { _, text in
@@ -631,9 +692,299 @@ private struct DockStep: View {
     }
 }
 
-/// For the steps' searches, by a name the views' own properties don't hide.
-private enum RoutePickers {
-    static func searchedPlace(_ text: String) async -> CLLocation? {
-        await ios.searchedPlace(text)
+// MARK: - Fields
+
+/// A bus or dock widget's fields, for adding and editing it: its name, then its bus or dock (a
+/// tap picks another), and for a bus going two ways, Both directions.
+struct RouteFields: View {
+    @Binding var widget: SavedWidget
+    @State private var choosing = false
+    @State private var addingChange = false
+
+    private var placeholder: String { widget.bus?.stopName ?? widget.dock?.name ?? "Name" }
+
+    var body: some View {
+        Section {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Name")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                TextField(placeholder, text: $widget.name)
+                    .font(.headline)
+                    .accessibilityLabel("Name")
+            }
+            .padding(.vertical, 4)
+            Button {
+                choosing = true
+            } label: {
+                HStack(spacing: 12) {
+                    if let bus = widget.bus, widget.kind == .bus {
+                        BusBadge(line: bus.line, size: 28)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(bus.stopName).font(.body)
+                            Text(bus.bothWays ? "Both directions" : "to \(bus.wayName)")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                    } else if let dock = widget.dock {
+                        CitiBikeMark(size: 28)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(dock.name).font(.body)
+                            Text("Citi Bike dock").font(.subheadline).foregroundStyle(.secondary)
+                        }
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                }
+                .contentShape(Rectangle())
+            }
+            .foregroundStyle(.primary)
+            .accessibilityHint(widget.kind == .bus ? "Picks another bus" : "Picks another dock")
+            if widget.kind == .bus, widget.bus?.otherStop != nil {
+                Toggle("Both directions", isOn: Binding {
+                    widget.bus?.bothWays ?? false
+                } set: { both in
+                    widget.bus?.bothWays = both
+                    widget.bothWays = both
+                })
+            }
+        }
+        .sheet(isPresented: $choosing) {
+            NewWidgetPicker(kind: widget.kind, editing: widget) { widget.takeDeparture($0) }
+        }
+        if widget.kind == .bus, let bus = widget.bus {
+            changeSection(bus)
+        }
     }
+
+    /// A bus's changes to a train, each an alternative, and a button to add one.
+    private func changeSection(_ bus: BusChoice) -> some View {
+        Section {
+            ForEach(Array((bus.changes ?? []).enumerated()), id: \.offset) { index, change in
+                HStack(spacing: 12) {
+                    LineBullets(routes: change.selection.routes, size: 30)
+                        .frame(width: 46)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(index == 0 ? "Then change at" : "Or change at")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Text(change.selection.station?.name ?? "Station").font(.headline)
+                        Text("\(change.selection.heading) · off at \(BusNames.readable(change.stop.name)), \(change.walkMinutes) min walk")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+            .onDelete { offsets in
+                widget.bus?.changes?.remove(atOffsets: offsets)
+                if widget.bus?.changes?.isEmpty == true { widget.bus?.changes = nil }
+            }
+            Button(bus.changes?.isEmpty ?? true ? "Add a Change to the Subway" : "Add Another Change",
+                   systemImage: "plus") {
+                addingChange = true
+            }
+        } footer: {
+            if !(bus.changes?.isEmpty ?? true) {
+                Text("Medium and large show the trains each bus gets you to.")
+            }
+        }
+        .sheet(isPresented: $addingChange) {
+            BusChangePicker(bus: bus) { change in
+                widget.bus?.changes = (widget.bus?.changes ?? []) + [change]
+            }
+        }
+    }
+}
+
+extension SavedWidget {
+    /// Takes the departure `NewWidgetPicker` picked for this route, which may turn a subway
+    /// route into a bus one or back. The name and id stay.
+    mutating func takeDeparture(_ picked: SavedWidget) {
+        bothWays = picked.bothWays
+        switch picked.kind {
+        case .subway:
+            // From a bus there's no train to keep a change or destination for
+            if kind != .subway {
+                change = nil
+                destinationID = nil
+            }
+            setSelection(picked.selection)
+            bus = nil
+            dock = nil
+        case .bus:
+            // A train's change and destination mean nothing to a bus
+            change = nil
+            destinationID = nil
+            bus = picked.bus
+            dock = nil
+        case .bike:
+            bus = nil
+            dock = picked.dock
+        }
+        kind = picked.kind
+    }
+}
+
+/// Picks a bus's change to a train: the stations along the ride, each at the stop with the
+/// shortest walk to it (within `walk`), then the station's lines and way.
+struct BusChangePicker: View {
+    let bus: BusChoice
+    let done: (BusChange) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var path: [Step] = []
+
+    enum Step: Hashable {
+        case lines(Place)
+        case direction(Place, routes: [String])
+    }
+
+    /// A station to change to, where to get off for it, and the ride and walk there.
+    struct Place: Hashable, Identifiable {
+        var station: Station
+        var stop: BusRoutes.Stop
+        var minutes: Double
+        var walkMinutes: Int
+
+        var id: String { station.id }
+    }
+
+    /// The furthest walk from a stop to a station offered.
+    nonisolated static let walk = 12
+
+    var body: some View {
+        NavigationStack(path: $path) {
+            BusChangeAtStep(bus: bus) { place in
+                if place.station.routes.count == 1 {
+                    path.append(.direction(place, routes: place.station.routes))
+                } else {
+                    path.append(.lines(place))
+                }
+            }
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(role: .cancel) { dismiss() }
+                }
+            }
+            .navigationDestination(for: Step.self) { step in
+                switch step {
+                case .lines(let place):
+                    LinesStep(station: place.station, chosen: []) { routes in
+                        path.append(.direction(place, routes: routes))
+                    }
+                case .direction(let place, let routes):
+                    DirectionStep(station: place.station, routes: routes, current: nil, offersBoth: false,
+                                  bothCurrent: false) { direction, _ in
+                        var selection = Selection.fallback
+                        selection.stationID = place.station.id
+                        selection.routes = routes
+                        selection.direction = direction
+                        done(BusChange(stop: place.stop.busStop, minutes: place.minutes, walkMinutes: place.walkMinutes,
+                                       selection: selection))
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The stations a bus ride passes near, in the ride's order: each once, at the stop with the
+/// shortest walk to it, with the ride's minutes there by the timetable. Searchable by name.
+private struct BusChangeAtStep: View {
+    let bus: BusChoice
+    let pick: (BusChangePicker.Place) -> Void
+    @State private var places: [BusChangePicker.Place]?
+    @State private var search = ""
+
+    private var shown: [BusChangePicker.Place] {
+        let query = StationSearch(search)
+        guard !search.isEmpty else { return places ?? [] }
+        let matched = Set(query.filter((places ?? []).map(\.station)).map(\.id))
+        return (places ?? []).filter { matched.contains($0.station.id) }
+    }
+
+    var body: some View {
+        List {
+            if let places {
+                Section {
+                    if places.isEmpty {
+                        Text("No stations near this ride's stops in the timetable")
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(shown) { place in
+                        Button {
+                            pick(place)
+                        } label: {
+                            row(place)
+                        }
+                        .foregroundStyle(.primary)
+                    }
+                } header: {
+                    Text("Along the \(BusNames.label(bus.line)) to \(bus.wayName)")
+                }
+            } else {
+                HStack(spacing: 8) {
+                    ProgressView()
+                    Text("Finding stations along the ride…").foregroundStyle(.secondary)
+                }
+            }
+        }
+        .searchable(text: $search, prompt: "Search stations")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .principal) { StepTitle(title: "Change At", step: 0) }
+        }
+        .task {
+            let bus = bus
+            places = await Task.detached { Self.places(for: bus) }.value
+        }
+    }
+
+    private func row(_ place: BusChangePicker.Place) -> some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(place.station.name)
+                LineBullets(routes: place.station.routes, size: 18)
+                Text("Off at \(BusNames.readable(place.stop.name)) · \(Int(place.minutes.rounded())) min ride")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            // The walk in full, on the right
+            Text("\(place.walkMinutes) min walk from the \(BusNames.label(bus.line))")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.trailing)
+                .frame(maxWidth: 110, alignment: .trailing)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    /// Along the ride from `bus`'s stop, each station within `BusChangePicker.walk` of a stop,
+    /// at its shortest walk, in the order the ride reaches it.
+    nonisolated static func places(for bus: BusChoice) -> [BusChangePicker.Place] {
+        let ahead = BusRoutes.ahead(on: bus.line, from: bus.stop.id, toward: bus.destination)
+        var best: [String: (place: BusChangePicker.Place, order: Int)] = [:]
+        // A walk's never shorter than the crow flies: about 67 m a minute
+        let reach = Double(BusChangePicker.walk) * 70
+        for (order, stop) in ahead.enumerated() {
+            for station in StationDirectory.all where station.location.distance(from: stop.stop.location) < reach {
+                let walk = TripPlanner.walkMinutes(station.location.distance(from: stop.stop.location))
+                guard walk <= BusChangePicker.walk else { continue }
+                if best[station.id].map({ walk < $0.place.walkMinutes }) ?? true {
+                    best[station.id] = (BusChangePicker.Place(station: station, stop: stop.stop, minutes: stop.minutes,
+                                                              walkMinutes: walk), best[station.id]?.order ?? order)
+                }
+            }
+        }
+        return best.values.sorted { ($0.order, $0.place.walkMinutes) < ($1.order, $1.place.walkMinutes) }.map(\.place)
+    }
+}
+
+#Preview("New Widget") {
+    NewWidgetPicker { _ in }
+        .environment(SettingsStore())
 }

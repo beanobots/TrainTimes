@@ -657,6 +657,17 @@ enum StationDirectory {
         (route, branches(stops, of: route))
     })
 
+    /// Each of `branches(of:)` as each stop's place along it, the first where a platform's
+    /// listed twice; empty if not listed.
+    static func branchPositions(of route: String) -> [[String: Int]] {
+        routeBranchPositions[route] ?? []
+    }
+
+    /// `branchPositions(of:)`, worked out once: `Change.isAhead` asks for every change it checks.
+    private static let routeBranchPositions: [String: [[String: Int]]] = routeBranches.mapValues { branches in
+        branches.map { stops in Dictionary(stops.enumerated().map { ($0.element, $0.offset) }, uniquingKeysWith: min) }
+    }
+
     /// `stops` (`route`'s own, as lines.json lists them) as each way from the line's north end to
     /// an end south. lines.json puts a branch right after the stop it leaves from, then the rest
     /// of the line after the branch's end, which is a stop with no name going south: the A's
@@ -728,6 +739,27 @@ enum StationDirectory {
     static func stations(inComplexOf station: Station) -> [Station] {
         [station] + (byComplex[station.complex] ?? []).filter { $0.id != station.id }
     }
+
+    /// `stations(inComplexOf:)`, then stations outside the complex with a free transfer the MTA
+    /// times (`Platform.walks`), a walk along the street: Junius St's 3 for Livonia Av's L,
+    /// Lexington Av/63 St for 59 St. Only for finding and timing changes; boards and
+    /// alerts keep to the complex.
+    static func changeStations(of station: Station) -> [Station] {
+        stations(inComplexOf: station) + (streetTransfers[station.complex] ?? [])
+    }
+
+    /// Each complex's stations outside it that `changeStations(of:)` adds, in the list's order.
+    private static let streetTransfers: [String: [Station]] = {
+        var found: [String: [Station]] = [:]
+        for platform in platforms {
+            for id in (platform.walks ?? [:]).keys.sorted() {
+                guard let other = byID[id], other.complex != platform.complex,
+                      found[platform.complex]?.contains(other) != true else { continue }
+                found[platform.complex, default: []].append(other)
+            }
+        }
+        return found
+    }()
 
     /// Feed stop ids at `station` and stations joined to it, both ways, e.g. "D17N": where a
     /// train gets to a destination.

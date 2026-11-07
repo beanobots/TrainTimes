@@ -3,15 +3,13 @@ import WidgetKit
 
 /// Which Home Screen widget the Widgets tab draws a saved widget as.
 enum WidgetLook: String, CaseIterable, Identifiable {
-    /// Next train, small and medium (which shows a change as Transfers does); Transfers, large.
+    /// The Saved Route widget's sizes.
     case small, medium, largeTransfers
 
     var id: Self { self }
 
-    var isTransfers: Bool { self == .largeTransfers }
-
-    /// "Next Train" or "Transfers", as the Home Screen's widget gallery names them.
-    var kindName: String { isTransfers ? "Transfers" : "Next Train" }
+    /// As the Home Screen's widget gallery names it.
+    var kindName: String { "Saved Route" }
 
     var sizeName: String {
         switch self {
@@ -21,7 +19,7 @@ enum WidgetLook: String, CaseIterable, Identifiable {
         }
     }
 
-    /// "Next Train · Medium".
+    /// "Saved Route · Medium".
     var title: String { "\(kindName) · \(sizeName)" }
 
     /// Its outline in the picker's tiles: square, wide, or as wide and tall.
@@ -52,52 +50,20 @@ enum WidgetLook: String, CaseIterable, Identifiable {
     }
 }
 
-/// How the Home Screen draws widgets: as they are, or with a Clear or Tinted Home Screen, where
-/// WidgetKit uses the accented rendering mode, tints everything one colour and puts the widget
-/// on glass instead of its background.
-enum WidgetAppearance: String, CaseIterable, Identifiable {
-    case standard, clear, tinted
-
-    var id: Self { self }
-
-    var name: String {
-        switch self {
-        case .standard: "Default"
-        case .clear: "Clear"
-        case .tinted: "Tinted"
-        }
-    }
-
-    var renderingMode: WidgetRenderingMode { self == .standard ? .fullColor : .accented }
-
-    /// What the widget's content is tinted with; nil for its own colours.
-    var foreground: Color? {
-        switch self {
-        case .standard: nil
-        case .clear: .white
-        case .tinted: Color(red: 1, green: 0.85, blue: 0.6)
-        }
-    }
-
-    var glass: Glass {
-        // Tinted darkens the glass, so the tinted content reads on any wallpaper
-        self == .tinted ? .regular.tint(Color(red: 0.3, green: 0.16, blue: 0.02).opacity(0.75)) : .clear
-    }
-}
-
 /// A saved widget drawn as the Home Screen draws it (`TrainWidgetView`), with its train's times as
 /// now: the widgets' saved ones at once, then fetched, again as its train or change is edited.
 /// Its buttons don't take taps, so a tap goes to whatever it's in.
 struct WidgetPreview: View {
     let widget: SavedWidget
     var look: WidgetLook = .medium
-    var appearance = WidgetAppearance.standard
     @Environment(SettingsStore.self) private var settingsStore
     @State private var board: SharedStore.SavedBoard?
     /// Showing both directions: the other way's times.
     @State private var otherBoard: SharedStore.SavedBoard?
     /// The last fetch couldn't reach the MTA.
     @State private var failed = false
+    /// A bus or dock widget's times or counts, once fetched.
+    @State private var route: RouteTimes?
 
     /// Home Screen widgets' corner radius and content margins on iPhone.
     private static let cornerRadius: CGFloat = 24
@@ -109,14 +75,14 @@ struct WidgetPreview: View {
 
     /// What the widget shows now, with commuting hours.
     private var shown: SavedWidget { widget.shown(at: minute) }
-    /// Transfers and medium Next train show the change.
+    /// Medium and large show the change.
     private var change: Change? { look == .small ? nil : shown.change }
-    /// Drawn as Transfers: large, or medium with a change.
-    private var transfers: Bool { look.isTransfers || change != nil }
-    /// Only Next train times its trains to a destination, without a change.
-    private var destination: Station? { look.isTransfers ? nil : shown.directDestination }
-    /// Only medium Next train without a change shows both directions.
-    private var bothWays: Bool { look == .medium && change == nil && shown.bothWays }
+    /// Drawn with its ways on, with a change.
+    private var transfers: Bool { change != nil }
+    /// Timed to a destination without a change.
+    private var destination: Station? { shown.directDestination }
+    /// Medium and large without a change show both directions.
+    private var bothWays: Bool { look != .small && change == nil && shown.bothWays }
 
     /// What decides the times fetched; not walking time, which only decides which are catchable.
     private struct Trip: Equatable {
@@ -142,22 +108,35 @@ struct WidgetPreview: View {
         }
         .environment(\.boardFamily, look.family)
         .environment(\.boardMargins, Self.margins)
-        .environment(\.widgetRenderingMode, appearance.renderingMode)
+        .environment(\.routeLook, true)
         // As WidgetKit draws a widget's toggles, not as switches
         .toggleStyle(.button)
         .frame(minWidth: look == .small ? look.size.width : 0, maxWidth: look.size.width)
         .frame(height: look.size.height)
-        .modifier(HomeScreenAppearance(appearance: appearance, shape: Self.shape))
+        .background(Color.routeBackground)
         .clipShape(Self.shape)
         .allowsHitTesting(false)
         .accessibilityElement(children: .combine)
         // Its toggles don't take taps here, so it's not a switch; what it's in decides
         .accessibilityRemoveTraits(.isToggle)
-        .task(id: trip) { await load(trip) }
+        .task(id: trip) { if widget.kind == .subway { await load(trip) } }
+        .task(id: routeTrip) { await loadRoute(routeTrip) }
+    }
+
+    /// A bus or dock widget's: what decides its fetch.
+    private struct RouteTrip: Equatable {
+        var bus: BusChoice?
+        var dock: DockChoice?
+        var kinds: SharedBikeKinds
+    }
+
+    private var routeTrip: RouteTrip {
+        RouteTrip(bus: widget.bus, dock: widget.dock, kinds: settingsStore.settings.bikeKinds)
     }
 
     /// As the widget's timeline entry at `date`: the trains still to catch.
     private func entry(at date: Date) -> TrainEntry {
+        if widget.kind != .subway { return routeEntry(at: date) }
         let selection = shown.selection
         let settings = settingsStore.settings
         guard let board else {
@@ -180,6 +159,36 @@ struct WidgetPreview: View {
                           notUpdatedSince: failed ? board.fetched : nil,
                           destination: destination, destinationTimes: board.destinationTimes ?? [:],
                           otherWay: otherWay(at: date))
+    }
+
+    /// A bus or dock widget's entry: its times or counts, or until they're fetched, saying so.
+    private func routeEntry(at date: Date) -> TrainEntry {
+        var entry = TrainEntry(date: date, selection: widget.selection, trains: [], settings: settingsStore.settings)
+        if let route {
+            entry.route = route
+        } else if let bus = widget.bus {
+            entry.route = .bus(SavedBusBoard(choice: bus, buses: [], problem: "Getting times…"))
+        } else if let dock = widget.dock {
+            entry.route = .dock(SavedDockBoard(dock: dock, kinds: settingsStore.settings.bikeKinds, fetched: date,
+                                               problem: "Getting counts…"))
+        }
+        return entry
+    }
+
+    private func loadRoute(_ trip: RouteTrip) async {
+        route = nil
+        guard widget.kind != .subway else { return }
+        try? await Task.sleep(for: .seconds(0.2))
+        guard !Task.isCancelled else { return }
+        let fetched: RouteTimes? = if widget.kind == .bus, let bus = trip.bus {
+            .bus(await SavedBusBoard.fetch(bus, now: .now))
+        } else if let dock = trip.dock {
+            .dock(await SavedDockBoard.fetch(dock, kinds: trip.kinds, now: .now))
+        } else {
+            nil
+        }
+        guard !Task.isCancelled else { return }
+        route = fetched
     }
 
     /// Showing both directions, the other way's trains at `date`.
@@ -207,8 +216,10 @@ struct WidgetPreview: View {
         async let otherWay = Self.otherBoard(for: selection, if: trip.bothWays)
         do {
             let fetched = if let change {
-                try await TrainService.board(for: selection, change: change, includingAlerts: alerts,
-                                             includingOutages: selection.elevatorAlerts)
+                await TrainService.addingBuses(
+                    to: try await TrainService.board(for: selection, change: change, includingAlerts: alerts,
+                                                     includingOutages: selection.elevatorAlerts),
+                    change: change)
             } else {
                 try await TrainService.board(for: selection, arrivingAt: trip.destination, includingAlerts: alerts,
                                              includingOutages: selection.elevatorAlerts)
@@ -234,44 +245,13 @@ struct WidgetPreview: View {
     }
 }
 
-/// The widget's background, or for Clear and Tinted, its content tinted one colour (keeping
-/// each part's opacity, as WidgetKit does) on glass.
-private struct HomeScreenAppearance<S: Shape>: ViewModifier {
-    let appearance: WidgetAppearance
-    let shape: S
-
-    func body(content: Content) -> some View {
-        if let foreground = appearance.foreground {
-            content
-                .overlay { foreground.blendMode(.sourceAtop) }
-                .compositingGroup()
-                .background { Color.clear.glassEffect(appearance.glass, in: shape) }
-        } else {
-            content.background(Color.boardBackground)
-        }
-    }
-}
-
-/// A stand-in for a Home Screen wallpaper, for Clear and Tinted widgets' glass to show.
+/// A stand-in for a Home Screen wallpaper, behind the Widgets tab's widgets.
 struct WallpaperBackdrop: View {
     var body: some View {
         LinearGradient(colors: [Color(red: 0.16, green: 0.29, blue: 0.62), Color(red: 0.55, green: 0.33, blue: 0.68),
                                 Color(red: 0.95, green: 0.55, blue: 0.45)],
                        startPoint: .topLeading, endPoint: .bottomTrailing)
     }
-}
-
-#Preview("Appearances") {
-    let widget = SharedStore.firstWidgets.widgets[0]
-    VStack(spacing: 20) {
-        ForEach(WidgetAppearance.allCases) { appearance in
-            WidgetPreview(widget: widget, look: .medium, appearance: appearance)
-        }
-    }
-    .padding()
-    .frame(maxWidth: .infinity, maxHeight: .infinity)
-    .background(WallpaperBackdrop())
-    .environment(SettingsStore())
 }
 
 #Preview {

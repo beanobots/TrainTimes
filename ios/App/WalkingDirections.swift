@@ -114,7 +114,7 @@ enum WalkingDirections {
                                anyWay: Bool = false) async -> Walk? {
         let began = ContinuousClock.now
         let walk: Walk
-        switch await WalkGraphStore.shared.walk(from: start, to: end, options: options) {
+        switch await WalkGraphStore.store(from: start, to: end).walk(from: start, to: end, options: options) {
         case let .success(routed):
             walk = routed
         case let .failure(missed):
@@ -356,5 +356,41 @@ actor CrossStreets {
         }
         let name = words.joined(separator: " ")
         return StreetNames.isStreet(name) ? name : nil
+    }
+}
+
+/// Why Apple Maps gave no walk or ride, where it's not that it has none: it's throttling the
+/// app's asks, or couldn't be reached. Nil for no route (`MKError.directionsNotFound`) and
+/// anything else, which No Trip Found says as no trip.
+enum MapsTrouble: Hashable, Sendable {
+    case busy
+    case unreachable
+
+    init?(_ error: Error) {
+        if let error = error as? MKError {
+            switch error.code {
+            case .loadingThrottled:
+                self = .busy
+                return
+            case .serverFailure:
+                self = .unreachable
+                return
+            default:
+                break
+            }
+        }
+        // The network: URLError itself, or beneath MapKit's own error
+        let error = error as NSError
+        let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError
+        guard error.domain == NSURLErrorDomain || underlying?.domain == NSURLErrorDomain else { return nil }
+        self = .unreachable
+    }
+
+    /// As No Trip Found says it.
+    var message: String {
+        switch self {
+        case .busy: "Apple Maps is busy. Try again in a minute."
+        case .unreachable: "Couldn't reach Apple Maps. Check your connection."
+        }
     }
 }

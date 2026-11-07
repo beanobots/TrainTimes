@@ -25,6 +25,9 @@ struct PushRegistration: Encodable, Sendable {
     /// The phone's widget push token (`WidgetPushInfo.token`), in lowercase hex, so the server
     /// reloads the widgets as it pushes new times; nil before iOS gives one.
     var widgetToken: String?
+    /// A bus countdown's bus, which the server asks Bus Time about; `selection` then stands for
+    /// none. Nil for a train's.
+    var bus: BusChoice?
 }
 
 /// What an assertion signs (server/Sources/TrainCore/HTTP.swift, `ClientData`): the UTF-8 bytes

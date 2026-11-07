@@ -104,6 +104,14 @@ private let museumPoint = (40.7813, -73.9740)
         #expect((body["transitPreferences"] as? [String: Any])?["allowedTravelModes"] as? [String] == ["SUBWAY", "BUS"])
     }
 
+    @Test func withoutSubwayAsksForBusAlone() throws {
+        #expect(try allowedModes(TransitRoutes.request(from: prospectPoint, to: museumPoint, departure: .now, key: "k",
+                                                bus: true, subway: false)) == ["BUS"])
+        // Neither is taken as the subway
+        #expect(try allowedModes(TransitRoutes.request(from: prospectPoint, to: museumPoint, departure: .now, key: "k",
+                                                bus: false, subway: false)) == ["SUBWAY"])
+    }
+
     @Test func asksForSubwayTransitWithTheKeyInAHeaderAndOnlyTheRidesDetails() throws {
         let departure = Date(timeIntervalSince1970: 1_793_000_000)
         let request = TransitRoutes.request(from: prospectPoint, to: museumPoint, departure: departure, key: "secret-key")
@@ -213,6 +221,23 @@ private let museumPoint = (40.7813, -73.9740)
         }
     }
 
+    @Test func subwayZeroAsksForBusAlone() async throws {
+        // From /routes: subway=0 is bus alone; missing, as from older apps, subway too
+        let asked = AskedModes()
+        let routes = TransitRoutes(key: "k", perClientPerDay: 10, perDay: 100) { request in
+            await asked.add(try allowedModes(request) ?? [])
+            return (Data(googleResponse.utf8), 200)
+        }
+        try await withApp(routes: routes) { client in
+            for query in ["&bus=1&subway=0", "&bus=1"] {
+                try await client.execute(uri: "/routes?from=40.6644,-73.9935&to=40.7813,-73.974\(query)", method: .get) {
+                    #expect($0.status == .ok)
+                }
+            }
+        }
+        #expect(await asked.all == [["BUS"], ["SUBWAY", "BUS"]])
+    }
+
     @Test func busOneGivesBusRides() async throws {
         try await withApp(routes: Self.google()) { client in
             try await client.execute(uri: "/routes?from=40.6644,-73.9935&to=40.7813,-73.974&bus=1", method: .get) { response in
@@ -243,4 +268,16 @@ private let museumPoint = (40.7813, -73.9740)
             }
         }
     }
+}
+
+/// The modes a request to Google allows.
+private func allowedModes(_ request: URLRequest) throws -> [String]? {
+    let body = try #require(request.httpBody.flatMap { try JSONSerialization.jsonObject(with: $0) as? [String: Any] })
+    return (body["transitPreferences"] as? [String: Any])?["allowedTravelModes"] as? [String]
+}
+
+/// The modes each request to Google allowed, in order.
+private actor AskedModes {
+    var all: [[String]] = []
+    func add(_ modes: [String]) { all.append(modes) }
 }

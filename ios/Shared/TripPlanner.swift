@@ -28,7 +28,7 @@ enum TripPlanner {
 
     /// Trips from `start` to `end` leaving at `now`, to choose from, best first: by when they get
     /// there, with the downloaded timetable (`plan(from:to:at:timetable:)`); without one, by
-    /// least walking (`byWalking(from:to:)`), as also when the timetable runs out before they'd
+    /// least walking (`plannedByWalking(from:to:)`), as also when the timetable runs out before they'd
     /// get there (`runsOut`) and it has none. In step-free mode, only those `stepFree(_:)` keeps.
     static func plan(from start: CLLocation, to end: CLLocation, at now: Date = .now,
                      walkRange: Double = walkRange) -> [Trip] {
@@ -41,8 +41,8 @@ enum TripPlanner {
         if let timetable = TimetableStore.load(now: now) {
             let planned = planned(from: start, to: end, at: now, timetable: timetable, walkRange: walkRange)
             if !planned.trips.isEmpty || timetable.ends.timeIntervalSince(now) > runsOut {
-                return (withoutSlowerWalks(fromNearest(planned.trips, to: start), from: start, to: end, at: now,
-                                           timetable: timetable), planned.none)
+                return (Array(withoutSlowerWalks(fromNearest(planned.trips, to: start), from: start, to: end, at: now,
+                                                 timetable: timetable).prefix(maxOptions)), planned.none)
             }
         }
         let untimed = plannedByWalking(from: start, to: end, walkRange: walkRange)
@@ -86,16 +86,11 @@ enum TripPlanner {
 
     /// Trips from `start` to `end`, best (least walking) first, to choose from: each train once,
     /// and each way to the end once, from the station nearest it. None if either end is too far
-    /// from the subway, or walking there is as quick.
-    static func byWalking(from start: CLLocation, to end: CLLocation, walkRange: Double = walkRange) -> [Trip] {
-        plannedByWalking(from: start, to: end, walkRange: walkRange).trips
-    }
-
-    /// `byWalking`'s trips, and where there are none, why not.
+    /// from the subway, or walking there is as quick; and where there are none, why not.
     static func plannedByWalking(from start: CLLocation, to end: CLLocation,
                                  walkRange: Double = walkRange) -> (trips: [Trip], none: NoTrip?) {
-        let origins = Nearby.stations(near: start, limit: 6).filter { $0.meters <= walkRange }
-        let destinations = Nearby.stations(near: end, limit: 6).filter { $0.meters <= walkRange }
+        let origins = stations(near: start, within: walkRange, nearest: 6)
+        let destinations = stations(near: end, within: walkRange, nearest: 6)
         if let none = noStations(start: start, startRange: walkRange, startNear: !origins.isEmpty,
                                  end: end, endRange: walkRange, endNear: !destinations.isEmpty) {
             return ([], none)
@@ -133,6 +128,19 @@ enum TripPlanner {
             }
         guard !trips.isEmpty else { return ([], .walkingAsQuick) }
         return (Array(withoutDetours(trips, from: start, to: end, timetable: nil).prefix(maxOptions)), nil)
+    }
+
+    /// The `nearest` stations within `range` of `location`, then any further in range with a line
+    /// none of those has: the A at Nostrand Av in Crown Heights, past eight stations of other lines.
+    static func stations(near location: CLLocation, within range: Double, nearest: Int) -> [Nearby.Result] {
+        let all = Nearby.stations(near: location, limit: 40).filter { $0.meters <= range }
+        var kept = Array(all.prefix(nearest))
+        var lines = Set(kept.flatMap(\.station.routes))
+        for result in all.dropFirst(nearest) where !lines.isSuperset(of: result.station.routes) {
+            kept.append(result)
+            lines.formUnion(result.station.routes)
+        }
+        return kept
     }
 
     /// The lines from `origin` (of `lines`, if given) that stop at `destination` (or a station
@@ -191,7 +199,7 @@ enum TripPlanner {
     }
 
     /// From `origin` on `route` (with others of `lines`, if given) going `direction`, changing at
-    /// `station` (or one joined to it) to lines there that go to `targets`; nil if none do.
+    /// `station` (or one joined to it, or a street walk away) to lines there that go to `targets`; nil if none do.
     private static func trip(from origin: Station, on route: String, among lines: [String]?, going direction: Direction,
                              changingAt station: Station, to targets: [Station], destination: Station) -> Trip? {
         // Your lines: those from here that stop at the change, going there
@@ -203,7 +211,7 @@ enum TripPlanner {
                 && Self.direction(of: $0, from: origin, to: targets) == nil
         }
         guard !selection.routes.isEmpty else { return nil }
-        let joined = StationDirectory.stations(inComplexOf: station)
+        let joined = StationDirectory.changeStations(of: station)
         // Not to a line you could take from the start (riding the wrong way to meet the M at
         // Hewes St from Marcy Av, where it stops too)
         let here = Set(StationDirectory.stations(inComplexOf: origin).flatMap(\.routes))
@@ -235,7 +243,7 @@ enum TripPlanner {
                 guard let station = stop.station else { continue }
                 let end = (stop.destination ?? trip.destination).complex
                 for onward in stop.routes {
-                    let boards = Set(StationDirectory.stations(inComplexOf: station)
+                    let boards = Set(StationDirectory.changeStations(of: station)
                         .flatMap { $0.platforms(serving: [onward]) }.map(\.id))
                     let going = stop.departureDirection(for: trip.selection)
                     // Branch by branch, as each gets to the end (or doesn't) on its own: the A from
@@ -253,6 +261,43 @@ enum TripPlanner {
             }
         }
         return false
+    }
+
+    /// `trip`'s change with just express lines where its own train goes to the end itself: those
+    /// making fewer stops from each station to the end than your train does from there. From
+    /// Prospect Av for 34 St-Herald Sq, the D or N at Atlantic Av-Barclays Ctr and the B or Q at
+    /// DeKalb Av off the R; not the M off the F at 14 St, which makes the F's stops. Nil if none
+    /// are left; the change as it is if your train doesn't go there.
+    static func expressOnly(_ change: Change, for trip: Trip) -> Change? {
+        let selection = trip.selection
+        guard let origin = selection.station else { return change }
+        let end = (change.destination ?? trip.destination).complex
+        let direct = selection.routes.filter {
+            direction(of: $0, from: origin, to: StationDirectory.stations(inComplexOf: trip.destination)) != nil
+        }
+        guard !direct.isEmpty else { return change }
+        /// Stops `route` makes from `platforms` going `way` up to the end; nil if it doesn't get there.
+        func stopsToEnd(_ route: String, from platforms: [Platform], going way: Direction) -> Int? {
+            let complexes = StationDirectory.stops(of: route, from: Set(platforms.map(\.id)), going: way)
+                .compactMap { StationDirectory.station(id: $0)?.complex }
+            return complexes.firstIndex(of: end).map { $0 + 1 }
+        }
+        let stops = change.stops.compactMap { stop -> Change? in
+            guard let station = stop.station else { return stop }
+            let joined = StationDirectory.changeStations(of: station)
+            let yours = direct.compactMap { route in
+                stopsToEnd(route, from: station.platforms(serving: [route]), going: selection.direction(of: route))
+            }.min()
+            guard let yours else { return stop }
+            var stop = stop
+            stop.routes = stop.routes.filter { route in
+                let platforms = joined.flatMap { $0.platforms(serving: [route]) }
+                return stopsToEnd(route, from: platforms, going: stop.departureDirection(of: route, for: selection))
+                    .map { $0 < yours } ?? false
+            }
+            return stop.routes.isEmpty ? nil : stop
+        }
+        return Change(stops: stops)?.validated(for: selection)
     }
 
     /// Meters further from the end on foot a change station can be than where you boarded,
@@ -341,7 +386,8 @@ extension TripPlanner {
         let shortest = all.map(ride).min() ?? .infinity
         let onTheWay = { (stop: Change) in ride(stop) <= shortest + max(outOfWay, distance(origin, end) / 2) }
         var stops = keptChange.stops.filter(onTheWay)
-        for stop in change.stops where onTheWay(stop) {
+        // Off a train that goes there itself, only expresses added (`expressOnly`)
+        for stop in change.stops.compactMap({ expressOnly($0, for: kept) }).flatMap(\.stops) where onTheWay(stop) {
             let adds = stop.routes.contains { route in
                 !stops.contains { $0.routes.contains(route) && ($0.isAcross(route, from: selection) || !stop.isAcross(route, from: selection)) }
             }
@@ -371,7 +417,8 @@ extension TripPlanner {
             .compactMap { suggestion -> Change? in
                 var suggestion = suggestion
                 suggestion.routes.removeAll(where: here.contains)
-                return suggestion.routes.isEmpty ? nil : running(suggestion, for: trip.selection, at: now)
+                return suggestion.routes.isEmpty ? nil
+                    : running(suggestion, for: trip.selection, at: now).flatMap { expressOnly($0, for: trip) }
             }
             .flatMap(\.stops)
         guard !nearby.isEmpty, let more = Change(stops: change.stops + nearby)?.validated(for: trip.selection)
@@ -382,8 +429,8 @@ extension TripPlanner {
     }
 
     /// Other changes `trip` could make, for New Trip to offer switched off: at each of its
-    /// change's stations (or one joined to it), lines it doesn't change to there that leave its
-    /// way and go to the end, often a walk away. From an R toward Manhattan changing to the D or N
+    /// change's stations (or one joined to it, or a street walk away), lines it doesn't change to
+    /// there that leave its way and go to the end, often a walk away. From an R toward Manhattan changing to the D or N
     /// at Atlantic Av-Barclays Ctr for 34 St-Herald Sq, the B or Q there. Leaving at `now`, not
     /// lines the timetable has no trains of there then (`running(_:for:at:)`), nor in step-free
     /// mode changes that aren't step-free (`stepFree(_:)`).
@@ -395,12 +442,12 @@ extension TripPlanner {
             guard let station = stop.station, complexes.insert(station.complex).inserted else { continue }
             let taken = Set(change.stops.filter { $0.station?.complex == station.complex }.flatMap(\.routes))
             var other = stop
-            other.routes = Change.lines(at: station).filter { route in
+            other.routes = Change.changeLines(at: station).filter { route in
                 !taken.contains(route) && !trip.selection.routes.contains(route) && change.reachesDestination(route)
             }
             guard !other.routes.isEmpty, var valid = other.validated(for: trip.selection).flatMap({
                 running($0, for: trip.selection, at: now)
-            }) else { continue }
+            }).flatMap({ expressOnly($0, for: trip) }) else { continue }
             if SharedStore.loadSettings().stepFree {
                 var changed = trip
                 changed.change = valid
@@ -426,8 +473,11 @@ extension TripPlanner {
     static func stepFree(_ trip: Trip) -> Trip? {
         guard let station = trip.selection.station else { return nil }
         let given = trip.selection
-        func stepFree(_ route: String, going way: Direction, at station: Station) -> Bool {
-            StationDirectory.stations(inComplexOf: station).flatMap { $0.platforms(serving: [route]) }
+        // A change a street walk away (`StationDirectory.changeStations(of:)`) is up to the
+        // street and down again: step-free only between step-free platforms, as `off` and this ask
+        func stepFree(_ route: String, going way: Direction, at station: Station, changing: Bool = false) -> Bool {
+            (changing ? StationDirectory.changeStations(of: station) : StationDirectory.stations(inComplexOf: station))
+                .flatMap { $0.platforms(serving: [route]) }
                 .contains { $0.isStepFree(going: way) == true }
         }
         var kept = trip
@@ -448,7 +498,7 @@ extension TripPlanner {
             var stop = stop
             stop.routes = stop.routes.filter { route in
                 let way = stop.departureDirection(of: route, for: selection)
-                return (stop.isAcross(route, from: selection) || off && stepFree(route, going: way, at: at))
+                return (stop.isAcross(route, from: selection) || off && stepFree(route, going: way, at: at, changing: true))
                     && stepFree(route, going: way, at: end)
             }
             return stop.routes.isEmpty ? nil : stop

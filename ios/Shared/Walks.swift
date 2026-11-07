@@ -514,7 +514,11 @@ enum StationWays {
                 (platform, route, platform.direction(way, of: route, with: routes))
             }
         }
-        return nearest(ways, to: end, entering: false)
+        // A train the timetable has stopping where the station's lines don't say (the 4 at 33 St
+        // at night): out by any of its platforms
+        guard ways.isEmpty, let route = routes.first else { return nearest(ways, to: end, entering: false) }
+        return nearest(destination.platforms.map { ($0, route, $0.direction(way, of: route, with: routes)) },
+                       to: end, entering: false)
     }
 
     /// The nearest of `ways`' platforms' entrances to `place` that can be gone in by (or left by,

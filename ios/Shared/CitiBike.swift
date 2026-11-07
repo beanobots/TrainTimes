@@ -211,3 +211,11 @@ extension CitiBike.Dock {
                              bikes: 0, eBikes: 0, docks: 0, renting: true, returning: true)
     }
 }
+
+extension DockChoice {
+    var location: CLLocation { CLLocation(latitude: latitude, longitude: longitude) }
+
+    init(_ dock: CitiBike.Dock) {
+        self.init(id: dock.id, name: dock.name, latitude: dock.lat, longitude: dock.lon)
+    }
+}

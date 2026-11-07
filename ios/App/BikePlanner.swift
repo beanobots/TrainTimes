@@ -58,15 +58,35 @@ enum BikePlanner {
         var fullerFor: Int?
     }
 
+    /// Why `planned` found no trip, for No Trip Found to say.
+    enum NoBike: Hashable, Sendable {
+        /// Riding all the way takes longer than `longestRideAllTheWay`; for a classic bike, about
+        /// how long an e-bike's ride would be, if it's no longer.
+        case rideTooLong(eBikeMinutes: Int?)
+        /// No dock within your walk of the start with a bike, or of the end with room for one.
+        case noDock(atStart: Bool)
+        /// Apple Maps couldn't time the rides: throttling the app's asks, or out of reach.
+        case maps(MapsTrouble)
+    }
+
     /// Trips from `start` to `end` with a bike of `kind`, soonest there first: all the way, and
     /// with the subway too if `subway`. None walks more than `walkRange` to or from a dock (or a
     /// train). None if Citi Bike's feed can't be had.
     static func plan(from start: CLLocation, to end: CLLocation, kind: CitiBike.Kind, subway: Bool,
                      walkRange: Double, at now: Date = .now) async -> [BikeTrip] {
-        guard let docks = await CitiBike.docks() else { return [] }
+        await planned(from: start, to: end, kind: kind, subway: subway, walkRange: walkRange, at: now).trips
+    }
+
+    /// `plan`'s trips, and where there are none, why, if it's that there's no dock or the ride's
+    /// too long.
+    static func planned(from start: CLLocation, to end: CLLocation, kind: CitiBike.Kind, subway: Bool,
+                        walkRange: Double, at now: Date = .now) async -> (trips: [BikeTrip], none: NoBike?) {
+        guard let docks = await CitiBike.docks() else { return ([], nil) }
         let timetable = subway ? TimetableStore.load(now: now) : nil
         let pickups = docksToTry(docks, near: start, within: walkRange) { $0.available(kind) }
         let dropoffs = docksToTry(docks, near: end, within: walkRange) { $0.free }
+        // The shortest ride all the way left out as too long, for saying so
+        var tooLong: TimeInterval?
 
         var found: [Found] = []
         // All the way
@@ -75,6 +95,10 @@ enum BikePlanner {
             return worthRiding(start, end, pickup, dropoff, seconds: seconds) ? seconds : nil
         }) {
             found.append(Found(pickup: best.pickup, dropoff: best.dropoff, bikeFirst: true, arrives: best.seconds))
+        } else if let shortest = pickups.flatMap({ pickup in
+            dropoffs.filter { $0.id != pickup.id }.map { guess(from: pickup, to: $0, kind: kind) }
+        }).min(), shortest > longestRideAllTheWay {
+            tooLong = shortest
         }
         if let timetable {
             // Both ways at once
@@ -94,16 +118,22 @@ enum BikePlanner {
                 }
         }
 
-        // Each ride along the streets, asked for together (`Routes`, a few at a time)
-        let rides = await withTaskGroup(of: (Int, Routes.Ride?).self) { group in
+        // Each ride along the streets, asked for together (`Routes`, a few at a time), and why
+        // Apple Maps couldn't answer, if it failed any
+        let (rides, trouble) = await withTaskGroup(of: (Int, Routes.Ride?, MapsTrouble?).self) { group in
             for (index, trip) in found.enumerated() {
-                group.addTask { (index, await Routes.shared.ride(from: trip.pickup, to: trip.dropoff)) }
+                group.addTask {
+                    let answer = await Routes.shared.ride(from: trip.pickup, to: trip.dropoff)
+                    return (index, answer.ride, answer.trouble)
+                }
             }
             var rides: [Int: Routes.Ride] = [:]
-            for await (index, ride) in group {
+            var trouble: MapsTrouble?
+            for await (index, ride, failed) in group {
                 if let ride { rides[index] = ride }
+                trouble = trouble ?? failed
             }
-            return rides
+            return (rides, trouble)
         }
 
         // Each with its ride timed, but none Apple Maps had no route for: a guess across the
@@ -112,7 +142,10 @@ enum BikePlanner {
             let trip = found[index]
             guard let route = rides[index] else { return }
             let ride = route.seconds * (kind == .eBike ? eBikeFactor : 1)
-            guard ride <= (trip.train == nil ? longestRideAllTheWay : longestRide) else { return }
+            guard ride <= (trip.train == nil ? longestRideAllTheWay : longestRide) else {
+                if trip.train == nil { tooLong = min(tooLong ?? ride, ride) }
+                return
+            }
             var arrives = trip.arrives
             if let train = trip.train, let station = trip.station {
                 if trip.bikeFirst {
@@ -144,7 +177,12 @@ enum BikePlanner {
             if !others.isEmpty { trip.dockChoices = [trip] + others }
             return trip
         }
-        return trips.sorted { $0.minutes < $1.minutes }
+        guard trips.isEmpty else { return (trips.sorted { $0.minutes < $1.minutes }, nil) }
+        if pickups.isEmpty || dropoffs.isEmpty { return ([], .noDock(atStart: pickups.isEmpty)) }
+        guard let tooLong else { return ([], trouble.map { .maps($0) }) }
+        // An e-bike's ride the same way, unlocking and docking it too, where it's not too long
+        let eBike = kind == .eBike ? nil : dockSeconds + tooLong * eBikeFactor
+        return ([], .rideTooLong(eBikeMinutes: eBike.flatMap { $0 <= longestRideAllTheWay ? Int(($0 / 60).rounded()) : nil }))
     }
 
     /// `found` from or to the fuller dock nearest (`CitiBike.few` or more) where its own is short,
@@ -347,11 +385,12 @@ enum BikePlanner {
             var points: [Walk.Point]
             var seconds: TimeInterval
         }
-        /// What Apple Maps answered: a ride, none (or only by ferry), or nothing, failing.
+        /// What Apple Maps answered: a ride, none (or only by ferry), or nothing, failing, and
+        /// why where it's throttling or out of reach.
         private enum Answer: Sendable {
             case ride(Ride)
             case none
-            case failed
+            case failed(MapsTrouble?)
         }
 
         /// Asked at once, at most.
@@ -374,10 +413,10 @@ enum BikePlanner {
         private var waiting: [CheckedContinuation<Void, Never>] = []
 
         /// The ride from `pickup` to `dropoff`; nil if Apple Maps has none without a ferry, or
-        /// couldn't answer.
-        func ride(from pickup: CitiBike.Dock, to dropoff: CitiBike.Dock) async -> Ride? {
+        /// couldn't answer, and then why, if it's throttling or out of reach (`trouble`).
+        func ride(from pickup: CitiBike.Dock, to dropoff: CitiBike.Dock) async -> (ride: Ride?, trouble: MapsTrouble?) {
             let key = "\(pickup.id) \(dropoff.id)"
-            if let known = known[key], Date.now.timeIntervalSince(known.at) < Self.kept { return known.ride }
+            if let known = known[key], Date.now.timeIntervalSince(known.at) < Self.kept { return (known.ride, nil) }
             let task = asking[key] ?? Task { await self.answer(from: pickup.location, to: dropoff.location) }
             asking[key] = task
             let answer = await task.value
@@ -385,12 +424,12 @@ enum BikePlanner {
             switch answer {
             case .ride(let ride):
                 known[key] = (.now, ride)
-                return ride
+                return (ride, nil)
             case .none:
                 known[key] = (.now, nil)
-                return nil
-            case .failed:
-                return nil
+                return (nil, nil)
+            case .failed(let trouble):
+                return (nil, trouble)
             }
         }
 
@@ -401,7 +440,7 @@ enum BikePlanner {
             while true {
                 // Not while throttled, nor at all if it's throttled too long
                 if let until = throttledUntil, until > .now {
-                    guard until <= giveUp else { return .failed }
+                    guard until <= giveUp else { return .failed(.busy) }
                     try? await Task.sleep(for: .seconds(until.timeIntervalSinceNow))
                 }
                 await take()
@@ -424,13 +463,15 @@ enum BikePlanner {
                     wait *= 2
                     throttledUntil = max(throttledUntil ?? until, until)
                     Self.log.notice("Throttled for \(Int(until.timeIntervalSinceNow.rounded())) s\(until <= giveUp ? ", asking again" : ", left out")")
-                    guard until <= giveUp else { return .failed }
+                    guard until <= giveUp else { return .failed(.busy) }
                     continue
                 } catch {
                     give()
                     // Once more if there's time: a server hiccup, or the network dropping out
                     Self.log.notice("Failed\(failed ? " again, left out" : ""): \(error.localizedDescription)")
-                    guard !failed, Date.now.addingTimeInterval(Self.retryAfter) <= giveUp else { return .failed }
+                    guard !failed, Date.now.addingTimeInterval(Self.retryAfter) <= giveUp else {
+                        return .failed(MapsTrouble(error))
+                    }
                     failed = true
                     try? await Task.sleep(for: .seconds(Self.retryAfter))
                     continue
@@ -599,9 +640,11 @@ extension BikePlanner {
 
     /// Trips from `start` to `end` (`endName`) on your own bike of `kind`, soonest there first:
     /// all the way, and with the subway too if `subway`, as `carry` says. None walks more than
-    /// `walkRange` to or from a train.
-    static func planOwn(from start: CLLocation, to end: CLLocation, endName: String, kind: CitiBike.Kind,
-                        carry: BikeCarry, subway: Bool, walkRange: Double, at now: Date = .now) async -> [BikeTrip] {
+    /// `walkRange` to or from a train. Where there are none, why, if it's that Apple Maps couldn't
+    /// time the rides (`NoBike.maps`).
+    static func plannedOwn(from start: CLLocation, to end: CLLocation, endName: String, kind: CitiBike.Kind,
+                           carry: BikeCarry, subway: Bool, walkRange: Double,
+                           at now: Date = .now) async -> (trips: [BikeTrip], none: NoBike?) {
         let home = CitiBike.Dock.place("Start", start)
         let there = CitiBike.Dock.place(endName, end)
         var found: [OwnFound] = []
@@ -623,18 +666,26 @@ extension BikePlanner {
             }
         }
         // Each ride along the streets, and a carried bike's ride after, asked for together
-        let rides = await withTaskGroup(of: (Int, Bool, Routes.Ride?).self) { group in
+        let (rides, trouble) = await withTaskGroup(of: (Int, Bool, Routes.Ride?, MapsTrouble?).self) { group in
             for (index, trip) in found.enumerated() {
-                group.addTask { (index, false, await Routes.shared.ride(from: trip.from, to: trip.to)) }
+                group.addTask {
+                    let answer = await Routes.shared.ride(from: trip.from, to: trip.to)
+                    return (index, false, answer.ride, answer.trouble)
+                }
                 if let after = trip.after {
-                    group.addTask { (index, true, await Routes.shared.ride(from: after.from, to: after.to)) }
+                    group.addTask {
+                        let answer = await Routes.shared.ride(from: after.from, to: after.to)
+                        return (index, true, answer.ride, answer.trouble)
+                    }
                 }
             }
             var rides: [Int: (ride: Routes.Ride?, after: Routes.Ride?)] = [:]
-            for await (index, isAfter, ride) in group {
+            var trouble: MapsTrouble?
+            for await (index, isAfter, ride, failed) in group {
                 if isAfter { rides[index, default: (nil, nil)].after = ride } else { rides[index, default: (nil, nil)].ride = ride }
+                trouble = trouble ?? failed
             }
-            return rides
+            return (rides, trouble)
         }
         let factor = kind == .eBike ? eBikeFactor : 1
         let timetable = subway ? TimetableStore.load(now: now) : nil
@@ -677,7 +728,7 @@ extension BikePlanner {
                             train: trip.train?.option, bikeFirst: trip.bikeFirst, minutes: Int((arrives / 60).rounded(.up)),
                             owned: true, carried: trip.carried, rideAfter: afterRide)
         }
-        return trips.sorted { $0.minutes < $1.minutes }
+        return (trips.sorted { $0.minutes < $1.minutes }, trips.isEmpty ? trouble.map { .maps($0) } : nil)
     }
 
     /// Your bike to a station further along, then the train: from the stations as `bikeFirst`

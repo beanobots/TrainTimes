@@ -188,7 +188,8 @@ enum HTTPRoutes {
 
         // Google's subway routes between two places in the city (`TransitRoutes`), for directions
         // shared to the app's Share extension, which can't sign requests: from=lat,lon&to=lat,lon,
-        // optionally at=<seconds since 1970> to leave then, and bus=1 for bus rides too. Daily
+        // optionally at=<seconds since 1970> to leave then, bus=1 for bus rides too, and with it
+        // subway=0 for bus rides alone (missing, as from older apps: subway too). Daily
         // limits keep it in Google's free allowance; where trips are isn't logged.
         if let routes = services.routes {
             router.get("/routes") { request, context -> Response in
@@ -203,7 +204,9 @@ enum HTTPRoutes {
                 let asked = query.get("at").flatMap { Double($0) }.flatMap { $0.isFinite ? $0 : nil }.map { Date(timeIntervalSince1970: $0) } ?? now
                 let departure = min(max(asked, now), now.addingTimeInterval(7 * 86400))
                 let bus = query.get("bus") == "1"
-                switch await routes.routes(from: from, to: to, departure: departure, client: context.clientIP, bus: bus) {
+                let subway = query.get("subway") != "0"
+                switch await routes.routes(from: from, to: to, departure: departure, client: context.clientIP,
+                                           bus: bus, subway: subway) {
                 case .routes(let found):
                     let json = try JSONEncoder().encode(["routes": found])
                     return Response(status: .ok, headers: [.contentType: "application/json", .cacheControl: "no-store"],
@@ -335,15 +338,26 @@ enum HTTPRoutes {
             } catch {
                 throw HTTPError(.badRequest)
             }
+            // A train's at a station that has its lines; a bus's, its bus, with its selection
+            // standing for none
+            let trainIsValid = registration.bus != nil || registration.selection.station.map { station in
+                !registration.selection.routes.isEmpty && registration.selection.routes.allSatisfy(station.routes.contains)
+            } == true
+            // Logged by why (rate-limited as every refusal is): a stop new in the bus GTFS is
+            // refused until bus_stop_lines.json is made again and the server redeployed
+            if let refusal = registration.busRefusal {
+                await log("activities: bus countdown refused: \(refusal)", context, services)
+                throw HTTPError(.badRequest)
+            }
             guard let token = Registration.normalizedToken(registration.token),
-                  let station = registration.selection.station,
-                  !registration.selection.routes.isEmpty,
-                  registration.selection.routes.allSatisfy(station.routes.contains),
+                  trainIsValid, registration.busIsValid,
                   (0...180).contains(registration.selection.walkMinutes),
                   registration.trip.utf8.count <= 256,
                   registration.stateFits else {
                 throw HTTPError(.badRequest)
             }
+            // Without Bus Time there's nothing to push a bus's countdown from: the app keeps it up
+            if registration.bus != nil, services.buses == nil { throw HTTPError(.serviceUnavailable) }
             let widgetToken = registration.widgetToken.map(Registration.normalizedToken)
             if case .some(nil) = widgetToken { throw HTTPError(.badRequest) }
             let now = Date.now
@@ -359,8 +373,9 @@ enum HTTPRoutes {
                 revision: UUID(),
                 lastState: registration.state,
                 // Dropped if it's no longer a change for this train, as a saved widget's is
-                change: registration.change?.validated(for: registration.selection),
-                widgetToken: widgetToken ?? nil
+                change: registration.bus == nil ? registration.change?.validated(for: registration.selection) : nil,
+                widgetToken: widgetToken ?? nil,
+                bus: registration.bus.map { var bus = $0; bus.changes = nil; return bus }
             )
             switch try await services.store.upsert(entry, maxTotal: services.limits.maxRegistrations,
                                                    maxPerOwner: services.limits.maxRegistrationsPerKey) {
@@ -374,7 +389,7 @@ enum HTTPRoutes {
                     Log.info("drop \(Registration.prefix(of: token)): over \(services.limits.maxRegistrationsPerKey) for its key")
                 }
             }
-            Log.info("register \(entry.tokenPrefix) \(entry.environment.rawValue) \(entry.selection.trainID) key \(Redact.id(owner))")
+            Log.info("register \(entry.tokenPrefix) \(entry.environment.rawValue) \(entry.countdownID) key \(Redact.id(owner))")
             return Response(status: .noContent)
         }
 

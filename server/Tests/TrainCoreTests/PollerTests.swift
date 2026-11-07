@@ -688,3 +688,37 @@ func testRegistration(token: String = sampleToken, owner: String = "key", starte
         #expect(pusher.pushes.last?.state.notice == "Service change")
     }
 }
+
+extension PollerTests {
+    @Test func theNextPassAfterAMoveOnPushesNothingMoreForTheSameTrain() async throws {
+        let store = try Store(directory: nil)
+        try await registeredWithWidgets(store)
+        let pusher = FakePusher()
+        // Every train live, as the one moved on to keeps the last one's liveness till the next pass
+        var board = fixtureBoard()
+        board.trains = board.trains.map { train in
+            Arrival(route: train.route, time: train.time, stop: train.stop, lastStop: train.lastStop, isLive: true, trip: train.trip)
+        }
+        let live = board
+        // Refreshed after a minute, so before the train's due
+        let poller = Poller(store: store, pusher: pusher, interval: 30, timing: PushTiming(refresh: 60)) { selections, _ in
+            Dictionary(selections.map { ($0, live) }, uniquingKeysWith: { a, _ in a })
+        }
+        await poller.pass(at: now)
+        let movedAt = now.addingTimeInterval(6 * 60 + AtStation.seconds)
+        await poller.pushDue(at: movedAt)
+        #expect(pusher.pushes.count == 2)
+        #expect(pusher.widgetReloads.count == 2)
+        #expect(pusher.pushes.last?.state.trip == "")
+        // The feeds name its trip and terminal, nothing else changed: neither a push nor a reload
+        await poller.pass(at: movedAt.addingTimeInterval(10))
+        #expect(pusher.pushes.count == 2)
+        #expect(pusher.widgetReloads.count == 2)
+        // Its trip kept with the next refresh, still without a reload
+        await poller.pass(at: movedAt.addingTimeInterval(60))
+        #expect(pusher.pushes.count == 3)
+        #expect(pusher.pushes.last?.priority == 5)
+        #expect(await store.registration(for: sampleToken)?.lastState?.trip == "c")
+        #expect(pusher.widgetReloads.count == 2)
+    }
+}

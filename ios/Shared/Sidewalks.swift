@@ -165,8 +165,9 @@ enum Sidewalks {
     /// `walk` on the sidewalks in `sidewalks`, from `start` (whose side of the street it starts
     /// on) to `end` (whose side it ends on), each step's instruction kept and its path and length
     /// those on the sidewalk; where it crosses a street, in `crossings`, by the narrowest streets
-    /// with `signals` where it has a choice, and each one's light. Nil `signals` where they're
-    /// not known (no file of them): the lights too, rather than every one "No light". Where Apple
+    /// with `signals` where it has a choice, and each one's light; not those under a bridge's
+    /// deck it's up on (`underDecks`). Nil `signals` where they're not known (no file
+    /// of them): the lights too, rather than every one "No light". Where Apple
     /// Maps' walk is on the sidewalks already (it has Manhattan's), its way stands, crossing
     /// where it goes off one over the street to the next. Nil where too little of it has a
     /// sidewalk either side to go by, or is on one: outside the city's data, or across a park.
@@ -199,6 +200,11 @@ enum Sidewalks {
         var fitted = path(walk, walked: walked, samples: samples, sides: sides, runs: runs, chosen: chosen,
                           edges: edges, plane: plane, start: start ?? walked.first.flatMap { walk.steps[$0].points.first },
                           end: end ?? walked.last.flatMap { walk.steps[$0].points.last })
+        // Not the streets under a bridge's deck, which the flat map has it over: the walk's up on it
+        if let crossings = fitted.crossings {
+            let under = underDecks(crossings, of: walk)
+            fitted.crossings = crossings.indices.filter { !under.contains($0) }.map { crossings[$0] }
+        }
         if let known {
             fitted.lights = fitted.crossings?.map { crossing in
                 let over = crossing.map(plane.xy)
@@ -749,8 +755,9 @@ enum Sidewalks {
         /// The sidewalk each segment's ring is one of, where they were given.
         private var owner: [Int] = []
         private var cells: [Cell: [Int]] = [:]
-        /// As far east as any edge reaches, for `inside`'s ray to go out past them all.
+        /// As far east (west) as any edge reaches, for `inside`'s ray to go out past them all.
         private var east = -Double.infinity
+        private var west = Double.infinity
         private static let size = 10.0
 
         private struct Cell: Hashable {
@@ -766,6 +773,7 @@ enum Sidewalks {
                     segments.append((a, b))
                     owner.append(owners?[ringIndex] ?? 0)
                     east = max(east, a.x, b.x)
+                    west = min(west, a.x, b.x)
                     for cell in Self.cells(from: a, to: b) { cells[cell, default: []].append(index) }
                 }
             }
@@ -815,15 +823,19 @@ enum Sidewalks {
             return counts.filter { $0.value % 2 == 1 }.keys.min()
         }
 
-        /// Each edge `inside` counts for `p`, by its index.
+        /// Each edge `inside` counts for `p`, by its index. The rings being closed, as many
+        /// either way give the same odd or even: west instead where that's out past them sooner,
+        /// fewer cells along a walk's wide box.
         private func east(of p: V, _ body: (Int) -> Void) {
-            guard p.x <= east else { return }
+            guard p.x <= east, p.x >= west else { return }
+            let westward = p.x - west < east - p.x
             var seen = Set<Int>()
-            for cell in Self.cells(from: p, to: V(x: east, y: p.y)) {
+            for cell in Self.cells(from: p, to: V(x: westward ? west : east, y: p.y)) {
                 for index in cells[cell] ?? [] where seen.insert(index).inserted {
                     let (a, b) = segments[index]
                     guard (a.y > p.y) != (b.y > p.y) else { continue }
-                    if a.x + (p.y - a.y) / (b.y - a.y) * (b.x - a.x) > p.x { body(index) }
+                    let x = a.x + (p.y - a.y) / (b.y - a.y) * (b.x - a.x)
+                    if westward ? x < p.x : x > p.x { body(index) }
                 }
             }
         }
@@ -848,5 +860,284 @@ enum Sidewalks {
             let into = width > Sidewalks.plaza ? 2.5 : width / 2
             return (p + direction * (enter + into), enter)
         }
+    }
+}
+
+// MARK: Bridges
+
+extension Sidewalks {
+    /// A bridge's walkway where it's up off the ground, over the streets below: the city's flat
+    /// map of the sidewalks (`fit`) has a walk over it crossing them all.
+    struct Deck: Sendable {
+        /// Its walkway's lines, foot to foot, and any branch off to another foot.
+        let lines: [[Walk.Point]]
+        /// Where it comes down to the ground at one end, and at the other.
+        let feet: ([Walk.Point], [Walk.Point])
+        /// Its bounds, south, north, west and east.
+        let box: (Double, Double, Double, Double)
+
+        init(_ lines: [[(Double, Double)]], feet: ([(Double, Double)], [(Double, Double)])) {
+            self.lines = lines.map { $0.map { Walk.Point(lat: $0.0, lon: $0.1) } }
+            self.feet = (feet.0.map { Walk.Point(lat: $0.0, lon: $0.1) }, feet.1.map { Walk.Point(lat: $0.0, lon: $0.1) })
+            let all = lines.flatMap { $0 } + feet.0 + feet.1
+            box = (all.map(\.0).min() ?? 0, all.map(\.0).max() ?? 0, all.map(\.1).min() ?? 0, all.map(\.1).max() ?? 0)
+        }
+
+        /// Metres from `point` to the nearest of its lines, and that line's bit nearest it.
+        func nearest(to point: Walk.Point) -> (metres: Double, from: Walk.Point, to: Walk.Point)? {
+            var nearest: (metres: Double, from: Walk.Point, to: Walk.Point)?
+            for line in lines {
+                for (from, to) in zip(line, line.dropFirst()) {
+                    let metres = point.nearest(from: from, to: to).gap
+                    if metres < nearest?.metres ?? .infinity { nearest = (metres, from, to) }
+                }
+            }
+            return nearest
+        }
+
+        /// Metres from `point` to the nearest of its lines.
+        func metres(to point: Walk.Point) -> Double {
+            nearest(to: point)?.metres ?? .infinity
+        }
+
+        /// Whether `samples` (a walk's line, a little of it) go across it, from one side of its
+        /// line there to the other (`acrossDeck`), not along it.
+        func across(_ samples: [Walk.Point]) -> Bool {
+            guard !samples.isEmpty else { return false }
+            let middle = Walk.Point(lat: samples.map(\.lat).reduce(0, +) / Double(samples.count),
+                                    lon: samples.map(\.lon).reduce(0, +) / Double(samples.count))
+            guard let nearest = nearest(to: middle) else { return false }
+            let line = nearest.to.offset(from: nearest.from)
+            let length = (line.east * line.east + line.north * line.north).squareRoot()
+            guard length > 0 else { return false }
+            // Metres to its left of each
+            let off = samples.map { sample in
+                let at = sample.offset(from: nearest.from)
+                return (line.east * at.north - line.north * at.east) / length
+            }
+            guard let least = off.min(), let most = off.max() else { return false }
+            return most - least > Sidewalks.acrossDeck
+        }
+
+        /// The foot `point` is passing, within `atFoot`, and which end's it is (0 or 1).
+        func foot(near point: Walk.Point) -> (end: Int, at: Walk.Point)? {
+            let near = feet.0.map { (0, $0) } + feet.1.map { (1, $0) }
+            return near.map { ($0, $1, point.metres(to: $1)) }.filter { $0.2 <= Sidewalks.atFoot }
+                .min { $0.2 < $1.2 }.map { ($0.0, $0.1) }
+        }
+
+        /// Where `samples` (a walk's line, a few metres apart) are up on it: from passing a foot
+        /// at one end to one at the other, on it all the way. Of several feet passed at an end (a
+        /// walk along the street under its approach to the stairs; past a stair down from it
+        /// partway), the furthest from the other end's.
+        func over(_ samples: [Walk.Point]) -> [(from: Int, to: Int, feet: (Walk.Point, Walk.Point))] {
+            var over: [(from: Int, to: Int, feet: (Walk.Point, Walk.Point))] = []
+            // The feet passed, by end, on the way along it since last off it
+            var passed: [[(index: Int, end: Int, at: Walk.Point)]] = []
+            func add() {
+                for (first, second) in zip(passed, passed.dropFirst()) {
+                    guard let toward = second.first?.at,
+                          let start = first.max(by: { $0.at.metres(to: toward) < $1.at.metres(to: toward) }),
+                          let end = second.max(by: { $0.at.metres(to: start.at) < $1.at.metres(to: start.at) }),
+                          let from = first.last(where: { $0.at == start.at })?.index,
+                          let to = second.last(where: { $0.at == end.at })?.index else { continue }
+                    over.append((from, to, (start.at, end.at)))
+                }
+                passed = []
+            }
+            for (index, sample) in samples.enumerated() {
+                if let foot = foot(near: sample) {
+                    if passed.last?.last?.end == foot.end {
+                        passed[passed.count - 1].append((index, foot.end, foot.at))
+                    } else {
+                        passed.append([(index, foot.end, foot.at)])
+                    }
+                } else if metres(to: sample) > Sidewalks.onDeck {
+                    add()
+                }
+            }
+            add()
+            return over
+        }
+    }
+
+    /// Metres off a deck's lines a walk's up on it: the city's line for its walkway, or its
+    /// roadway's for one with sidewalks, and Apple Maps' for the walk, a little apart.
+    static let onDeck = 20.0
+    /// Metres from a deck's foot a walk's passing it.
+    static let atFoot = 30.0
+    /// Metres from the feet a walk goes up and comes down by a crossing's kept: the street at
+    /// the bottom of the ramp or stairs, which is crossed.
+    static let byFoot = 40.0
+    /// Metres off a deck, and off the walk up on it, a crossing's middle is under it: the
+    /// fitted walk's crossings are on the sidewalks of the streets below, off to one side.
+    static let underDeck = 35.0
+    /// Metres a walk moves sideways over a deck, near a crossing, going over its roadway.
+    static let acrossDeck = 12.0
+
+    /// The bridges' walkways up off the ground, approaches and all, from the city's street
+    /// centerline in walkgraph.sqlite (its levels: where the walkway, or the roadway with the
+    /// sidewalks, comes up off grade and back down), and Apple Maps' walks over them. The far
+    /// ends of the RFK's Bronx span, Cross Bay, Bayonne and Goethals Bridges, past the city's
+    /// data or with none for the walkway, are near enough: a walk not passing a foot isn't
+    /// taken to be up on the deck at all. Of the bridges in `WalkReach`'s crossings, those not
+    /// here are on the ground either end, water under them: the Broadway, City Island and North
+    /// Channel Bridges and the Randall's Island Connector. Pulaski's over Newtown Creek.
+    static let decks: [Deck] = [
+        // Brooklyn Bridge, City Hall to Tillary St, and the stairs to Cadman Plaza E
+        Deck([[(40.71246, -74.00486), (40.71200, -74.00427), (40.71171, -74.00392), (40.70354, -73.99364),
+               (40.70075, -73.99013), (40.70000, -73.98901), (40.69964, -73.98869), (40.69928, -73.98859),
+               (40.69830, -73.98865)],
+              [(40.71243, -74.00457), (40.71223, -74.00451), (40.71200, -74.00427)],
+              [(40.70075, -73.99013), (40.70056, -73.98982), (40.70057, -73.98974)]],
+             feet: ([(40.71246, -74.00486), (40.71243, -74.00457)], [(40.69830, -73.98865), (40.70057, -73.98974)])),
+        // Manhattan Bridge, Bowery to Jay St
+        Deck([[(40.71502, -73.99675), (40.71500, -73.99666), (40.71563, -73.99623), (40.71567, -73.99607),
+               (40.71562, -73.99595), (40.71482, -73.99506), (40.71332, -73.99421), (40.71122, -73.99303),
+               (40.70249, -73.98822), (40.69976, -73.98665), (40.69965, -73.98659), (40.69891, -73.98667),
+               (40.69874, -73.98695)],
+              [(40.69965, -73.98659), (40.69961, -73.98668), (40.69951, -73.98669), (40.69951, -73.98685)]],
+             feet: ([(40.71502, -73.99675)], [(40.69874, -73.98695), (40.69951, -73.98685)])),
+        // Williamsburg Bridge, Delancey St to Bedford Av, by S 5 St and by S 5 Pl
+        Deck([[(40.71801, -73.98659), (40.71720, -73.98410), (40.71551, -73.97851), (40.71545, -73.97849),
+               (40.71538, -73.97825), (40.71203, -73.96721), (40.71185, -73.96706), (40.71079, -73.96365)],
+              [(40.71215, -73.96722), (40.71193, -73.96605), (40.71117, -73.96352)]],
+             feet: ([(40.71801, -73.98659)], [(40.71079, -73.96365), (40.71117, -73.96352)])),
+        // Queensboro Bridge, E 60 St to Crescent St, and the stairs to Queens Plaza S
+        Deck([[(40.76009, -73.96308), (40.76028, -73.96312), (40.76038, -73.96287), (40.75335, -73.94670),
+               (40.75157, -73.94262), (40.75122, -73.94179), (40.75084, -73.94090), (40.75073, -73.94073),
+               (40.75057, -73.94057)],
+              [(40.75335, -73.94670), (40.75418, -73.94867), (40.75431, -73.94915)]],
+             feet: ([(40.76009, -73.96308)], [(40.75057, -73.94057), (40.75431, -73.94915)])),
+        // Wards Island Bridge, at 103 St
+        Deck([[(40.78615, -73.93957), (40.78640, -73.93935), (40.78662, -73.93875), (40.78675, -73.93862),
+               (40.78525, -73.93533)]],
+             feet: ([(40.78615, -73.93957)], [(40.78525, -73.93533)])),
+        // RFK Bridge, 2 Av to Randall's Island
+        Deck([[(40.80210, -73.93385), (40.80220, -73.93322), (40.80114, -73.93067), (40.80084, -73.92934),
+               (40.79960, -73.92638), (40.79926, -73.92653), (40.79799, -73.92705), (40.79749, -73.92697)]],
+             feet: ([(40.80210, -73.93385)], [(40.79749, -73.92697)])),
+        // RFK Bridge, Randall's Island to the Bronx
+        Deck([[(40.79813, -73.91957), (40.80198, -73.91665), (40.80334, -73.91727)]],
+             feet: ([(40.79813, -73.91957)], [(40.80334, -73.91727)])),
+        // RFK Bridge, Randall's Island to Hoyt Av at 27 St, and the stairs to Astoria Park
+        Deck([[(40.78301, -73.92899), (40.78119, -73.92766), (40.77637, -73.92393), (40.77470, -73.92269),
+               (40.77405, -73.92203), (40.77333, -73.92107), (40.77228, -73.91957)]],
+             feet: ([(40.78301, -73.92899)], [(40.77228, -73.91957), (40.77650, -73.92407)])),
+        // University Heights Bridge, 207 St to Fordham Rd
+        Deck([[(40.86370, -73.91706), (40.86213, -73.91357)]],
+             feet: ([(40.86370, -73.91706)], [(40.86213, -73.91357)])),
+        // Washington Bridge, Amsterdam Av to University Av
+        Deck([[(40.84813, -73.93089), (40.84805, -73.93057), (40.84526, -73.92440), (40.84512, -73.92380),
+               (40.84513, -73.92257)],
+              [(40.84849, -73.93062), (40.84816, -73.92991)],
+              [(40.84745, -73.92963), (40.84509, -73.92440), (40.84458, -73.92374), (40.84452, -73.92358)],
+              [(40.84517, -73.92445), (40.84446, -73.92346), (40.84424, -73.92273)]],
+             feet: ([(40.84813, -73.93089), (40.84849, -73.93062)], [(40.84513, -73.92257), (40.84424, -73.92273)])),
+        // High Bridge, Highbridge Park to the stairs to University Av
+        Deck([[(40.84246, -73.93168), (40.84201, -73.92675)]],
+             feet: ([(40.84246, -73.93168)], [(40.84201, -73.92675)])),
+        // Macombs Dam Bridge, from the 155 St Viaduct and the ramps by Harlem River Dr, to Jerome Av
+        Deck([[(40.82791, -73.93540), (40.82831, -73.93503), (40.82812, -73.93459), (40.82834, -73.93163),
+               (40.82840, -73.93142), (40.82857, -73.93079), (40.82909, -73.92909)],
+              [(40.82664, -73.93526), (40.82755, -73.93513), (40.82791, -73.93482), (40.82798, -73.93453),
+               (40.82821, -73.93158), (40.82819, -73.93136), (40.82829, -73.93049), (40.82879, -73.92933),
+               (40.82923, -73.92853)],
+              [(40.82816, -73.93150), (40.82778, -73.93141), (40.82648, -73.93144), (40.82597, -73.93139)],
+              [(40.83273, -73.94572), (40.82831, -73.93503)]],
+             feet: ([(40.82791, -73.93540), (40.82664, -73.93526), (40.82597, -73.93139), (40.83273, -73.94572)],
+                    [(40.82909, -73.92909), (40.82943, -73.92854)])),
+        // 145 St Bridge
+        Deck([[(40.82047, -73.93602), (40.81966, -73.93416), (40.81962, -73.93393), (40.81962, -73.93257),
+               (40.81945, -73.93055)],
+              [(40.82028, -73.93615), (40.81947, -73.93411), (40.81941, -73.93366), (40.81944, -73.93256),
+               (40.81917, -73.93037)]],
+             feet: ([(40.82047, -73.93602), (40.82028, -73.93615)], [(40.81945, -73.93055), (40.81917, -73.93037)])),
+        // Madison Av Bridge
+        Deck([[(40.81480, -73.93614), (40.81428, -73.93492), (40.81422, -73.93420), (40.81416, -73.93231),
+               (40.81381, -73.93136), (40.81360, -73.93141)]],
+             feet: ([(40.81480, -73.93614)], [(40.81360, -73.93141)])),
+        // Third Av Bridge, from the stairs off 3 Av, to 3 Av and Lincoln Av
+        Deck([[(40.80705, -73.93540), (40.80698, -73.93516), (40.80676, -73.93434), (40.80801, -73.93149),
+               (40.80839, -73.93081), (40.80934, -73.92951)],
+              [(40.80801, -73.93149), (40.80817, -73.93085), (40.80817, -73.93063), (40.80771, -73.92955)]],
+             feet: ([(40.80705, -73.93540), (40.80676, -73.93434)], [(40.80934, -73.92951), (40.80771, -73.92955)])),
+        // Willis Av Bridge
+        Deck([[(40.80176, -73.93120), (40.80243, -73.93070), (40.80283, -73.93025), (40.80440, -73.92707),
+               (40.80523, -73.92571), (40.80654, -73.92468), (40.80720, -73.92428)]],
+             feet: ([(40.80176, -73.93120)], [(40.80720, -73.92428)])),
+        // George Washington Bridge, 178 St to Fort Lee
+        Deck([[(40.84900, -73.94109), (40.84909, -73.94168), (40.84936, -73.94204), (40.84993, -73.94462),
+               (40.85194, -73.95327), (40.85325, -73.96000), (40.85379, -73.96224), (40.85390, -73.96243)],
+              [(40.84980, -73.94203), (40.84987, -73.94244), (40.85007, -73.94340)]],
+             feet: ([(40.84900, -73.94109), (40.84980, -73.94203)], [(40.85390, -73.96243)])),
+        // Roosevelt Island Bridge
+        Deck([[(40.76414, -73.94684), (40.76391, -73.94670), (40.76257, -73.94407), (40.76200, -73.94247)]],
+             feet: ([(40.76414, -73.94684)], [(40.76200, -73.94247)])),
+        // Cross Bay Bridge, Broad Channel to the Rockaways
+        Deck([[(40.59528, -73.82066), (40.59085, -73.81948), (40.58826, -73.81884), (40.58750, -73.81880)]],
+             feet: ([(40.59528, -73.82066)], [(40.58750, -73.81880)])),
+        // Marine Parkway Bridge
+        Deck([[(40.58004, -73.88947), (40.57808, -73.88765), (40.56849, -73.88184)],
+              [(40.58151, -73.89143), (40.57807, -73.88781)]],
+             feet: ([(40.58004, -73.88947), (40.58151, -73.89143)], [(40.56849, -73.88184)])),
+        // Bayonne Bridge
+        Deck([[(40.63331, -74.14547), (40.63448, -74.14523), (40.63551, -74.14479), (40.64218, -74.14205),
+               (40.65000, -74.14250)]],
+             feet: ([(40.63331, -74.14547)], [(40.65000, -74.14250)])),
+        // Goethals Bridge
+        Deck([[(40.62881, -74.18360), (40.63018, -74.18658), (40.63308, -74.19249), (40.63492, -74.19602),
+               (40.63750, -74.20400)]],
+             feet: ([(40.62881, -74.18360)], [(40.63750, -74.20400)])),
+        // Pulaski Bridge, McGuinness Blvd to 11 St, and the stairs to Jackson Av
+        Deck([[(40.73538, -73.95286), (40.73548, -73.95279), (40.73771, -73.95315), (40.73806, -73.95313),
+               (40.74063, -73.95229), (40.74069, -73.95227), (40.74268, -73.95162), (40.74302, -73.95180)],
+              [(40.74063, -73.95229), (40.74065, -73.95242)]],
+             feet: ([(40.73538, -73.95286)], [(40.74302, -73.95180), (40.74065, -73.95242)])),
+    ]
+
+    /// Which of `crossings` (`walk`'s fitted to the sidewalks, `walk` as Apple Maps gave it) are
+    /// over the streets under a bridge's deck the walk's up on, not crossed: within `underDeck`
+    /// of the deck and of the walk on it, but not within `byFoot` of the feet it goes up and
+    /// comes down by, nor over the deck's own roadway (a step's "Cross" at its start, or the
+    /// walk going across the deck).
+    static func underDecks(_ crossings: [[Walk.Point]], of walk: Walk) -> Set<Int> {
+        let path = walk.steps.flatMap(\.points)
+        guard !crossings.isEmpty, path.count >= 2 else { return [] }
+        // The walk's line every few metres, Apple Maps' points being a long way apart on a bridge
+        var samples: [Walk.Point] = [path[0]]
+        for (a, b) in zip(path, path.dropFirst()) {
+            let count = max(1, Int((a.metres(to: b) / 5).rounded(.up)))
+            for step in 1...count {
+                let t = Double(step) / Double(count)
+                samples.append(Walk.Point(lat: a.lat + (b.lat - a.lat) * t, lon: a.lon + (b.lon - a.lon) * t))
+            }
+        }
+        let margin = 0.001
+        let south = samples.map(\.lat).min()! - margin, north = samples.map(\.lat).max()! + margin
+        let west = samples.map(\.lon).min()! - margin, east = samples.map(\.lon).max()! + margin
+        let middles = crossings.map { crossing -> Walk.Point? in
+            guard let first = crossing.first, let last = crossing.last else { return nil }
+            return Walk.Point(lat: (first.lat + last.lat) / 2, lon: (first.lon + last.lon) / 2)
+        }
+        let told = walk.steps.filter { $0.instruction.hasPrefix("Cross") }.compactMap(\.points.first)
+        var under = Set<Int>()
+        for deck in decks where deck.box.0 <= north && deck.box.1 >= south && deck.box.2 <= east && deck.box.3 >= west {
+            for over in deck.over(samples) {
+                let on = samples[min(over.from, over.to)...max(over.from, over.to)]
+                for (index, middle) in middles.enumerated() {
+                    guard let middle, !under.contains(index),
+                          middle.metres(to: over.feet.0) > byFoot, middle.metres(to: over.feet.1) > byFoot,
+                          deck.metres(to: middle) <= underDeck,
+                          on.contains(where: { $0.metres(to: middle) <= underDeck }),
+                          // Not over its own roadway, from one of its sidewalks to the other: where
+                          // Apple Maps says to cross, or its walk goes across the deck
+                          !told.contains(where: { $0.metres(to: middle) <= byFoot }),
+                          !deck.across(on.filter { $0.metres(to: middle) <= byFoot }) else { continue }
+                    under.insert(index)
+                }
+            }
+        }
+        return under
     }
 }

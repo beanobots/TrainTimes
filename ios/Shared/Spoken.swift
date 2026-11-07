@@ -78,6 +78,25 @@ enum Spoken {
         !heading.isEmpty && !Direction.allCases.contains { $0.compassName == heading }
     }
 
+    /// "The next B63 to Pier 6 is in 4 minutes, then 12." For a bus home stop.
+    static func nextBus(_ bus: BusChoice, buses: [BusArrival], reached: Bool, now: Date) -> String {
+        guard reached else { return "I couldn't reach Bus Time. Try again in a moment." }
+        let minutes = buses.compactMap(\.time).map { max(0, Int($0.timeIntervalSince(now) / 60)) }
+        guard let first = buses.first, let soonest = minutes.first else {
+            let lines = bus.allLines.map(BusNames.label).joined(separator: " or ")
+            return "No \(lines) buses are due at \(bus.stopName) soon."
+        }
+        let when = { (minutes: Int) in minutes == 0 ? "now" : minutes == 1 ? "in 1 minute" : "in \(minutes) minutes" }
+        let going = first.destination.map { " to \(BusNames.destination($0))" } ?? ""
+        var sentence = "The next \(BusNames.label(first.line))\(going) is \(when(soonest))"
+        if minutes.count > 1 {
+            let then = buses.count > 1 && bus.allLines.count > 1
+                ? "a \(BusNames.label(buses[1].line)) \(when(minutes[1]))" : "\(minutes[1])"
+            sentence += ", then \(then)"
+        }
+        return sentence + "."
+    }
+
     static func clock(_ date: Date) -> String {
         date.formatted(date: .omitted, time: .shortened)
     }

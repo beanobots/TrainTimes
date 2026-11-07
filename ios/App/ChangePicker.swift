@@ -19,11 +19,12 @@ struct ChangePicker: View {
                 }
             }
             .navigationDestination(for: Station.self) { station in
-                ChangeLinesStep(selection: selection, station: station, change: change) { routes, direction in
+                ChangeLinesStep(selection: selection, station: station, change: change) { routes, direction, buses in
                     // Keep the existing quick-change and walk settings
                     var chosen = change ?? Change(stationID: station.id, routes: routes)
                     chosen.stationID = station.id
                     chosen.routes = routes
+                    chosen.buses = buses
                     // nil means your train's way
                     chosen.direction = direction == selection.direction ? nil : direction
                     change = chosen
@@ -185,15 +186,21 @@ private struct ChangeLinesStep: View {
     let selection: Selection
     let station: Station
     let walkMinutes: Int
-    let done: ([String], Direction) -> Void
+    /// The lines, which way, and the buses.
+    let done: ([String], Direction, [BusLeg]) -> Void
     /// Every line you can change to here, in order.
     private let lines: [String]
     /// Offer both ways regardless of choice: lines here go either way and don't all plainly go yours.
     private let offersBothWays: Bool
     @State private var chosen: [String]
     @State private var direction: Direction
+    /// Buses to change to instead, from stops near the station.
+    @State private var buses: [BusLeg]
+    /// The buses with a stop within `busWalk` of the station, each way at its nearest stop; nil
+    /// until found.
+    @State private var nearbyBuses: [BusRoutes.Nearby]?
 
-    init(selection: Selection, station: Station, change: Change?, done: @escaping ([String], Direction) -> Void) {
+    init(selection: Selection, station: Station, change: Change?, done: @escaping ([String], Direction, [BusLeg]) -> Void) {
         self.selection = selection
         self.station = station
         self.done = done
@@ -204,6 +211,7 @@ private struct ChangeLinesStep: View {
         let starting = change.flatMap { $0.stationID == station.id ? $0 : nil }
         let chosen = starting?.routes ?? changeLines.across
         _chosen = State(initialValue: chosen)
+        _buses = State(initialValue: starting?.buses ?? [])
         let direction = starting?.departureDirection(for: selection)
             ?? Change(stationID: station.id, routes: chosen.isEmpty ? lines : chosen).suggestedDirection(for: selection)
         _direction = State(initialValue: direction)
@@ -257,17 +265,95 @@ private struct ChangeLinesStep: View {
                         .multilineTextAlignment(.center)
                         .padding(.horizontal)
                 }
+                busCard
             }
             .padding(16)
         }
         .background(Color(.systemGroupedBackground))
-        .chosenLinesButton(chosen.isEmpty ? "Done" : "Done: \(Lines.list(ordered))", disabled: chosen.isEmpty) {
-            done(ordered, direction)
+        .chosenLinesButton(doneTitle, disabled: chosen.isEmpty && buses.isEmpty) {
+            done(ordered, direction, buses)
+        }
+        .task {
+            let location = station.location
+            let walk = Self.busWalk
+            nearbyBuses = await Task.detached { BusRoutes.nearby(location, walkMinutes: walk) }.value
         }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .principal) { StepTitle(title: "Lines", step: 1, count: 2) }
         }
+    }
+
+    /// "Done: Q, B63".
+    private var doneTitle: String {
+        let names = (chosen.isEmpty ? [] : [Lines.list(ordered)]) + buses.map { BusNames.label($0.line) }
+        return names.isEmpty ? "Done" : "Done: \(names.joined(separator: ", "))"
+    }
+
+    /// The furthest walk to a bus stop offered.
+    static let busWalk = 12
+
+    private func leg(_ bus: BusRoutes.Nearby) -> BusLeg {
+        BusLeg(line: bus.line, stop: bus.stop.busStop, destination: bus.to, walkMinutes: bus.walkMinutes)
+    }
+
+    /// The buses with a stop within `busWalk` of the station, grouped by the walk, a row each way:
+    /// any picked are alternatives to the lines, each timed by when it leaves its stop.
+    @ViewBuilder private var busCard: some View {
+        if let nearbyBuses {
+            if !nearbyBuses.isEmpty {
+                VStack(alignment: .leading, spacing: 12) {
+                    Label("Buses within a \(Self.busWalk) min walk", systemImage: "bus.fill")
+                        .font(.subheadline.weight(.semibold))
+                    let walks = Array(Set(nearbyBuses.map(\.walkMinutes))).sorted()
+                    ForEach(walks, id: \.self) { walk in
+                        Text("\(walk) min walk from the \(Lines.list(selection.routes))")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .padding(.top, walk == walks.first ? 0 : 4)
+                        ForEach(nearbyBuses.filter { $0.walkMinutes == walk }, id: \.self) { bus in
+                            busRow(leg(bus))
+                        }
+                    }
+                }
+                .pickerCard()
+            }
+        } else {
+            HStack(spacing: 8) {
+                ProgressView()
+                Text("Finding buses near here…").font(.footnote).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func busRow(_ leg: BusLeg) -> some View {
+        let isOn = buses.contains { $0.line == leg.line && $0.stop.id == leg.stop.id }
+        return Button {
+            if isOn {
+                buses.removeAll { $0.line == leg.line && $0.stop.id == leg.stop.id }
+            } else {
+                buses.append(leg)
+            }
+        } label: {
+            HStack(spacing: 12) {
+                BusBadge(line: leg.line, size: 28)
+                    .opacity(isOn ? 1 : 0.4)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("to \(leg.wayName)").font(.subheadline)
+                    Text(leg.stopName)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
+                    .font(.title3)
+                    .foregroundStyle(isOn ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
+                    .accessibilityHidden(true)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isOn ? .isSelected : [])
     }
 
     /// The chosen lines on `platform`, or if none, all its lines to change to.

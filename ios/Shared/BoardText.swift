@@ -17,8 +17,17 @@ enum AtStation {
     /// Where there's no room for `label`: the compact Dynamic Island.
     static let shortLabel = "At Stn"
 
-    /// Whether a train due at `due` is at the station at `now`.
-    static func covers(_ due: Date, at now: Date) -> Bool {
+    /// A bus at its stop: said for less time, as a bus stops only a moment.
+    static let busSeconds: TimeInterval = 5
+    static let busLabel = "At Stop"
+
+    /// How long one on `route` is held there: a bus's (`BusLeg.prefix`, "bus:B63") or a train's.
+    static func seconds(route: String?) -> TimeInterval {
+        route.flatMap(BusLeg.line(of:)) == nil ? seconds : busSeconds
+    }
+
+    /// Whether a train due at `due` is at the station at `now`, held there `seconds`.
+    static func covers(_ due: Date, at now: Date, seconds: TimeInterval = seconds) -> Bool {
         due <= now && now < due.addingTimeInterval(seconds)
     }
 }

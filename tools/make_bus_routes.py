@@ -11,20 +11,28 @@ stops near a station to change to, and when a bus gets to a stop further on.
 Each line's ways are its commonest stop patterns each direction (up to
 PATTERNS, so branches and short turns are covered), the commonest headsign of
 each, and each stop's minutes from the first, averaged over the pattern's
-trips. Lines are named as make_bus_shapes.py names them ("M15+"). Written as
+trips. Lines are named as make_bus_shapes.py names them, by route_short_name
+("Q6", "M15+"). Written as
 {"stops": [[code, latitude, longitude, name], ...],
  "lines": {"B63": [{"to": headsign, "stops": [index, ...], "minutes": [...]}, ...]}},
 positions in hundred-thousandths of a degree, codes as on the stops' signs
 (Bus Time's stop codes), minutes to a tenth.
+
+With ios/Shared as the target, it also writes the server's bus_stop_lines.json,
+every stop and each line any trip makes it on, {"308209": ["B63", ...], ...},
+for checking a bus countdown's stop and lines (BusStops.swift).
 """
 import csv
 import json
+import os
 import sys
 from collections import Counter, defaultdict
 
-from make_bus_shapes import canonical
+from make_bus_shapes import canonical, line_names
 
 PATTERNS = 3  # each direction's commonest stop patterns kept
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SERVER_RESOURCES = os.path.join(REPO, "server", "Sources", "TrainResources", "Resources")
 
 
 def seconds(clock):
@@ -36,21 +44,24 @@ def main(target_dir, feeds):
     stops = {}  # code: (latitude, longitude, name)
     # (line, direction): pattern (tuple of codes): [trip count, headsigns, summed offsets]
     patterns = defaultdict(dict)
+    served = defaultdict(set)  # code: every line stopping there, on any pattern
     for feed in feeds:
         with open(f"{feed}/stops.txt", encoding="utf-8-sig", newline="") as file:
             for stop in csv.DictReader(file):
                 stops[stop["stop_id"]] = (round(float(stop["stop_lat"]) * 1e5), round(float(stop["stop_lon"]) * 1e5),
                                           stop["stop_name"].strip())
+        names = line_names(feed)
         trips = {}  # trip id: (line, direction, headsign)
         with open(f"{feed}/trips.txt", encoding="utf-8-sig", newline="") as file:
             for trip in csv.DictReader(file):
-                trips[trip["trip_id"]] = (canonical(trip["route_id"]), trip.get("direction_id", "0"),
-                                          trip.get("trip_headsign", "").strip())
+                line = names.get(trip["route_id"]) or canonical(trip["route_id"])
+                trips[trip["trip_id"]] = (line, trip.get("direction_id", "0"), trip.get("trip_headsign", "").strip())
         calls = defaultdict(list)  # trip id: [(sequence, code, seconds)]
         with open(f"{feed}/stop_times.txt", encoding="utf-8-sig", newline="") as file:
             for row in csv.DictReader(file):
                 if row["trip_id"] in trips and row["arrival_time"]:
                     calls[row["trip_id"]].append((int(row["stop_sequence"]), row["stop_id"], seconds(row["arrival_time"])))
+                    served[row["stop_id"]].add(trips[row["trip_id"]][0])
         for trip_id, stops_called in calls.items():
             stops_called.sort()
             line, direction, headsign = trips[trip_id]
@@ -79,6 +90,15 @@ def main(target_dir, feeds):
     with open(f"{target_dir}/bus_routes.json", "w", encoding="utf-8") as file:
         json.dump({"stops": rows, "lines": lines}, file, separators=(",", ":"))
         file.write("\n")
+    if os.path.samefile(target_dir, os.path.join(REPO, "ios", "Shared")):
+        write_stop_lines(served, SERVER_RESOURCES)
+
+
+def write_stop_lines(served, target_dir):
+    with open(f"{target_dir}/bus_stop_lines.json", "w", encoding="utf-8") as file:
+        json.dump({code: sorted(lines) for code, lines in sorted(served.items())}, file, separators=(",", ":"))
+        file.write("\n")
+    print(f"{len(served)} stops' lines -> {target_dir}/bus_stop_lines.json")
 
 
 if __name__ == "__main__":

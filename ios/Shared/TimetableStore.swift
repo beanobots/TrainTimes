@@ -16,6 +16,18 @@ enum TimetableStore {
     /// Seconds to wait for the timetable to download.
     private static let timeout: TimeInterval = 20
 
+    /// How long after a download fails before it's tried again (but for `force`), so every
+    /// widget reload and app open doesn't wait out `timeout` on the same failure. Shorter for
+    /// the app, opened far less often than widgets reload, so a widget's failure doesn't keep it
+    /// from trying for an hour.
+    static var retryAfter: TimeInterval { isExtension ? 60 * 60 : 5 * 60 }
+    /// Whether this is a widget (or other extension), not the app.
+    private static let isExtension = Bundle.main.bundleURL.pathExtension == "appex"
+    /// When a download last failed, in the App Group's defaults, so the app and widgets each
+    /// know; cleared when one succeeds.
+    private static let failedKey = "timetableDownloadFailed"
+    private static var defaults: UserDefaults? { UserDefaults(suiteName: SharedStore.groupID) }
+
     /// The downloaded timetable, if it has trains for `now`. Read once, and again only after a
     /// new one's downloaded.
     static func load(now: Date = .now) -> Timetable? {
@@ -32,45 +44,72 @@ enum TimetableStore {
         return !changed.isWithin(refreshAfter, before: now)
     }
 
-    /// Downloads a new one if due (or with `force`). Kept only if it reads; on failure, the old
-    /// one stays. Widgets reloading together share one download.
+    /// Downloads a new one if due (or with `force`), and not failed within `retryAfter`. Kept
+    /// only if it reads; on failure, the old one stays. Widgets reloading together share one
+    /// download. One cut short (cancelled, as when a widget's run ends) isn't a failure.
     static func refresh(force: Bool = false) async {
-        guard force || isDue() else { return }
-        await downloads.run { await download() }
+        if !force {
+            guard isDue() else { return }
+            if let failed = defaults?.object(forKey: failedKey) as? Date, failed.isWithin(retryAfter, before: .now) { return }
+        }
+        await downloads.run {
+            switch await download() {
+            case .downloaded: defaults?.removeObject(forKey: failedKey)
+            case .failed: defaults?.set(Date.now, forKey: failedKey)
+            case .interrupted: break
+            }
+        }
     }
 
     private static let downloads = Downloads()
 
-    private static func download() async {
-        guard let serverURL = ServerRoutes.baseURL, let file, let tagFile else { return }
+    /// What came of a download (`download`).
+    private enum Outcome {
+        /// A new one that reads, or word it's unchanged.
+        case downloaded
+        case failed
+        /// Cancelled before it finished: no word on the server either way.
+        case interrupted
+    }
+
+    private static func download() async -> Outcome {
+        guard let serverURL = ServerRoutes.baseURL, let file, let tagFile else { return .failed }
         var request = URLRequest(url: serverURL.appendingPathComponent("timetable"),
                                  cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout)
         if modified(file) != nil, let tag = try? String(contentsOf: tagFile, encoding: .utf8) {
             request.setValue(tag, forHTTPHeaderField: "If-None-Match")
         }
-        guard let (data, response) = try? await TrainService.serverSession.data(for: request),
-              let http = response as? HTTPURLResponse else { return }
+        let data: Data
+        let response: URLResponse
+        do { (data, response) = try await TrainService.serverSession.data(for: request) }
+        catch {
+            let cancelled = (error as? URLError)?.code == .cancelled || error is CancellationError || Task.isCancelled
+            return cancelled ? .interrupted : .failed
+        }
+        guard let http = response as? HTTPURLResponse else { return .failed }
         switch http.statusCode {
         case 304:
             // Unchanged: checked now. The one read stays, under the file's new date
             let checked = modified(file)
             try? FileManager.default.setAttributes([.modificationDate: Date.now], ofItemAtPath: file.path)
             if let checked, let changed = modified(file) { cache.redate(from: checked, to: changed) }
+            return .downloaded
         case 200:
             // Read once, to check it, and kept as the one read from the file: a widget hasn't
             // room to read it again alongside, nor to keep the old one while it does (which is
             // read again from the file if this one doesn't read)
             cache.forget()
             guard let timetable = try? Timetable(data: data), (try? data.write(to: file, options: .atomic)) != nil
-            else { return }
+            else { return .failed }
             if let changed = modified(file) { cache.keep(timetable, changed: changed) }
             if let tag = http.value(forHTTPHeaderField: "ETag") {
                 try? tag.write(to: tagFile, atomically: true, encoding: .utf8)
             } else {
                 try? FileManager.default.removeItem(at: tagFile)
             }
+            return .downloaded
         default:
-            break
+            return .failed
         }
     }
 
@@ -102,6 +141,10 @@ enum TimetableStore {
             lock.lock()
             defer { lock.unlock() }
             if let read, read.changed == changed { return read.timetable }
+            // Let go of the old one first, so the two aren't held at once while the new one's
+            // parsed: several MB, against the widget's memory limit. Still under the lock, so
+            // no other reader sees it gone and reads the file too
+            read = nil
             let timetable = reading()
             read = (changed, timetable)
             return timetable

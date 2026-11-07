@@ -301,13 +301,16 @@ final class WalkRouter {
     func route(from start: Walk.Point, to end: Walk.Point, options: Options = Options()) -> Route? {
         followed = blocks(along: options.along)
         defer { followed = [] }
-        guard let fastest = search(from: start, to: end, weight: WalkCosts.weight(.fastest), options: options)
+        // Where it starts and ends doesn't change with the weight: found once for every search
+        let starts = snaps(near: start), ends = snaps(near: end)
+        guard let fastest = search(from: start, to: end, starts: starts, ends: ends,
+                                   weight: WalkCosts.weight(.fastest), options: options)
         else { return nil }
         if options.preference == .fastest { return finish(fastest, fastestSeconds: fastest.stats.seconds) }
         let budget = WalkCosts.budget(options.preference, fastest: fastest.stats.seconds)
         var weight = WalkCosts.weight(options.preference)
         for _ in 0..<4 {
-            if let route = search(from: start, to: end, weight: weight, options: options),
+            if let route = search(from: start, to: end, starts: starts, ends: ends, weight: weight, options: options),
                route.stats.seconds <= budget {
                 return finish(route, fastestSeconds: fastest.stats.seconds)
             }
@@ -507,8 +510,8 @@ final class WalkRouter {
         static func < (a: Entry, b: Entry) -> Bool { a.f < b.f }
     }
 
-    private func search(from start: Walk.Point, to end: Walk.Point, weight: Double, options: Options) -> Route? {
-        let starts = snaps(near: start), ends = snaps(near: end)
+    private func search(from start: Walk.Point, to end: Walk.Point, starts: [Snap], ends: [Snap],
+                        weight: Double, options: Options) -> Route? {
         // Both ends in one walkable part: of those both are near, the one they're nearest
         // (a start by a loose bit of park path still goes by the streets)
         func part(_ snap: Snap) -> UInt32 { graph.nodePart[Int(graph.blockA[snap.block])] }

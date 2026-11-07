@@ -503,8 +503,13 @@ rotation needs `LOG_FILE` added (the script reminds you). Delete its
   database once, then deleted. The countdown's state is the app's own type
   (`ios/Shared/Countdown.swift`), and running countdowns and the database
   hold states made before an update, so a field added to it must be
-  optional; update the server before releasing an app that sends one. After
-  editing the plist, reload it:
+  optional; update the server before releasing an app that sends one.
+  The subway timetable it downloads itself, but its bus stops' lines
+  (`bus_stop_lines.json`) are built in: after the MTA's new bus schedules,
+  make it again (the repo's README, "Where the data comes from") and update.
+  Until then, countdowns at stops new in them are refused, each logged as
+  "bus countdown refused: stop … not in bus_stop_lines.json" with its lines.
+  After editing the plist, reload it:
 
       sudo launchctl bootout system/com.traintimes.server
       sudo ./deploy/install.sh

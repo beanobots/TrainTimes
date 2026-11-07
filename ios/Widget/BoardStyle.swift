@@ -40,6 +40,9 @@ struct BoardStyle {
 }
 
 extension EnvironmentValues {
+    /// Drawn as the Saved Route widget (and the Widgets tab's copy of it): the app's colours and
+    /// corners, and its own layouts. Off, as the Magic Widget draws its boards, today's look.
+    @Entry var routeLook = false
     /// The widget size a board draws at in the app's Widgets tab, which can't set
     /// `widgetFamily`; nil in a widget, which uses iOS's.
     @Entry var boardFamily: WidgetFamily? = nil
@@ -52,6 +55,45 @@ extension EnvironmentValues {
     @Entry var endTripFace: EndTripFace? = nil
     /// Transit Directions' size, for a toggle's face drawn over all of it (`wholeWidgetFace`).
     @Entry var widgetSize: CGSize? = nil
+}
+
+/// The boards' ink: today's colours, or with `routeLook` the app's (secondary text, tertiary fill),
+/// so one board serves both widgets.
+struct BoardInk: ShapeStyle {
+    enum Kind { case text, gray, tile }
+    let kind: Kind
+
+    static let text = BoardInk(kind: .text)
+    static let gray = BoardInk(kind: .gray)
+    static let tile = BoardInk(kind: .tile)
+
+    func resolve(in environment: EnvironmentValues) -> Color {
+        Self.color(kind, route: environment.routeLook)
+    }
+
+    /// As a plain colour, for where a `Color` is needed.
+    static func color(_ kind: Kind, route: Bool) -> Color {
+        switch (kind, route) {
+        case (.text, true): Color(uiColor: .label)
+        case (.gray, true): Color(uiColor: .secondaryLabel)
+        case (.tile, true): Color(uiColor: .tertiarySystemFill)
+        case (.text, false): .boardText
+        case (.gray, false): .boardGray
+        case (.tile, false): Color.boardText.opacity(0.07)
+        }
+    }
+}
+
+/// A board's grey tile: today's 16 (or `radius`) corners, or with `routeLook` the app's 18,
+/// continuous.
+struct BoardTile: View {
+    var radius: CGFloat = 16
+    @Environment(\.routeLook) private var routeLook
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: routeLook ? 18 : radius, style: routeLook ? .continuous : .circular)
+            .fill(BoardInk.tile)
+    }
 }
 
 /// A board's countdown from `start` to `end`: a live timer, or on a toggle's face
@@ -92,6 +134,9 @@ struct BoardCountdown: View {
     let walking: Bool
     /// "At Station" in place of 0:00, for a train just due (`TimelinePlan.atStation`).
     let atStation: Bool
+    /// What it says then: "At Station", or a bus's "At Stop".
+    var atLabel = AtStation.label
+    @Environment(\.routeLook) private var routeLook
 
     /// To `train` on `entry`'s board, or to leaving for it with a walking time; at the station
     /// once it's due, without one.
@@ -102,7 +147,7 @@ struct BoardCountdown: View {
     }
 
     init(start: Date, end: Date, isLive: Bool, marks: TimeMarks, size: CGFloat, walking: Bool = false,
-         atStation: Bool = false) {
+         atStation: Bool = false, atLabel: String = AtStation.label) {
         self.start = start
         self.end = end
         self.isLive = isLive
@@ -110,29 +155,33 @@ struct BoardCountdown: View {
         self.size = size
         self.walking = walking
         self.atStation = atStation
+        self.atLabel = atLabel
     }
 
+    /// "At Station" at half the countdown's size, so it fits in the box the digits do.
+    private var textSize: CGFloat { atStation ? size * 0.5 : size }
+
     var body: some View {
-        let color = isLive ? Color.liveText : Color.boardText
+        let color = isLive ? Color.liveText : BoardInk.color(.text, route: routeLook)
         HStack(spacing: 4) {
             if walking {
                 Image(systemName: "figure.walk")
                     .font(.system(size: size * 0.45, weight: .bold))
-                    .foregroundStyle(Color.boardGray)
+                    .foregroundStyle(BoardInk.gray)
                     .accessibilityLabel("Leave in")
             }
             // A live timer takes all the width it's offered, so the placeholder sizes it
-            Text(atStation ? AtStation.label : TimerText.placeholder(seconds: end.timeIntervalSince(start)))
+            Text(atStation ? atLabel : TimerText.placeholder(seconds: end.timeIntervalSince(start)))
                 .hidden()
                 .overlay(alignment: .leading) {
                     if atStation {
-                        Text(AtStation.label).lineLimit(1)
+                        Text(atLabel).lineLimit(1)
                     } else {
                         CountdownTimer(start: start, end: end)
                             .lineLimit(1)
                     }
                 }
-                .font(.system(size: size, weight: .bold, design: .rounded))
+                .font(.system(size: textSize, weight: .bold, design: .rounded))
                 .monospacedDigit()
                 .timerForeground(color)
                 .widgetAccentable(isLive)
@@ -156,7 +205,7 @@ struct BoardBox<Content: View>: View {
         content
             .padding(.horizontal, 14)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(RoundedRectangle(cornerRadius: 16).fill(Color.boardText.opacity(0.07)))
+            .background(BoardTile())
     }
 }
 
@@ -177,7 +226,7 @@ struct TopCard: View {
         }
         .padding(.horizontal, 14)
         .frame(minHeight: WaysBoard.boxHeight)
-        .background(RoundedRectangle(cornerRadius: 16).fill(Color.boardText.opacity(0.07)))
+        .background(BoardTile())
     }
 }
 
@@ -192,7 +241,7 @@ struct RefreshMark: View {
         if (refreshing && showsRefreshing) || (!refreshing && entry.isOffline) {
             Image(systemName: refreshing ? "arrow.clockwise" : "wifi.slash")
                 .font(.caption.weight(.bold))
-                .foregroundStyle(Color.boardGray)
+                .foregroundStyle(BoardInk.gray)
                 .accessibilityLabel(refreshing ? "Refreshing" : entry.offlineLabel)
         }
     }
@@ -240,6 +289,7 @@ private struct WholeWidgetFace<Face: View>: ViewModifier {
     let shown: Bool
     let face: () -> Face
     @Environment(\.widgetSize) private var size
+    @Environment(\.routeLook) private var routeLook
 
     func body(content: Content) -> some View {
         content.overlay(alignment: .topLeading) {
@@ -249,7 +299,7 @@ private struct WholeWidgetFace<Face: View>: ViewModifier {
                     let origin = proxy.frame(in: .named(EndTripFace.space)).origin
                     face()
                         .frame(width: size.width, height: size.height)
-                        .background(Color.boardBackground)
+                        .background(routeLook ? Color.routeBackground : Color.boardBackground)
                         .offset(x: -origin.x, y: -origin.y)
                 }
                 // Not crossfaded over what's under it
@@ -273,5 +323,20 @@ extension String {
     /// Single-line width in `font`.
     func width(in font: UIFont) -> CGFloat {
         ceil((self as NSString).size(withAttributes: [.font: font]).width)
+    }
+}
+
+/// A way's mark: its line's bullet, or for a bus (`BusLeg.route`) its badge.
+struct WayMark: View {
+    let route: String
+    let size: CGFloat
+    var relativeTo: Font.TextStyle? = nil
+
+    var body: some View {
+        if let line = BusLeg.line(of: route) {
+            BusBadge(line: line, size: size)
+        } else {
+            LineBullet(route: route, size: size, relativeTo: relativeTo)
+        }
     }
 }

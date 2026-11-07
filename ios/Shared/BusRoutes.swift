@@ -35,7 +35,7 @@ enum BusRoutes {
     }
 
     private struct File: Decodable {
-        var stops: [[Value]]
+        var stops: [Row]
         var lines: [String: [Pattern]]
 
         struct Pattern: Decodable {
@@ -44,21 +44,21 @@ enum BusRoutes {
             var minutes: [Double]
         }
 
-        enum Value: Decodable {
-            case number(Double)
-            case text(String)
+        /// A stop: [code, latitude, longitude, name], positions in hundred-thousandths of a
+        /// degree. Read in that order, not each of some 54,000 values tried as a number first.
+        struct Row: Decodable {
+            var code: String
+            var latitude: Double
+            var longitude: Double
+            var name: String
 
             init(from decoder: Decoder) throws {
-                let container = try decoder.singleValueContainer()
-                if let number = try? container.decode(Double.self) {
-                    self = .number(number)
-                } else {
-                    self = .text(try container.decode(String.self))
-                }
+                var container = try decoder.unkeyedContainer()
+                code = try container.decode(String.self)
+                latitude = try container.decode(Double.self)
+                longitude = try container.decode(Double.self)
+                name = try container.decode(String.self)
             }
-
-            var number: Double { if case .number(let value) = self { value } else { 0 } }
-            var text: String { if case .text(let value) = self { value } else { "" } }
         }
     }
 
@@ -67,7 +67,7 @@ enum BusRoutes {
               let data = try? Data(contentsOf: url),
               let file = try? JSONDecoder().decode(File.self, from: data) else { return ([], [:]) }
         let stops = file.stops.map { row in
-            Stop(code: row[0].text, latitude: row[1].number / 1e5, longitude: row[2].number / 1e5, name: row[3].text)
+            Stop(code: row.code, latitude: row.latitude / 1e5, longitude: row.longitude / 1e5, name: row.name)
         }
         let lines = file.lines.mapValues { patterns in
             patterns.map { Way(to: $0.to, stops: $0.stops.map { stops[$0] }, minutes: $0.minutes) }
@@ -75,12 +75,19 @@ enum BusRoutes {
         return (stops, lines)
     }()
 
-    /// A bus line's name as bus_routes.json is keyed: "M15-SBS" and "M15 SBS" are "M15+".
+    /// A bus line's name as bus_routes.json is keyed: "M15-SBS" and "M15 SBS" are "M15+". Its
+    /// number's leading zeros dropped, as the file names lines by the GTFS's route_short_name
+    /// ("Q6"), as Bus Time does, but older files had its route_id ("Q06"), which a line saved
+    /// then may still be.
     static func key(_ line: String) -> String {
         var name = line.uppercased().filter { !$0.isWhitespace && $0 != "-" }
         if name.hasSuffix("SBS") { name = String(name.dropLast(3)) + "+" }
-        return name
+        let letters = name.prefix { $0.isLetter }
+        return String(letters) + name.dropFirst(letters.count).drop { $0 == "0" }
     }
+
+    /// Every line's name as keyed: "B63", "M15+". Sorted once: the line search asks as it redraws.
+    static let lineNames: [String] = loaded.lines.keys.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
 
     static func ways(of line: String) -> [Way] {
         loaded.lines[key(line)] ?? []

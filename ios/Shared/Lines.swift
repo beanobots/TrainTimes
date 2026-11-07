@@ -11,7 +11,12 @@ struct LineStyle: Hashable, Sendable {
 
     /// `route` is a real-time route id such as "R", "FS" (Franklin shuttle) or "SI".
     static func of(_ route: String) -> LineStyle {
-        switch route {
+        // A bus's, as a bus countdown has it ("bus:B63"): the MTA's bus blue
+        if let line = BusLeg.line(of: route) {
+            return LineStyle(label: BusNames.label(line), color: BusNames.isSBS(line) ? 0x0078C6 : 0x0039A6,
+                             usesDarkText: false)
+        }
+        return switch route {
         case "1", "2", "3": LineStyle(label: route, color: 0xEE352E, usesDarkText: false)
         case "4", "5", "6": LineStyle(label: route, color: 0x00933C, usesDarkText: false)
         case "7": LineStyle(label: route, color: 0xB933AD, usesDarkText: false)

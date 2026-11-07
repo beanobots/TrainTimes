@@ -99,6 +99,37 @@ struct WalkState: Codable, Hashable, Sendable {
     }
 }
 
+/// A bus on its way to a bus countdown's stop, as both the app (`BusArrival`) and the push server
+/// (`BusTime.Arrival`) have it: what `CountdownState(buses:after:now:)` counts down to.
+struct CountdownBus: Hashable, Sendable {
+    /// "B63", "M15-SBS".
+    var line: String
+    /// Where it's going, as Bus Time writes it.
+    var destination: String?
+    /// When it's due: as expected from where it is, else by the timetable.
+    var time: Date
+    /// Expected from where it is, not the timetable's.
+    var isLive: Bool
+}
+
+extension CountdownState {
+    /// A bus countdown (`TrainActivityAttributes.bus`, `Registration.bus`): the first of `buses`
+    /// due after `now`, then the two after it. Once started (`after`, the bus it last counted
+    /// down to), the first due no sooner than that, give or take `leeway`, as a bus has no trip
+    /// to follow. Its routes are the buses' ("bus:B63", `BusLeg.prefix`). Nil with none coming.
+    init?(buses: [CountdownBus], after last: Date?, now: Date) {
+        let coming = buses
+            .filter { bus in bus.time > now && last.map { bus.time >= $0.addingTimeInterval(-Self.leeway) } ?? true }
+            .sorted { $0.time < $1.time }
+        guard let first = coming.first else { return nil }
+        let after = Array(coming.dropFirst().prefix(2))
+        self.init(train: first.time, trip: "", isLive: first.isLive, terminal: first.destination.map(BusNames.destination),
+                  following: after.map(\.time), notice: nil, updated: now)
+        route = BusLeg.prefix + first.line
+        followingRoutes = after.map { BusLeg.prefix + $0.line }
+    }
+}
+
 extension CountdownState {
     /// How long a countdown runs from when it starts, moving on to the next train each time one
     /// is due; then the app, or the push server, ends it. (iOS's own limit is 8 hours.)
@@ -122,8 +153,11 @@ extension CountdownState {
     /// saying "At Station" until it's next updated. A walk's the app keeps up.
     func staleDate(pushedOn: Bool) -> Date {
         if let walk, walk.phase == .riding, let getOff = walk.getOff { return getOff }
-        return walk == nil && (following.isEmpty || !pushedOn) ? train.addingTimeInterval(AtStation.seconds) : train
+        return walk == nil && (following.isEmpty || !pushedOn) ? train.addingTimeInterval(heldSeconds) : train
     }
+
+    /// How long its train, or bus, is held at the station or stop once due (`AtStation`).
+    var heldSeconds: TimeInterval { AtStation.seconds(route: route) }
 
     /// Whether widgets for its train show the same as with `other`: they take its trains'
     /// times, lines and liveness (`CountdownSync`), however little they move, but not its notice.

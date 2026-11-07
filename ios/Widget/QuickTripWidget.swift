@@ -576,7 +576,9 @@ struct QuickTripView: View {
         }
     }
 
-    private var favoriteLabel: String { "Favorite Stop, \(entry.favorite.station?.name ?? "")" }
+    private var favoriteLabel: String {
+        "Favorite Stop, \(SharedStore.defaultBus?.stopName ?? entry.favorite.station?.name ?? "")"
+    }
 
     /// A clear toggle over its half of the circles' column, to show `screen`, drawing `face` over
     /// the whole widget on a tap. From the buttons, as a face can be drawn over them until the
@@ -638,9 +640,14 @@ struct QuickTripView: View {
 
     /// Favorite Stop's station, way and lines, drawn as Settings picks (`FavoriteCardStyle`).
     /// No times: its board, drawn on a tap, has those.
-    private var favoriteCard: some View {
-        StopCard(station: entry.favorite.station?.cardName ?? "", heading: entry.favorite.cardHeading,
-                 routes: entry.favorite.routes, style: SharedStore.loadSettings().favoriteCard, fitsHeading: false)
+    @ViewBuilder private var favoriteCard: some View {
+        // A bus home stop: its card as a saved bus route's
+        if let bus = SharedStore.defaultBus {
+            RouteCard(route: .bus(SavedBusBoard(choice: bus, buses: [])))
+        } else {
+            StopCard(station: entry.favorite.station?.cardName ?? "", heading: entry.favorite.cardHeading,
+                     routes: entry.favorite.routes, style: SharedStore.loadSettings().favoriteCard, fitsHeading: false)
+        }
     }
 
     /// Nearby's or Trip's symbol, white in a circle of its colour.

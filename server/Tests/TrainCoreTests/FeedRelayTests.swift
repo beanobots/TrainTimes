@@ -6,21 +6,26 @@ import Testing
 @testable import TrainCore
 
 /// Counts reads of the MTA, answering each with a feed naming its address (a trip with it as
-/// id, or a JSON list of it), or nothing when `failing`, or an empty body when `empty`.
+/// id, or a JSON list of it), or nothing when `failing`, or an empty body when `empty`, or
+/// train feeds with no trips when `noTrips`.
 private actor FakeMTA {
     var reads = 0
     var failing = false
     var empty = false
+    var noTrips = false
 
     func read(_ url: URL) -> Data? {
         reads += 1
         if failing { return nil }
         if empty { return Data() }
+        if noTrips, url != AlertsFeed.url, url != OutagesFeed.url { return GTFSFeed.feed([]) }
         if url == AlertsFeed.url || url == OutagesFeed.url { return Data("[\"\(url.absoluteString)\"]".utf8) }
         return GTFSFeed.feed([GTFSFeed.trip(url.absoluteString, stops: [])])
     }
 
     func answerEmpty(_ empty: Bool) { self.empty = empty }
+
+    func answerNoTrips(_ noTrips: Bool) { self.noTrips = noTrips }
 
     func fail(_ failing: Bool) { self.failing = failing }
 }
@@ -91,6 +96,11 @@ private actor FakeMTA {
         #expect(!TrainService.isUsable(Data(), from: AlertsFeed.url))
         #expect(!TrainService.isUsable(Data("{\"entity\": [".utf8), from: AlertsFeed.url))
         #expect(TrainService.isUsable(Data("[]".utf8), from: OutagesFeed.url))
+        // JSON by its ends, not parsed
+        #expect(TrainService.isUsable(Data(" {\"entity\": []}\n".utf8), from: AlertsFeed.url))
+        #expect(!TrainService.isUsable(Data("[{}".utf8), from: OutagesFeed.url))
+        #expect(!TrainService.isUsable(Data("{".utf8), from: OutagesFeed.url))
+        #expect(!TrainService.isUsable(Data("<html></html>".utf8), from: AlertsFeed.url))
         // What isn't an MTA feed is taken as it is
         #expect(TrainService.isUsable(Data(), from: try #require(URL(string: "https://example.com/x"))))
     }
@@ -108,6 +118,70 @@ private actor FakeMTA {
         #expect(await relay.feed(named: "nyct/gtfs-ace", now: start.addingTimeInterval(20)) == first)
         #expect(await relay.feed(named: "camsys/subway-alerts.json", now: start.addingTimeInterval(20))?.isEmpty == false)
         #expect(await relay.feed(named: "nyct/gtfs-ace", now: start.addingTimeInterval(50)) == nil)
+    }
+
+    @Test func countsAFeedsTrips() {
+        #expect(SubwayFeed.tripCount(GTFSFeed.feed([])) == 0)
+        let feed = GTFSFeed.feed([GTFSFeed.trip("R1", stops: [FeedStop("R34N", at: 3)]),
+                                  GTFSFeed.vehicle("R1", at: "R34N", status: 1),
+                                  GTFSFeed.trip("R2", stops: [FeedStop("R34N", at: 9)])])
+        #expect(SubwayFeed.tripCount(feed) == 2)
+        #expect(SubwayFeed.tripCount(feed.prefix(feed.count - 3)) == nil)
+    }
+
+    @Test func aFeedWithNoTripsKeepsTheLastCopyTillTheThirdInARow() async throws {
+        let mta = FakeMTA()
+        let relay = FeedRelay(interval: 20) { await mta.read($0) }
+        let start = Date.now
+        await relay.refresh(now: start)
+        let first = try #require(await relay.feed(named: "nyct/gtfs-ace", now: start))
+        #expect(SubwayFeed.tripCount(first) == 1)
+        // As the MTA's feeds come back for a read or two during a restart: not "no trains" yet
+        await mta.answerNoTrips(true)
+        for tick in 1...2 {
+            let at = start.addingTimeInterval(Double(tick) * 20)
+            await relay.refresh(now: at)
+            #expect(await relay.feed(named: "nyct/gtfs-ace", now: at) == first)
+            // Held as this read, not aging out before the third: none would be served then
+            #expect(await relay.feed(named: "nyct/gtfs-ace", now: at.addingTimeInterval(19)) == first)
+        }
+        // The third in a row is believed
+        let third = start.addingTimeInterval(60)
+        await relay.refresh(now: third)
+        #expect(await relay.feed(named: "nyct/gtfs-ace", now: third).flatMap(SubwayFeed.tripCount) == 0)
+        // And trips again start over
+        await mta.answerNoTrips(false)
+        await relay.refresh(now: start.addingTimeInterval(80))
+        await mta.answerNoTrips(true)
+        await relay.refresh(now: start.addingTimeInterval(100))
+        #expect(await relay.feed(named: "nyct/gtfs-ace", now: start.addingTimeInterval(100)).flatMap(SubwayFeed.tripCount) == 1)
+    }
+
+    @Test func aSlowReadIsGivenUpOnWithoutHoldingBackTheOthers() async throws {
+        let slow = try #require(FeedRelay.feeds["nyct/gtfs-ace"])
+        let relay = FeedRelay(interval: 20, readTimeout: 0.2) { url in
+            if url == slow { try? await Task.sleep(for: .seconds(30)) }
+            return GTFSFeed.feed([GTFSFeed.trip(url.absoluteString, stops: [])])
+        }
+        let clock = ContinuousClock()
+        let took = await clock.measure { await relay.refresh() }
+        #expect(took < .seconds(10))
+        #expect(await relay.feed(named: "nyct/gtfs-ace") == nil)
+        #expect(await relay.feed(named: "nyct/gtfs-l") != nil)
+    }
+
+    @Test func manyDifferentCutsAtOnceAreEachServed() async throws {
+        let feed = GTFSFeed.feed((0..<200).map { GTFSFeed.trip("R\($0)", stops: [FeedStop("R\($0)N", at: 3)]) })
+        let relay = FeedRelay(interval: 20) { _ in feed }
+        await relay.refresh()
+        let gzippedWhole = try #require(await relay.served(FeedRelay.Ask(name: "nyct/gtfs-nqrw", gzip: true)))
+        let served = await Concurrency.map(Array(0..<40), limit: 40) { index in
+            await relay.served(FeedRelay.Ask(name: "nyct/gtfs-nqrw", stops: ["R\(index)N"], gzip: true))
+        }
+        // Each its own cut, or past the cuts allowed at once, the whole feed as already made
+        #expect(served.count == 40)
+        #expect(served.allSatisfy { $0?.gzipped == true })
+        #expect(served.allSatisfy { $0.map { $0.data.count < gzippedWhole.data.count || $0.data == gzippedWhole.data } ?? false })
     }
 
     @Test func countdownsUseTheSameCopies() async throws {

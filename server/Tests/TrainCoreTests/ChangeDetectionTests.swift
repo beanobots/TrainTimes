@@ -128,3 +128,35 @@ import Testing
         #expect(notice(nil, "Delays", outages: false) == "Delays")
     }
 }
+
+@Suite struct MovedOnChangeTests {
+    /// As `Poller.pushDue` leaves a countdown it's moved on: the next train's time and line, but
+    /// not its trip or terminal.
+    var movedOn: ContentState {
+        var state = state(train: 5)
+        state.trip = ""
+        state.terminal = nil
+        return state
+    }
+
+    @Test func theNextPassFillingInTheTripAndTerminalIsNoUpdate() {
+        let filled = state(train: 5, trip: "c")
+        #expect(!ActivityState.isMeaningful(filled, comparedTo: movedOn))
+        #expect(ActivityState.push(filled, last: movedOn, lastPush: now, now: now.addingTimeInterval(20)) == .none)
+        // Nor reloads the widgets
+        #expect(!ActivityState.changesWidgets(filled, from: movedOn))
+        // Its trip rides along with the next refresh
+        #expect(ActivityState.push(filled, last: movedOn, lastPush: now, now: now.addingTimeInterval(300)) == .refresh)
+    }
+
+    @Test func anotherLineOrTimeAfterAMoveOnStillIs() {
+        var otherLine = state(train: 5, trip: "c")
+        otherLine.route = "N"
+        #expect(ActivityState.isMeaningful(otherLine, comparedTo: movedOn))
+        #expect(ActivityState.isMeaningful(state(train: 7, trip: "c"), comparedTo: movedOn))
+        #expect(ActivityState.changesWidgets(state(train: 5.5, trip: "c"), from: movedOn))
+        // With its trip known, another is another train, as before
+        #expect(ActivityState.isMeaningful(state(train: 5, trip: "c"), comparedTo: state(train: 5, trip: "b")))
+        #expect(ActivityState.changesWidgets(state(train: 5, trip: "c"), from: state(train: 5, trip: "b")))
+    }
+}

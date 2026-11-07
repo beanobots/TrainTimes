@@ -41,20 +41,10 @@ struct BusBadge: View {
     }
 
     /// Whether `line` is Select Bus Service: "M86-SBS", "M86 SBS", "M86+".
-    static func isSBS(_ line: String) -> Bool {
-        let name = line.uppercased().replacingOccurrences(of: " ", with: "")
-        return name.hasSuffix("SBS") || name.hasSuffix("+")
-    }
+    static func isSBS(_ line: String) -> Bool { BusNames.isSBS(line) }
 
     /// The line without its Select Bus Service mark: "M86".
-    static func label(_ line: String) -> String {
-        var name = line.trimmingCharacters(in: .whitespaces)
-        for mark in ["-SBS", " SBS", "SBS", "+"] where name.uppercased().hasSuffix(mark) {
-            name = String(name.dropLast(mark.count)).trimmingCharacters(in: .whitespaces)
-            break
-        }
-        return name.isEmpty ? line : name
-    }
+    static func label(_ line: String) -> String { BusNames.label(line) }
 
     /// "B63 bus", "M86 Select Bus".
     static func spokenName(_ line: String) -> String {
@@ -171,46 +161,26 @@ struct BusStopTimes: Codable, Hashable, Sendable {
     var stop: Stop
     var arrivals: [BusArrival]
 
-    struct Stop: Codable, Hashable, Sendable {
-        /// The MTA's stop code, as on the stop's sign.
-        var id: String
-        var name: String
-        var latitude: Double
-        var longitude: Double
-        /// Which way buses leave it, as a compass point.
-        var direction: String?
+    typealias Stop = BusStop
+}
+
+extension BusStop {
+    var location: CLLocation { CLLocation(latitude: latitude, longitude: longitude) }
+}
+
+extension BusChoice {
+    /// Where `BusTimes` looks for the stop.
+    var place: BusRide.Place {
+        BusRide.Place(name: stopName, latitude: stop.latitude, longitude: stop.longitude)
     }
 }
 
 extension BusStopTimes {
-    /// Bus Time's capitals, or Google's names, as a sign has them: "7 AV/9 ST" as "7 Av & 9 St",
-    /// "via" and "at" kept small, "LGA/TERMINAL B" as "LGA & Terminal B".
-    static func readable(_ name: String) -> String {
-        name.capitalized
-            .replacingOccurrences(of: "/", with: " & ")
-            .split(separator: " ")
-            .map { word in word == "Via" || word == "At" ? word.lowercased() : acronyms[String(word)] ?? String(word) }
-            .joined(separator: " ")
-    }
+    /// See `BusNames.readable(_:)`.
+    static func readable(_ name: String) -> String { BusNames.readable(name) }
 
-    /// Names in capitals on a sign, as `capitalized` writes them.
-    private static let acronyms = ["Lga": "LGA", "Jfk": "JFK", "Lirr": "LIRR", "Cuny": "CUNY", "Suny": "SUNY",
-                                   "Mta": "MTA", "Lic": "LIC", "Si": "SI"]
-
-    /// Where a bus is going, as its sign has it: `readable`, without the service it's on, which
-    /// its badge shows. "Select Bus La Guardia Airport" as "La Guardia Airport", "Rush Jamaica
-    /// Lirr" as "Jamaica LIRR", "Sbs Wlmsbrg Brdg Plz via Nstrnd Via Rgrs" as "Wlmsbrg Brdg Plz
-    /// via Nstrnd via Rgrs".
-    static func destination(_ name: String) -> String {
-        var shown = readable(name)
-        while let service = services.first(where: { shown.hasPrefix($0 + " ") }) {
-            shown = String(shown.dropFirst(service.count + 1))
-        }
-        return shown
-    }
-
-    /// How Bus Time and Google start a headsign with a bus's service, after `readable`.
-    private static let services = ["Select Bus Service", "Select Bus", "Sbs", "+", "Limited", "Ltd", "Rush"]
+    /// See `BusNames.destination(_:)`.
+    static func destination(_ name: String) -> String { BusNames.destination(name) }
 }
 
 /// A bus line near you, picked from Transit Directions' Nearby: its stop and next buses each way
@@ -335,6 +305,31 @@ struct BusArrival: Codable, Hashable, Sendable {
 }
 
 enum BusTimes {
+    /// `arrivals(line:at:now:)` for each of `lines`, merged soonest first; nil if none could be
+    /// fetched. Each line's a request of its own, as the server takes one. With `stopID`, only
+    /// lines found at that stop, not one whose nearest stop is across the street (as the push
+    /// server counts down at the chosen stop alone).
+    static func arrivals(lines: [String], at place: BusRide.Place, onlyAt stopID: String? = nil,
+                         now: Date = .now) async -> BusStopTimes? {
+        let atStop = { (times: BusStopTimes) in stopID.map { $0 == times.stop.id } ?? true }
+        if lines.count < 2 {
+            guard let line = lines.first, let times = await arrivals(line: line, at: place, now: now),
+                  atStop(times) else { return nil }
+            return times
+        }
+        let found = await withTaskGroup(of: BusStopTimes?.self) { group in
+            for line in lines {
+                group.addTask { await arrivals(line: line, at: place, now: now) }
+            }
+            var found: [BusStopTimes] = []
+            for await times in group { if let times, atStop(times) { found.append(times) } }
+            return found
+        }
+        guard let stop = found.first?.stop else { return nil }
+        let merged = found.flatMap(\.arrivals).sorted { ($0.time ?? .distantFuture) < ($1.time ?? .distantFuture) }
+        return BusStopTimes(stop: stop, arrivals: merged)
+    }
+
     /// The next buses on `line` at its stop where `place` is, soonest first, those still to come
     /// at `now`; nil if the server can't be reached, has no Bus Time key, or finds no stop.
     static func arrivals(line: String, at place: BusRide.Place, now: Date = .now) async -> BusStopTimes? {
@@ -429,8 +424,9 @@ enum NearbyBuses {
 
     /// The bus places near `location`, nearest first: none with no stop within a quarter mile;
     /// nil if the server can't be reached or has no Bus Time key. From a server that predates
-    /// places, its one place's ways.
-    static func places(near location: CLLocation) async -> [NearbyBusPlace]? {
+    /// places, its one place's ways. Waits `wait` for the server, which for a place it hasn't
+    /// kept the stops of asks Bus Time twice in turn.
+    static func places(near location: CLLocation, wait: TimeInterval = wait) async -> [NearbyBusPlace]? {
         guard let baseURL = ServerRoutes.baseURL,
               var components = URLComponents(url: baseURL.appendingPathComponent("buses/nearby"),
                                              resolvingAgainstBaseURL: false) else { return nil }
@@ -450,8 +446,11 @@ enum NearbyBuses {
                        meters: ways.map(\.meters).min() ?? 0)
     }
 
-    /// How long Nearby waits for its buses before drawing without them.
+    /// How long the Nearby widget waits for its buses before drawing without them.
     static let wait: TimeInterval = 3
+    /// How long the app's Nearby waits: its trains and docks draw meanwhile, and a place newly
+    /// moved to can take the server longer than the widget's wait.
+    static let appWait: TimeInterval = 12
 }
 
 /// Nearby's buses, as found on its reload.

@@ -116,6 +116,31 @@ enum SubwayFeed {
         return time != 0 ? Date(timeIntervalSince1970: TimeInterval(time)) : nil
     }
 
+    /// Whether the feed's top-level fields all read to its end, as a read cut off mid-body's
+    /// don't, though its header (first) does. Skips over each, so cheap.
+    static func isWhole(_ data: Data) -> Bool {
+        let reader = ProtobufReader(data)
+        return (try? reader.fields(until: reader.count) { _ in false }) != nil
+    }
+
+    /// How many trips the feed has updates for: none in one that reads whole but is empty, as
+    /// during an MTA restart. Skips over all else, so cheap. Nil if it doesn't read.
+    static func tripCount(_ data: Data) -> Int? {
+        let reader = ProtobufReader(data)
+        var count = 0
+        let read: Void? = try? reader.fields(until: reader.count) { field in
+            guard field == 2 else { return false } // FeedMessage.entity
+            try reader.message { field in
+                guard field == 3 else { return false } // FeedEntity.trip_update
+                count += 1
+                try reader.skip(wireType: 2)
+                return true
+            }
+            return true
+        }
+        return read.map { count }
+    }
+
     /// Minimal GTFS-realtime decoder (gtfs.org/realtime), so the widget needs no protobuf library.
     /// Returns an `Arrival` for each trip stopping at one of `stopIDs`. Throws `FeedError.stale`
     /// if the feed has stopped updating (`isStale`; `newest` is the batch's newest timestamp).

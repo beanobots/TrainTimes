@@ -11,6 +11,13 @@ struct NextTrainIntent: AppIntent {
 
     func perform() async throws -> some IntentResult & ProvidesDialog & ShowsSnippetView {
         let now = Date.now
+        // A bus home stop, with no train asked for: its next buses
+        if stop == nil, let bus = SharedStore.defaultBus {
+            let times = await BusTimes.arrivals(lines: bus.allLines, at: bus.place, now: now)
+            let buses = Array((times?.arrivals ?? []).prefix(3))
+            return .result(dialog: "\(Spoken.nextBus(bus, buses: buses, reached: times != nil, now: now))",
+                           view: NextBusSnippet(bus: bus, buses: buses))
+        }
         let app = Selection.defaultTrain
         let selection = stop?.selection(basedOn: app) ?? app
         let settings = SharedStore.loadSettings()
@@ -37,6 +44,11 @@ struct StartCountdownIntent: LiveActivityIntent {
     var stop: StopEntity?
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
+        // A bus home stop, with no train asked for: its next bus
+        if stop == nil, let bus = SharedStore.defaultBus {
+            let due = try await TrainActivityController.start(bus: bus)
+            return .result(dialog: "Counting down to the \(Spoken.clock(due)) \(BusNames.label(bus.line)).")
+        }
         let app = Selection.defaultTrain
         let selection = stop?.selection(basedOn: app) ?? app
         let train = try await TrainActivityController.start(for: selection)
@@ -54,6 +66,8 @@ struct TrainShortcuts: AppShortcutsProvider {
                 "When is my next train in \(.applicationName)",
                 "Next train in \(.applicationName)",
                 "Check \(.applicationName)",
+                "When's my next bus in \(.applicationName)",
+                "Next bus in \(.applicationName)",
             ],
             shortTitle: "Next train",
             systemImageName: "tram.fill"
@@ -62,11 +76,57 @@ struct TrainShortcuts: AppShortcutsProvider {
             intent: StartCountdownIntent(),
             phrases: [
                 "Start my train countdown in \(.applicationName)",
+                "Start my bus countdown in \(.applicationName)",
                 "I'm on my way in \(.applicationName)",
             ],
             shortTitle: "Count down to my train",
             systemImageName: "timer"
         )
+    }
+}
+
+/// Siri's card for a bus home stop: its lines, stop and way, then its next buses.
+struct NextBusSnippet: View {
+    let bus: BusChoice
+    let buses: [BusArrival]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                HStack(spacing: 2) {
+                    ForEach(bus.allLines.prefix(3), id: \.self) { BusBadge(line: $0, size: 26) }
+                }
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(bus.stopName).font(.headline)
+                    Text("Toward \(bus.shortWayName)")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if buses.isEmpty {
+                Text("No buses to show").foregroundStyle(.secondary)
+            }
+            ForEach(buses, id: \.self) { arrival in
+                HStack(spacing: 8) {
+                    if let time = arrival.time {
+                        Text(time, format: .dateTime.hour().minute())
+                            .font(.headline)
+                            .monospacedDigit()
+                            .foregroundStyle(arrival.isLive ? Color.liveText : .primary)
+                    }
+                    if bus.allLines.count > 1 {
+                        BusBadge(line: arrival.line, size: 18)
+                    }
+                    if let stops = arrival.stopsAway {
+                        Text(stops == 1 ? "1 stop away" : "\(stops) stops away")
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                }
+            }
+        }
+        .padding()
     }
 }
 

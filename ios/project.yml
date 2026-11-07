@@ -30,6 +30,7 @@ targets:
       - Widget/Pills.swift
       - Widget/BoardStyle.swift
       - Widget/StopCard.swift
+      - Widget/RouteBoards.swift
     dependencies:
       - target: LeewayWidget
         embed: true
@@ -64,11 +65,20 @@ targets:
           - location
         # Stations near you, in the Nearby tab and on the Nearby widget; walks to and from trains
         NSLocationWhenInUseUsageDescription: Your location shows the stations near you and their next trains, in the app and on the Nearby widget, and the turns on your walk to and from the train.
+        # With Precise Location off, a walk asks for it just for now (WalkFollower)
+        NSLocationTemporaryUsageDescriptionDictionary:
+          Walking: Turn-by-turn walking directions need your precise location to tell when you've reached a turn or the station.
         # New Trip's search finds your contacts' addresses by name
         NSContactsUsageDescription: Your contacts' addresses come up when you search for someone in New Trip, for a trip to or from them.
         UILaunchScreen: {}
+        # Only HTTPS, which is exempt: no export compliance question on each upload
+        ITSAppUsesNonExemptEncryption: false
+        # On its side, each tab's card stands down the left over the map (`Sideways`); a walk
+        # stays upright
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
     # The app and the widget share the chosen station through this App Group
     entitlements:
       path: Config/App.entitlements
@@ -83,6 +93,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.dctp.leeway
+        # iPhone only: on iPad, multitasking would need every orientation, upside down too
+        TARGETED_DEVICE_FAMILY: "1"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         # Code shared with the widget checks this: only the app may start or update Live Activities
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) APP
@@ -123,6 +135,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.dctp.leeway.widget
+        TARGETED_DEVICE_FAMILY: "1"
         SKIP_INSTALL: YES
   # The Share sheet's action for Apple Maps and Google Maps directions, which the Transit
   # Directions widget then shows for an hour
@@ -166,4 +179,5 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.dctp.leeway.share
+        TARGETED_DEVICE_FAMILY: "1"
         SKIP_INSTALL: YES

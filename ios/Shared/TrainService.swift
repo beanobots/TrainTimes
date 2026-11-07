@@ -940,11 +940,20 @@ enum TrainService {
     /// An MTA feed's name, as `GET /feeds` takes it: "nyct/gtfs-nqrw". Nil if not an MTA feed.
     /// Whether `data` read from `url` is a feed, not an empty or cut-off 200 that would read as
     /// no trains: JSON for the alerts and outages, a train feed with its header's timestamp for
-    /// the rest. What isn't an MTA feed is taken as it is.
+    /// the rest. What isn't an MTA feed is taken as it is. The JSON only by its first and last
+    /// bytes, {…} or […], not parsed: the alerts are a megabyte, read in full when used anyway.
     static func isUsable(_ data: Data, from url: URL) -> Bool {
         guard let name = feedName(of: url) else { return true }
-        if name.hasSuffix(".json") { return (try? JSONSerialization.jsonObject(with: data)) != nil }
-        return SubwayFeed.made(data) != nil
+        if name.hasSuffix(".json") { return isWrapped(data) }
+        return SubwayFeed.made(data) != nil && SubwayFeed.isWhole(data)
+    }
+
+    /// Whether `data`'s first and last bytes but whitespace are "{" and "}", or "[" and "]".
+    private static func isWrapped(_ data: Data) -> Bool {
+        let space: Set<UInt8> = [0x20, 0x09, 0x0A, 0x0D]
+        guard let first = data.first(where: { !space.contains($0) }),
+              let last = data.last(where: { !space.contains($0) }) else { return false }
+        return (first == UInt8(ascii: "{") && last == UInt8(ascii: "}")) || (first == UInt8(ascii: "[") && last == UInt8(ascii: "]"))
     }
 
     static func feedName(of url: URL) -> String? {

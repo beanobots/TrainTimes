@@ -14,6 +14,7 @@ enum SharedStore {
     private static let postedCountdownFile = url(named: "posted-countdown.json")
     private static let tapsFile = url(named: "taps.json")
     private static let boardsFile = url(named: "boards.json")
+    private static let busBoardsFile = url(named: "bus-boards.json")
     private static let widgetsFile = url(named: "widgets.json")
     private static let settingsFile = url(named: "settings.json")
     private static let placeFile = url(named: "place.json")
@@ -292,6 +293,28 @@ enum SharedStore {
         return destinationID.map { "\(key) to \($0)" } ?? key
     }
 
+    /// A saved bus widget's last-fetched buses, so a failed reload still shows those to come.
+    struct SavedBuses: Codable {
+        var fetched: Date
+        var buses: [BusArrival]
+        /// Showing both directions, the other way's.
+        var otherBuses: [BusArrival] = []
+    }
+
+    /// By `BusChoice.countdownID` (and the other way's, with both directions).
+    static func loadBuses(for key: String) -> SavedBuses? {
+        read([String: SavedBuses].self, from: busBoardsFile)?[key]
+    }
+
+    /// Kept for an hour, as `saveBoard`'s; dated after now (clock set back), dropped.
+    static func saveBuses(_ buses: SavedBuses, for key: String) {
+        change(busBoardsFile, empty: [String: SavedBuses]()) { boards in
+            let now = Date.now
+            boards = boards.filter { $0.value.fetched.isWithin(60 * 60, before: now) }
+            boards[key] = buses
+        }
+    }
+
     /// The Nearby widget's last place name, so it looks it up again only after you move. Undated,
     /// and saved only when you've moved, so not where you are now: see `loadNearbyFix`.
     struct Place: Codable {
@@ -374,10 +397,17 @@ enum SharedStore {
     }
 
     /// The app's widgets, validated. If none are saved, the app's selection becomes the first and
-    /// default, with a fixed id so widgets set up before the app saves still find it.
+    /// default, with a fixed id so widgets set up before the app saves still find it. Decoded once
+    /// while the file's unchanged: a widget's timeline, and each placed widget on a reload of
+    /// those showing a train, asks several times.
     static func loadWidgets() -> SavedWidgets {
-        ((try? savedWidgets()) ?? firstWidgets).validated()
+        let saved = widgetsFile.flatMap { file in
+            widgetsCache.value(of: file) { data in data.flatMap { try? JSONDecoder().decode(SavedWidgets.self, from: $0) } }
+        }
+        return (saved ?? firstWidgets).validated()
     }
+
+    private static let widgetsCache = Cached<SavedWidgets?>()
 
     /// The saved widgets, unvalidated, for the app to edit and re-save. Saving validated ones would
     /// permanently turn a train at an unknown station into the fallback. Nil if none saved;
@@ -404,6 +434,11 @@ enum SharedStore {
     /// widget's train.
     static var defaultTrain: Selection {
         loadSettings().defaultTrain?.validatedIfKnown() ?? load()
+    }
+
+    /// Settings' home stop when it's a bus (`AppSettings.defaultBus`), in place of `defaultTrain`.
+    static var defaultBus: BusChoice? {
+        loadSettings().defaultBus
     }
 
     /// Whether unconfigured widgets show `defaultTrain` both ways (`AppSettings.defaultBothWays`).
@@ -457,14 +492,20 @@ struct AppSettings: Codable, Hashable, Sendable {
     /// Whether unconfigured medium Next train widgets show `defaultTrain`'s other direction
     /// beside it, as a saved widget's Both ways (`SavedWidget.bothWays`).
     var defaultBothWays = false
+    /// The home stop when it's a bus: its lines, stop and way, both ways in `BusChoice.bothWays`.
+    /// Set, it's used in place of `defaultTrain`, which is kept for if it's cleared.
+    var defaultBus: BusChoice?
     /// New Trip offers trips with a bus ride too, from the push server's `GET /routes?bus=1`.
     var includesBuses = false
+    /// Which Citi Bikes Settings counts, for the Citi Bike and Nearby widgets (the app keeps its
+    /// own in `UserDefaults`, copied here).
+    var bikeKinds = SharedBikeKinds.both
 
     init() {}
 
     private enum CodingKeys: String, CodingKey {
         case alertKinds, stepFree, marksLiveTimes, marksScheduledTimes, favoriteCard, defaultTrain, defaultBothWays
-        case includesBuses
+        case includesBuses, bikeKinds, defaultBus
     }
 
     /// Older saves missing any field still load, with defaults.
@@ -481,6 +522,9 @@ struct AppSettings: Codable, Hashable, Sendable {
         defaultTrain = (try? container.decodeIfPresent(Selection.self, forKey: .defaultTrain))?.droppingSavedWalk
         defaultBothWays = try container.decodeIfPresent(Bool.self, forKey: .defaultBothWays) ?? defaults.defaultBothWays
         includesBuses = try container.decodeIfPresent(Bool.self, forKey: .includesBuses) ?? defaults.includesBuses
+        bikeKinds = (try? container.decodeIfPresent(SharedBikeKinds.self, forKey: .bikeKinds)) ?? defaults.bikeKinds
+        // An unreadable bus falls back to the train
+        defaultBus = try? container.decodeIfPresent(BusChoice.self, forKey: .defaultBus)
     }
 }
 

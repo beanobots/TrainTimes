@@ -5,6 +5,9 @@ import ServiceLifecycle
 /// they're worth it. One pass at a time: one that overruns skips ticks.
 final class Poller: Service {
     typealias BoardSource = @Sendable ([Selection], Date) async -> [Selection: Board]
+    /// Bus countdowns' next buses at their stops, by `busKey`; one whose buses couldn't be had is
+    /// left out.
+    typealias BusSource = @Sendable ([BusChoice], Date) async -> [String: [CountdownBus]]
 
     private let store: Store
     private let pusher: any Pusher
@@ -14,12 +17,16 @@ final class Poller: Service {
     private let keyRetention: TimeInterval
     private let logPushes: Bool
     private let boards: BoardSource
+    /// Nil without a Bus Time key: bus countdowns aren't registered then.
+    private let buses: BusSource?
+    /// When each stop's buses were last asked of Bus Time, by stop code, for `busInterval`.
+    private let busAsked = BusAsked()
     /// Read at the start of each tick, before the pass, which makes its boards from it.
     private let feeds: FeedRelay?
 
     init(store: Store, pusher: any Pusher, interval: TimeInterval, timing: PushTiming = PushTiming(), concurrency: Int = 100,
          keyRetention: TimeInterval = Limits().keyRetention, logPushes: Bool = false, feeds: FeedRelay? = nil,
-         boards: @escaping BoardSource) {
+         buses: BusSource? = nil, boards: @escaping BoardSource) {
         self.store = store
         self.pusher = pusher
         self.interval = interval
@@ -28,6 +35,7 @@ final class Poller: Service {
         self.keyRetention = keyRetention
         self.logPushes = logPushes
         self.feeds = feeds
+        self.buses = buses
         self.boards = boards
     }
 
@@ -173,8 +181,14 @@ final class Poller: Service {
             }
         }
 
-        // Each countdown's trains after its following ones, for pushes as trains are due
+        // Each countdown's trains (or buses) after its following ones, for pushes as they're due
         var later: [(token: String, revision: UUID, trains: [Arrival])] = []
+        // Buses' countdowns from Bus Time, alongside the rest, trains', from the feeds, so Bus
+        // Time being slow doesn't hold up the trains'
+        let busCountdowns = active.filter { $0.bus != nil }
+        active.removeAll { $0.bus != nil }
+        async let busPass = busJobs(busCountdowns, now: now)
+
         if !active.isEmpty {
             // Transfers' changed-to trains too, for their alerts
             let boards = await boards(active.flatMap { [$0.selection] + $0.changeSelections }, now)
@@ -221,10 +235,138 @@ final class Poller: Service {
                 Log.error("no feeds for \(trainsWithoutFeeds.count) trains (\(stats.withoutFeeds) countdowns): keeping their last state")
             }
         }
+        let buses = await busPass
+        jobs += buses.jobs
+        later += buses.later
+        stats.withoutFeeds += buses.without
         if !later.isEmpty { await store.keepLater(later) }
         guard !jobs.isEmpty else { return stats }
         await send(jobs, now: now, stats: &stats)
         return stats
+    }
+
+    /// The pushes for bus countdowns: each moved on from the bus it last showed to the first due
+    /// no sooner, with Bus Time's times now (`CountdownState(buses:after:now:)`, as the app
+    /// makes it), pushed when worth it as a train's is. One whose buses couldn't be had keeps what
+    /// it last had, counted as without feeds.
+    ///
+    /// Not every pass: a stop is asked again once any of its countdowns is due to be
+    /// (`busInterval`), less often the further off its bus, and at once for one not yet pushed,
+    /// then, while its stop has none of its buses, a minute apart (`busUnpushedInterval`). A stop
+    /// Bus Time couldn't answer for isn't asked again for `busFailedInterval`. Every countdown
+    /// at a stop asked is then refreshed with it, and its buses after its following ones kept
+    /// in `later`, for `pushDue` to move it on with.
+    private func busJobs(_ all: [Registration], now: Date) async -> BusPass {
+        guard !all.isEmpty else { return BusPass() }
+        let asked = await busAsked.snapshot
+        let dueStops = Set(all.compactMap { registration -> String? in
+            guard let bus = registration.bus else { return nil }
+            if let failed = asked.failed[bus.stop.id], now.timeIntervalSince(failed) < Self.busFailedInterval { return nil }
+            guard registration.lastPush != nil else {
+                let tried = asked.tried[registration.revision] ?? .distantPast
+                return now.timeIntervalSince(tried) >= Self.busUnpushedInterval ? bus.stop.id : nil
+            }
+            let shown = registration.lastState.map { $0.movedOn(at: now, holding: $0.heldSeconds).train }
+            let last = asked.times[bus.stop.id] ?? .distantPast
+            return now.timeIntervalSince(last) >= Self.busInterval(until: shown, now: now) ? bus.stop.id : nil
+        })
+        let countdowns = all.filter { $0.bus.map { dueStops.contains($0.stop.id) } ?? false }
+        guard !countdowns.isEmpty else { return BusPass() }
+        await busAsked.record(dueStops, at: now, trying: Set(countdowns.filter { $0.lastPush == nil }.map(\.revision)),
+                              keeping: Set(all.compactMap(\.bus?.stop.id)),
+                              unpushed: Set(all.filter { $0.lastPush == nil }.map(\.revision)))
+        let found = await buses?(countdowns.compactMap(\.bus), now) ?? [:]
+        // A stop none of whose countdowns' buses came: Bus Time failed on it
+        let answered = Set(countdowns.compactMap { $0.bus.flatMap { found[Self.busKey($0)] == nil ? nil : $0.stop.id } })
+        await busAsked.failed(dueStops.subtracting(answered), answered: answered, at: now)
+        var pass = BusPass()
+        for registration in countdowns {
+            guard let bus = registration.bus, let coming = found[Self.busKey(bus)] else {
+                pass.without += 1
+                continue
+            }
+            let shown = registration.lastState.map { $0.movedOn(at: now, holding: $0.heldSeconds).train }
+            // None coming: the countdown keeps what it last had, as the app's does
+            guard let state = ContentState(buses: coming, after: shown, now: now) else { continue }
+            let buses = Self.later(after: state, buses: coming, now: now)
+            if buses != registration.later {
+                pass.later.append((registration.token, registration.revision, buses))
+            }
+            let decision = ActivityState.push(state, last: registration.lastState,
+                                              lastPush: registration.lastPush, now: now, timing: timing)
+            guard decision != .none else { continue }
+            let push = Push(token: registration.token, environment: registration.environment, event: .update,
+                            state: state, priority: decision == .update ? 10 : 5, timestamp: now,
+                            staleDate: ActivityState.staleDate(for: state))
+            pass.jobs.append(Job(kind: decision == .update ? .update : .refresh, registration: registration, push: push))
+        }
+        if pass.without > 0 { Log.error("no Bus Time for \(pass.without) bus countdowns: keeping their last state") }
+        return pass
+    }
+
+    /// What `busJobs` makes of a pass's bus countdowns: their pushes, their buses after their
+    /// following ones that have changed, and how many had no Bus Time.
+    private struct BusPass: Sendable {
+        var jobs: [Job] = []
+        var later: [(token: String, revision: UUID, trains: [Arrival])] = []
+        var without = 0
+    }
+
+    /// How long after a stop's buses were asked of Bus Time to ask again, by when its countdown's
+    /// bus is due (`due`; nil before it's first pushed: at once): every 4 minutes 20 or more
+    /// away, 2 from 8, 1 from 3, then every 30 seconds, as long as Bus Time's are kept
+    /// (`BusTime.arrivalsLifetime`). In between, the countdown counts down by itself, and moves
+    /// on to the next bus as each is due (`pushDue`), with no ask.
+    static func busInterval(until due: Date?, now: Date) -> TimeInterval {
+        guard let due else { return 0 }
+        let minutes = due.timeIntervalSince(now) / 60
+        switch minutes {
+        case 20...: return 240
+        case 8...: return 120
+        case 3...: return 60
+        default: return BusTime.arrivalsLifetime
+        }
+    }
+
+    /// How long after a countdown not yet pushed was asked for to ask again: its stop had none
+    /// of its buses (or the push failed). Not every pass, so one at a stop with no such buses, or
+    /// none at all, doesn't spend Bus Time's daily allowance every 20 seconds.
+    static let busUnpushedInterval: TimeInterval = 60
+    /// How long after Bus Time couldn't answer for a stop to ask again.
+    static let busFailedInterval: TimeInterval = 120
+
+    /// A bus countdown's stop and lines, as `BusSource` gives its buses: lines as `liveBuses` picks
+    /// them out (`BusTime.canonical`), so the M15 and the M15-SBS at one stop aren't one key.
+    static func busKey(_ bus: BusChoice) -> String {
+        "\(bus.allLines.map(BusTime.canonical).joined(separator: ",")) \(bus.stop.id)"
+    }
+
+    /// Each bus countdown's next buses from `busTime`: each stop asked once, for every line there
+    /// (`BusTime.everyLine(atStop:)`), as the poller's client, then each countdown's lines
+    /// picked out. One whose stop couldn't be had is left out.
+    static func liveBuses(from busTime: BusTime) -> BusSource {
+        { choices, now in
+            let stops = Set(choices.map(\.stop.id))
+            let answers = await Concurrency.map(Array(stops), limit: 20) { id -> (String, [BusTime.Arrival]?) in
+                guard case .success(let arrivals) = await busTime.everyLine(atStop: id, client: BusTime.pollerClient, now: now)
+                else { return (id, nil) }
+                return (id, arrivals)
+            }
+            let byStop = Dictionary(answers, uniquingKeysWith: { first, _ in first })
+            var found: [String: [CountdownBus]] = [:]
+            for choice in choices {
+                guard let arrivals = byStop[choice.stop.id] ?? nil else { continue }
+                // Unpadded too: a line picked from the app's list may be "Q06", Bus Time's "Q6"
+                let lines = Set(choice.allLines.map { BusTime.unpadded(BusTime.canonical($0)) })
+                found[busKey(choice)] = arrivals.compactMap { arrival -> CountdownBus? in
+                    guard lines.contains(BusTime.unpadded(BusTime.canonical(arrival.line))), let time = arrival.expected ?? arrival.aimed
+                    else { return nil }
+                    return CountdownBus(line: arrival.line, destination: arrival.destination, time: time,
+                                        isLive: arrival.expected != nil)
+                }.sorted { $0.time < $1.time }
+            }
+            return found
+        }
     }
 
     /// Sends `jobs`' pushes, `concurrency` at a time, and saves what happened in one
@@ -291,7 +433,9 @@ final class Poller: Service {
     private func reloadWidgets(after results: [(Job, PushResult?)], stats: inout Stats) async -> [PushOutcome] {
         var phones: [String: (environment: PushEnvironment, registrations: [Registration])] = [:]
         for (job, result) in results {
-            guard job.kind != .end, result == .sent, let push = job.push, let widgetToken = job.registration.widgetToken,
+            // Not for a bus's: no widget shows a bus countdown's times (`CountdownLookup` is by train)
+            guard job.kind != .end, job.registration.bus == nil, result == .sent, let push = job.push,
+                  let widgetToken = job.registration.widgetToken,
                   ActivityState.changesWidgets(push.state, from: job.registration.lastState) else { continue }
             phones[widgetToken, default: (job.registration.environment, [])].registrations.append(job.registration)
         }
@@ -323,7 +467,8 @@ final class Poller: Service {
     /// it at the station until the next pass.
     func nextDue(after now: Date) async -> Date? {
         await store.all.compactMap { registration -> Date? in
-            guard let train = registration.lastState?.train.addingTimeInterval(AtStation.seconds), train > now,
+            guard let last = registration.lastState, case let train = last.train.addingTimeInterval(last.heldSeconds),
+                  train > now,
                   Self.movedOn(registration, at: train) != nil else { return nil }
             return train
         }.min()
@@ -354,7 +499,7 @@ final class Poller: Service {
     /// countdown has ended.
     static func movedOn(_ registration: Registration, at now: Date) -> ContentState? {
         guard now < registration.ends, let last = registration.lastState else { return nil }
-        var moved = last.movedOn(at: now, holding: AtStation.seconds)
+        var moved = last.movedOn(at: now, holding: last.heldSeconds)
         guard moved != last else { return nil }
         // Back to as many trains after it as it had, from the last pass's later ones
         let after = moved.following.last ?? moved.train
@@ -363,6 +508,14 @@ final class Poller: Service {
         moved.following += added.map(\.time)
         moved.followingRoutes = moved.followingRoutes.map { $0 + added.map(\.route) }
         return moved
+    }
+
+    /// `later(after:in:now:)` for a bus countdown, from the buses Bus Time has coming, as
+    /// `CountdownState(buses:after:now:)` routes them ("bus:B63").
+    static func later(after state: ContentState, buses: [CountdownBus], now: Date) -> [Arrival] {
+        guard let last = state.following.last else { return [] }
+        return buses.filter { $0.time > last && $0.time > now }.sorted { $0.time < $1.time }.prefix(laterCount)
+            .map { Arrival(route: BusLeg.prefix + $0.line, time: $0.time, stop: "", lastStop: "", isLive: $0.isLive) }
     }
 
     /// How many trains after `state`'s following ones to keep: enough to fill them again
@@ -429,5 +582,35 @@ final class Poller: Service {
             )
         }
         return boards
+    }
+}
+
+/// When each bus countdown's stop was last asked of Bus Time, for the poller's schedule
+/// (`Poller.busInterval`). Only in memory: after a restart, each is asked at once.
+actor BusAsked {
+    /// When each stop was last asked, by stop code.
+    private(set) var times: [String: Date] = [:]
+    /// When Bus Time last couldn't answer for each stop, until it does.
+    private(set) var failures: [String: Date] = [:]
+    /// When each countdown not yet pushed was last asked for, by its revision.
+    private(set) var tried: [UUID: Date] = [:]
+
+    var snapshot: (times: [String: Date], failed: [String: Date], tried: [UUID: Date]) { (times, failures, tried) }
+
+    /// `stops` asked at `date`, for countdowns `trying` among them not yet pushed; stops no
+    /// countdown has now (not in `keeping`), and countdowns now pushed or gone (not in
+    /// `unpushed`), forgotten.
+    func record(_ stops: Set<String>, at date: Date, trying: Set<UUID>, keeping: Set<String>, unpushed: Set<UUID>) {
+        times = times.filter { keeping.contains($0.key) }
+        failures = failures.filter { keeping.contains($0.key) }
+        tried = tried.filter { unpushed.contains($0.key) }
+        for stop in stops { times[stop] = date }
+        for revision in trying { tried[revision] = date }
+    }
+
+    /// Bus Time couldn't answer for `stops` at `date`, and did for `answered`.
+    func failed(_ stops: Set<String>, answered: Set<String>, at date: Date) {
+        for stop in stops { failures[stop] = date }
+        for stop in answered { failures[stop] = nil }
     }
 }

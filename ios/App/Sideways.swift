@@ -61,17 +61,21 @@ private struct SidewaysCard: ViewModifier {
             .padding(.bottom, sideways ? Sideways.inset : 0)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background {
-                if sideways { SidewaysMap().ignoresSafeArea() }
+                if sideways { SidewaysMap() }
             }
     }
 }
 
 /// The map behind Routes' and Settings' cards on its side: around you, as Nearby's, turned NY
-/// North if Settings says.
+/// North if Settings says. The whole screen, framed past the card, its logo and Legal level with
+/// the card's foot, over the tab bar.
 private struct SidewaysMap: View {
     @State private var position = MapCameraPosition.userLocation(fallback: .region(MKCoordinateRegion(
         center: CLLocationCoordinate2D(latitude: 40.73, longitude: -73.97),
         latitudinalMeters: 8_000, longitudinalMeters: 8_000)))
+    /// The screen's safe area: the side's and the tab bar's. Measured behind the map, as the map
+    /// itself, under `ignoresSafeArea`, has none.
+    @State private var room = EdgeInsets()
 
     var body: some View {
         Map(position: $position) {
@@ -79,7 +83,14 @@ private struct SidewaysMap: View {
         }
         .mapStyle(.standard(emphasis: .muted, pointsOfInterest: .excludingAll))
         .mapControlVisibility(.hidden)
-        .safeAreaPadding(.leading, Sideways.mapLeading)
         .turnsNorth($position)
+        .safeAreaPadding(.top, room.top + Sideways.top)
+        .safeAreaPadding(.bottom, room.bottom + Sideways.inset)
+        .safeAreaPadding(.leading, room.leading + Sideways.mapLeading)
+        .safeAreaPadding(.trailing, room.trailing)
+        .ignoresSafeArea()
+        .background {
+            Color.clear.onGeometryChange(for: EdgeInsets.self) { $0.safeAreaInsets } action: { room = $0 }
+        }
     }
 }

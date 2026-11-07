@@ -4,11 +4,15 @@ import WidgetKit
 /// A widget's Edit menu: pick one of the saved widgets. Lives in Shared so the app can tell which
 /// saved widget each Home Screen widget shows.
 struct TrainWidgetIntent: WidgetConfigurationIntent {
-    static let title: LocalizedStringResource = "Choose a widget"
-    static let description = IntentDescription("Pick one of the widgets set up in the app, or leave it empty to show your default train.")
+    static let title: LocalizedStringResource = "Choose a route"
+    static let description = IntentDescription("Pick a kind, then one of the routes of that kind saved in the app. Left empty, it shows your default train.")
+
+    /// Subway, Bus or Citi Bike: which saved routes `widget` offers.
+    @Parameter(title: "Kind", default: .subway)
+    var kind: RouteKindChoice
 
     /// Empty follows Settings' default train.
-    @Parameter(title: "Widget", optionsProvider: SavedWidgetOptions())
+    @Parameter(title: "Route", optionsProvider: SavedWidgetOptions())
     var widget: SavedWidgetEntity?
 
     // Legacy setup from before saved widgets: station, line and direction, or earlier a single
@@ -28,15 +32,19 @@ struct TrainWidgetIntent: WidgetConfigurationIntent {
 
     static var parameterSummary: some ParameterSummary {
         Summary {
+            \.$kind
             \.$widget
         }
     }
 
-    /// The picked saved widget, or Settings' default train (`SavedWidget.default(_:)`) if none is
-    /// picked or it was deleted. Nil for a legacy widget, which shows its own train.
+    /// The picked saved widget, or Settings' home stop (`SavedWidget.default`: its bus if it's
+    /// one, else the default train) if none is picked or it was deleted. Nil for a legacy widget,
+    /// which shows its own train.
     func savedWidget(in saved: SavedWidgets, defaultTrain: Selection = SharedStore.defaultTrain,
-                     defaultBothWays: Bool = SharedStore.defaultBothWays) -> SavedWidget? {
-        let fallback = SavedWidget.default(defaultTrain, bothWays: defaultBothWays)
+                     defaultBothWays: Bool = SharedStore.defaultBothWays,
+                     defaultBus: BusChoice? = SharedStore.defaultBus) -> SavedWidget? {
+        let fallback = defaultBus.map { SavedWidget.default(bus: $0) }
+            ?? SavedWidget.default(defaultTrain, bothWays: defaultBothWays)
         // Once one's picked, the legacy train is ignored, even if the pick is deleted
         if let widget {
             return UUID(uuidString: widget.id).flatMap(saved.widget) ?? fallback
@@ -46,8 +54,7 @@ struct TrainWidgetIntent: WidgetConfigurationIntent {
 
     /// This widget's train at `date` (the commuting hours' train when active), and when it next
     /// switches so the widget can reload then.
-    func selection(at date: Date) -> (Selection, switches: Date?) {
-        let saved = SharedStore.loadWidgets()
+    func selection(at date: Date, in saved: SavedWidgets = SharedStore.loadWidgets()) -> (Selection, switches: Date?) {
         let defaultTrain = SharedStore.defaultTrain
         if let widget = savedWidget(in: saved, defaultTrain: defaultTrain) {
             return (widget.shown(at: date).selection, widget.commute?.nextSwitch(after: date))
@@ -81,7 +88,11 @@ struct TrainWidgetIntent: WidgetConfigurationIntent {
 
     /// The `Selection.trainID` a widget of `kind` shows at `date`, as its timeline picks it.
     func trainID(kind: String, at date: Date, in saved: SavedWidgets) -> String {
-        guard kind == WidgetKind.transfers else { return selection(at: date).0.trainID }
+        guard kind == WidgetKind.transfers else {
+            // A bus's or dock's shows no train: not its `Selection.fallback`'s
+            if let widget = savedWidget(in: saved), widget.kind != .subway { return "\(widget.kind.rawValue) \(widget.id)" }
+            return selection(at: date, in: saved).0.trainID
+        }
         return transfersWidget(in: saved).shown(at: date).selection.trainID
     }
 
@@ -133,13 +144,23 @@ struct SavedWidgetEntity: AppEntity {
     init(_ widget: SavedWidget) {
         id = widget.id.uuidString
         title = widget.title
-        let selection = widget.selection
-        var subtitle = "\(selection.station?.name ?? "") · \(selection.caption)"
-        if let change = widget.change, change.station != nil {
-            subtitle += ", then \(Lines.list(change.allRoutes, joinedBy: "or")) at \(change.stationNames(for: selection))"
+        switch widget.kind {
+        case .bus:
+            let bus = widget.bus
+            subtitle = bus.map { "\(BusBadge.label($0.line)) · \($0.bothWays ? "Both directions" : "to \($0.wayName)")" } ?? ""
+            routes = []
+        case .bike:
+            subtitle = "Citi Bike dock"
+            routes = []
+        case .subway:
+            let selection = widget.selection
+            var subtitle = "\(selection.station?.name ?? "") · \(selection.caption)"
+            if let change = widget.change, change.station != nil {
+                subtitle += ", then \(Lines.list(change.allRoutes, joinedBy: "or")) at \(change.stationNames(for: selection))"
+            }
+            self.subtitle = subtitle
+            routes = selection.routes
         }
-        self.subtitle = subtitle
-        routes = selection.routes
     }
 
     /// A picked widget since deleted in the app. It stays picked so the widget falls back as
@@ -173,9 +194,34 @@ struct SavedWidgetQuery: EntityQuery {
 }
 
 /// No default choice on purpose: left empty, a widget follows the default even when it changes.
+/// Only the saved routes of the Kind picked above it.
 struct SavedWidgetOptions: DynamicOptionsProvider {
+    @IntentParameterDependency<TrainWidgetIntent>(\.$kind)
+    var intent
+
     func results() async throws -> [SavedWidgetEntity] {
-        try await SavedWidgetQuery().suggestedEntities()
+        let kind = intent?.kind.kind ?? .subway
+        return SharedStore.loadWidgets().widgets.filter { $0.kind == kind }.map(SavedWidgetEntity.init)
+    }
+}
+
+/// The Edit menu's Kind: which saved routes it lists.
+enum RouteKindChoice: String, AppEnum {
+    case subway, bus, bike
+
+    static let typeDisplayRepresentation: TypeDisplayRepresentation = "Kind"
+    static let caseDisplayRepresentations: [RouteKindChoice: DisplayRepresentation] = [
+        .subway: DisplayRepresentation(title: "Subway", image: .init(systemName: "tram.fill")),
+        .bus: DisplayRepresentation(title: "Bus", image: .init(systemName: "bus.fill")),
+        .bike: DisplayRepresentation(title: "Citi Bike", image: .init(systemName: "bicycle")),
+    ]
+
+    var kind: SavedRouteKind {
+        switch self {
+        case .subway: .subway
+        case .bus: .bus
+        case .bike: .bike
+        }
     }
 }
 

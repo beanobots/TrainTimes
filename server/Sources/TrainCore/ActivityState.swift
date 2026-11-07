@@ -44,8 +44,12 @@ enum ActivityState {
 
     static func isMeaningful(_ new: ContentState, comparedTo last: ContentState,
                              timing: PushTiming = PushTiming()) -> Bool {
-        // Another train (or the same trip now ending somewhere else, or on another line)
-        if new.trip != last.trip || new.route != last.route || new.terminal != last.terminal { return true }
+        // Another train (or the same trip now ending somewhere else, or on another line). Not
+        // once moved on between passes (`Poller.pushDue`), which leaves its trip and terminal
+        // unknown till the next pass fills them in: the same train still, on the same line, as
+        // far as its times say (a bus's has no trip, and only its terminal goes)
+        let movedOn = last.trip.isEmpty && last.terminal == nil
+        if new.route != last.route || !movedOn && (new.trip != last.trip || new.terminal != last.terminal) { return true }
         let moved = new.train.timeIntervalSince(last.train)
         if moved < -timing.earlier || moved > timing.later { return true }
         if new.isLive != last.isLive || new.notice != last.notice { return true }
@@ -54,9 +58,12 @@ enum ActivityState {
     }
 
     /// Whether the phone's widgets for the countdown's train would show `new` differently from
-    /// `last` (nil before the first push; `CountdownState.hasSameTrains(as:)`).
+    /// `last` (nil before the first push; `CountdownState.hasSameTrains(as:)`). A trip filled in
+    /// after a move-on (`isMeaningful`) isn't a change: without one, widgets find the train by
+    /// its time and line instead (`CountdownSync`), which comes to the same train.
     static func changesWidgets(_ new: ContentState, from last: ContentState?) -> Bool {
-        guard let last else { return true }
+        guard var last else { return true }
+        if last.trip.isEmpty { last.trip = new.trip }
         return !new.hasSameTrains(as: last)
     }
 

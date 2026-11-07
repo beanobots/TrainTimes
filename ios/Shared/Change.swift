@@ -28,6 +28,9 @@ struct Change: Codable, Hashable, Sendable {
     /// A `Station.id` further on that the large widget times each way to (`Way`); nil to time
     /// each line changed to at the change.
     var destinationID: String?
+    /// Buses to change to at the change's own station instead, each with its walk; timed by when
+    /// they leave the stop, as Bus Time has no times further on.
+    var buses: [BusLeg]
 
     /// A station of `alternatives`, and the lines to change to there going `direction` (nil for
     /// your train's way), as in `Change`'s own.
@@ -42,7 +45,7 @@ struct Change: Codable, Hashable, Sendable {
 
     init(stationID: String, routes: [String], direction: Direction? = nil,
          quickMinutes: Int = Change.defaultQuickMinutes, walkMinutes: Int = Change.defaultWalkMinutes,
-         smartTransfer: Bool = false, destinationID: String? = nil, alternatives: [Stop] = []) {
+         smartTransfer: Bool = false, destinationID: String? = nil, alternatives: [Stop] = [], buses: [BusLeg] = []) {
         self.stationID = stationID
         self.routes = routes
         self.direction = direction
@@ -51,6 +54,7 @@ struct Change: Codable, Hashable, Sendable {
         self.smartTransfer = smartTransfer
         self.destinationID = destinationID
         self.alternatives = alternatives
+        self.buses = buses
     }
 
     /// This change at each of `stops`, the first as its own station and the rest as
@@ -63,7 +67,7 @@ struct Change: Codable, Hashable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case stationID, routes, direction, quickMinutes, walkMinutes, smartTransfer, destinationID, alternatives
+        case stationID, routes, direction, quickMinutes, walkMinutes, smartTransfer, destinationID, alternatives, buses
     }
 
     /// Older saves missing `direction`, `quickMinutes`, `walkMinutes`, `smartTransfer`,
@@ -78,7 +82,8 @@ struct Change: Codable, Hashable, Sendable {
                   walkMinutes: try container.decodeIfPresent(Int.self, forKey: .walkMinutes) ?? Change.defaultWalkMinutes,
                   smartTransfer: try container.decodeIfPresent(Bool.self, forKey: .smartTransfer) ?? false,
                   destinationID: try container.decodeIfPresent(String.self, forKey: .destinationID),
-                  alternatives: try container.decodeIfPresent([Stop].self, forKey: .alternatives) ?? [])
+                  alternatives: try container.decodeIfPresent([Stop].self, forKey: .alternatives) ?? [],
+                  buses: (try? container.decodeIfPresent([BusLeg].self, forKey: .buses)) ?? [])
     }
 
     /// As the synthesized encoding, leaving out `alternatives` when there are none so a change at
@@ -94,6 +99,9 @@ struct Change: Codable, Hashable, Sendable {
         try container.encodeIfPresent(destinationID, forKey: .destinationID)
         if !alternatives.isEmpty {
             try container.encode(alternatives, forKey: .alternatives)
+        }
+        if !buses.isEmpty {
+            try container.encode(buses, forKey: .buses)
         }
     }
 
@@ -244,13 +252,19 @@ struct Change: Codable, Hashable, Sendable {
         return change
     }
 
-    /// Where `smartChanges(for:)` change: "Atlantic Av / DeKalb Av", or one station's full name.
+    /// Where `smartChanges(for:)` change: "Atlantic Av / DeKalb Av", or one station's full name,
+    /// with the street walk if it's only that (`streetWalk`): "Livonia Av, walk to Junius St".
     func stationNames(for selection: Selection) -> String {
+        let changes = smartChanges(for: selection).map(\.change)
         var stations: [String] = []
-        for name in smartChanges(for: selection).compactMap(\.change.station?.name) where !stations.contains(name) {
+        for name in changes.compactMap(\.station?.name) where !stations.contains(name) {
             stations.append(name)
         }
-        return stations.count > 1 ? stations.map(\.mainStationName).joined(separator: " / ") : stations.first ?? ""
+        if stations.count > 1 { return stations.map(\.mainStationName).joined(separator: " / ") }
+        let walks = Set(changes.map { $0.streetWalk?.station.name })
+        guard let only = stations.first else { return "" }
+        if walks.count == 1, let walk = walks.first ?? nil { return "\(only), walk to \(walk)" }
+        return only
     }
 
     /// This change at your train's stop before and after this station, each with just the lines
@@ -267,7 +281,7 @@ struct Change: Codable, Hashable, Sendable {
             guard let stop, !walking.isEmpty else { return nil }
             let moving = walking.filter { route in
                 let platforms = { (station: Station) in
-                    Set(StationDirectory.stations(inComplexOf: station).flatMap { $0.platforms(serving: [route]) }.map(\.id))
+                    Set(StationDirectory.changeStations(of: station).flatMap { $0.platforms(serving: [route]) }.map(\.id))
                 }
                 return StationDirectory.direction(of: route, from: platforms(first(stop)), to: platforms(second(stop)))
                     == here.departureDirection(of: route, for: selection)
@@ -336,10 +350,11 @@ struct Change: Codable, Hashable, Sendable {
         }
     }
 
-    /// The platforms of the lines changed to, here or at a station joined to it.
+    /// The platforms of the lines changed to, here, at a station joined to it, or a street walk
+    /// away (`StationDirectory.changeStations(of:)`).
     private var departurePlatforms: [Platform] {
         guard let station else { return [] }
-        return StationDirectory.stations(inComplexOf: station).flatMap { $0.platforms(serving: routes) }
+        return StationDirectory.changeStations(of: station).flatMap { $0.platforms(serving: routes) }
     }
 
     /// The lines changed to as trains to catch here, going their way: one selection per station
@@ -347,7 +362,7 @@ struct Change: Codable, Hashable, Sendable {
     func departureSelections(for selection: Selection) -> [Selection] {
         guard let station else { return [] }
         let way = departureDirection(for: selection)
-        return StationDirectory.stations(inComplexOf: station).compactMap { station in
+        return StationDirectory.changeStations(of: station).compactMap { station in
             let lines = station.routes.filter(routes.contains)
             return lines.isEmpty ? nil : Selection(stationID: station.id, routes: lines, direction: way)
         }
@@ -481,10 +496,13 @@ struct Change: Codable, Hashable, Sendable {
                 return change
             }
             : self.stops
-        // One stop per station, its lines joined
+        // One stop per station, its lines joined, apart from those a street walk away
         var kept: [Change] = []
-        for stop in stops.compactMap({ $0.validatedStop(for: selection, order: order) }) {
-            if let index = kept.firstIndex(where: { $0.stationID == stop.stationID && $0.direction == stop.direction }) {
+        for stop in stops.compactMap({ $0.validatedStop(for: selection, order: order) }).flatMap(\.byBoarding) {
+            let walkedTo = stop.streetWalk?.station.complex
+            if let index = kept.firstIndex(where: {
+                $0.stationID == stop.stationID && $0.direction == stop.direction && $0.streetWalk?.station.complex == walkedTo
+            }) {
                 kept[index].routes += stop.routes.filter { !kept[index].routes.contains($0) }
             } else {
                 kept.append(stop)
@@ -503,7 +521,7 @@ struct Change: Codable, Hashable, Sendable {
         guard let station, station.id != selection.station?.id, isAhead(of: selection, order: order) else { return nil }
         var change = self
         change.stationID = station.id
-        let kept = Self.lines(at: station).filter { routes.contains($0) && !selection.routes.contains($0) }
+        let kept = Self.changeLines(at: station).filter { routes.contains($0) && !selection.routes.contains($0) }
         let leaving = { (direction: Direction) in
             kept.filter { Self.leaves($0, from: station, going: direction, with: kept) }
         }
@@ -531,8 +549,10 @@ struct Change: Codable, Hashable, Sendable {
             let lines = !branches.isEmpty ? branches
                 : (order ?? StationDirectory.stops(onLine:))(label).map { [$0] } ?? []
             // A station comes where the first of the train's platforms there does
-            let places = lines.map { stops in
-                let position = Dictionary(stops.enumerated().map { ($0.element, $0.offset) }, uniquingKeysWith: min)
+            let positions = !branches.isEmpty ? StationDirectory.branchPositions(of: route) : lines.map { stops in
+                Dictionary(stops.enumerated().map { ($0.element, $0.offset) }, uniquingKeysWith: min)
+            }
+            let places = positions.map { position in
                 return { (station: Station) in
                     station.platforms(serving: selection.routes).compactMap { position[$0.id] }.min()
                 }
@@ -623,6 +643,54 @@ struct Change: Codable, Hashable, Sendable {
         return lines
     }
 
+    /// `lines(at:)`, then lines at stations a street walk away (`StationDirectory.changeStations(of:)`):
+    /// the 3 at Junius St for Livonia Av. What a change found by the planner may change to.
+    static func changeLines(at station: Station) -> [String] {
+        var lines: [String] = []
+        for route in StationDirectory.changeStations(of: station).flatMap(\.routes) where !lines.contains(route) {
+            lines.append(route)
+        }
+        return lines
+    }
+
+    /// Where the lines changed to leave from when that's outside the station's complex, a walk
+    /// along the street (`StationDirectory.changeStations(of:)`), and the MTA's minutes for it:
+    /// Junius St, 5 minutes, for the 3 off the L at Livonia Av. Nil where they leave inside.
+    var streetWalk: (station: Station, minutes: Int)? {
+        guard let station, !routes.isEmpty else { return nil }
+        let inside = Set(Self.lines(at: station))
+        guard !routes.contains(where: inside.contains), let to = StationDirectory.changeStations(of: station).first(where: {
+            $0.complex != station.complex && $0.routes.contains(where: routes.contains)
+        }) else { return nil }
+        let minutes = station.platforms.flatMap { from in to.platforms.compactMap { from.walks?[$0.id] } }.max()
+        return (to, max(walkMinutes, minutes ?? 0))
+    }
+
+    /// This change split by where its lines leave from, in the station's complex or a street walk
+    /// away (`streetWalk`), so each part says where to go: from the 4 5 6 at 59 St, the N R W
+    /// there apart from the Q at Lexington Av/63 St.
+    private var byBoarding: [Change] {
+        guard let station else { return [self] }
+        let inside = Set(Self.lines(at: station))
+        let elsewhere = StationDirectory.changeStations(of: station).filter { $0.complex != station.complex }
+        var parts: [(complex: String, routes: [String])] = []
+        for route in routes {
+            let complex = inside.contains(route) ? station.complex
+                : elsewhere.first { $0.routes.contains(route) }?.complex ?? station.complex
+            if let index = parts.firstIndex(where: { $0.complex == complex }) {
+                parts[index].routes.append(route)
+            } else {
+                parts.append((complex, [route]))
+            }
+        }
+        guard parts.count > 1 else { return [self] }
+        return parts.map { part in
+            var change = self
+            change.routes = part.routes
+            return change
+        }
+    }
+
     /// Lines you can change to at `station` from `selection`: those across the platform (in
     /// either way), and the rest. Lines that leave neither way are excluded.
     static func lines(at station: Station, from selection: Selection) -> (across: [String], others: [String]) {
@@ -639,10 +707,11 @@ struct Change: Codable, Hashable, Sendable {
         return (across, all.filter { !across.contains($0) })
     }
 
-    /// Whether `route` leaves `station` (or a joined station) going `direction` with `routes`
-    /// (`Platform.direction(_:of:with:)`), rather than ending its run there (by day).
+    /// Whether `route` leaves `station` (or a joined station, or one a street walk away)
+    /// going `direction` with `routes` (`Platform.direction(_:of:with:)`), rather than ending its
+    /// run there (by day).
     static func leaves(_ route: String, from station: Station, going direction: Direction, with routes: [String] = []) -> Bool {
-        StationDirectory.stations(inComplexOf: station).contains { stop in
+        StationDirectory.changeStations(of: station).contains { stop in
             let way = stop.direction(direction, of: route, with: routes)
             return stop.routes.contains(route) && !stop.directionName(way, of: route).isEmpty
                 && !StationDirectory.line(route, endsAt: stop, going: way)

@@ -12,5 +12,5 @@ enum Server {
 
     /// The server's package in the checkout, as the Rebuild sheet starts with.
     static let defaultSourcePath = FileManager.default.homeDirectoryForCurrentUser
-        .appending(path: "Documents/TrainTimes/server").path
+        .appending(path: "Projects/Leeway/server").path
 }

@@ -22,12 +22,13 @@ let package = Package(
         // stations.json, equipment.json and lines.json, copies of ../ios/Shared's
         // that tools/make_stations.py and make_lines.py write (a symlinked
         // resource is bundled as the link, which doesn't resolve from the
-        // bundle). A target of their own, so TrainCore can stand in for
-        // `Bundle` (see Shims.swift).
+        // bundle), and bus_stop_lines.json, the server's own, from
+        // make_bus_routes.py. A target of their own, so TrainCore can stand in
+        // for `Bundle` (see Shims.swift).
         .target(
             name: "TrainResources",
             resources: [.copy("Resources/stations.json"), .copy("Resources/equipment.json"),
-                        .copy("Resources/lines.json")]
+                        .copy("Resources/lines.json"), .copy("Resources/bus_stop_lines.json")]
         ),
         // The app's own feed code (Shared/, symlinked from ../ios/Shared), and
         // the server's logic, which needs its internal types. SQLite is the
