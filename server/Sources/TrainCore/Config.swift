@@ -45,10 +45,10 @@ struct Limits: Sendable {
     var keysPerIPPerDay = 10
     /// Attest keys unused this long are forgotten.
     var keyRetention: TimeInterval = 90 * 86400
-    /// `GET /routes` asks Google at most this often a day for each client, and for everyone,
-    /// to stay inside Google's free allowance.
-    var routesPerIPPerDay = 30
-    var routesPerDay = 300
+    /// `GET /routes` plans at most this many trips a day for each client, and for everyone, so
+    /// no one can keep the server busy: what's kept doesn't count.
+    var routesPerIPPerDay = 1_000
+    var routesPerDay = 200_000
     /// `GET /buses` and `/buses/nearby` ask Bus Time at most this often a day for each client,
     /// and for everyone: a Nearby asks for up to 7 at once, and what's kept doesn't count.
     var busTimePerIPPerDay = 2_000
@@ -72,8 +72,6 @@ struct Config: Sendable {
     var pushConcurrency: Int
     var limits: Limits
     var logPushes: Bool
-    /// Google's Routes API key, for `GET /routes`; nil turns it off.
-    var googleRoutesKey: String?
     /// MTA Bus Time's API key, for `GET /buses`; nil turns it off.
     var busTimeKey: String?
     /// The file launchd sends stdout and stderr to, if the server's to move
@@ -155,7 +153,6 @@ struct Config: Sendable {
                                                  range: 1...1_000_000)
         self.limits = limits
         logPushes = Self.optional("LOG_PUSHES", in: env) == "1"
-        googleRoutesKey = Self.optional("GOOGLE_ROUTES_API_KEY", in: env)
         busTimeKey = Self.optional("BUS_TIME_API_KEY", in: env)
         logFile = Self.optional("LOG_FILE", in: env)
     }

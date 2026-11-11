@@ -95,6 +95,9 @@ actor BusTime {
     /// How long a stop's next buses are kept. Buses report where they are every 30 seconds or
     /// so, so asking more often would mostly give the same.
     static let arrivalsLifetime: TimeInterval = 30
+    /// How long Bus Time not answering for a stop's buses is kept, so phones asking meanwhile
+    /// don't each ask it again while it's down.
+    static let failedLifetime: TimeInterval = 30
     /// Meters the stop may be from where Google has the ride board.
     static let matchRange: Double = 150
     /// Meters Nearby's stops may be from you: a quarter mile, as its stations may.
@@ -113,6 +116,8 @@ actor BusTime {
     /// line's stop is.
     private var areas: [String: (candidates: [Candidate], until: Date)] = [:]
     private var kept: [String: (arrivals: [Arrival], until: Date)] = [:]
+    /// Stops' buses Bus Time couldn't give, as `kept`'s, till when they're not asked again.
+    private var failed: [String: Date] = [:]
     /// Requests to Bus Time under way, by URL, for others asking the same to wait for.
     private var asking: [String: Task<Result<Data, Failure>, Never>] = [:]
 
@@ -168,15 +173,36 @@ actor BusTime {
     }
 
     /// The next buses at stop `id`, on the line `lineRef` or every line, soonest first, kept
-    /// `arrivalsLifetime`.
+    /// `arrivalsLifetime`. One line's are picked from every line's when those are kept (as the
+    /// poller's countdowns and Nearby ask for them) and have some of its buses; Bus Time not
+    /// answering is kept `failedLifetime`.
     private func arrivals(at id: String, lineRef: String?, client: String, now: Date) async throws(Failure) -> [Arrival] {
         let visit = "\(id) \(lineRef ?? "*")"
         let arrivals: [Arrival]
         if let cached = kept[visit], cached.until > now {
             arrivals = cached.arrivals
+        } else if let lineRef, let every = kept["\(id) *"], every.until > now,
+                  case let line = Self.unpadded(Self.canonical(Self.bare(lineRef))),
+                  case let picked = every.arrivals.filter({ Self.unpadded(Self.canonical($0.line)) == line }),
+                  !picked.isEmpty {
+            arrivals = picked
+        } else if let until = failed[visit], until > now {
+            throw .unavailable
         } else {
-            let data = try await get(Self.arrivalsRequest(stop: id, lineRef: lineRef, key: key), for: client, now: now)
-            guard let read = Self.arrivals(in: data) else { throw .unavailable }
+            let read: [Arrival]
+            do throws(Failure) {
+                let data = try await get(Self.arrivalsRequest(stop: id, lineRef: lineRef, key: key), for: client, now: now)
+                guard let answer = Self.arrivals(in: data) else { throw Failure.unavailable }
+                read = answer
+            } catch {
+                // Not a limit reached, which says so to each asking
+                if error == .unavailable {
+                    if failed.count >= Self.maxKept { failed = failed.filter { $0.value > now } }
+                    failed[visit] = now.addingTimeInterval(Self.failedLifetime)
+                }
+                throw error
+            }
+            failed[visit] = nil
             if kept.count >= Self.maxKept { kept = kept.filter { $0.value.until > now } }
             if kept.count >= Self.maxKept { kept.removeAll() }
             kept[visit] = (read, now.addingTimeInterval(Self.arrivalsLifetime))

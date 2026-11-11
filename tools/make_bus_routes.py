@@ -40,7 +40,10 @@ def seconds(clock):
     return hours * 3600 + minutes * 60 + secs
 
 
-def main(target_dir, feeds):
+def read_patterns(feeds):
+    """The feeds' stops, by code, (latitude, longitude, name) in hundred-thousandths of a
+    degree; each line's each direction's stop patterns, {codes: [trips, headsigns, summed
+    offsets]}; and every line stopping at each stop on any pattern."""
     stops = {}  # code: (latitude, longitude, name)
     # (line, direction): pattern (tuple of codes): [trip count, headsigns, summed offsets]
     patterns = defaultdict(dict)
@@ -72,12 +75,21 @@ def main(target_dir, feeds):
             entry[0] += 1
             entry[1][headsign] += 1
             entry[2] = [total + offset for total, offset in zip(entry[2], offsets)]
+    return stops, patterns, served
+
+
+def kept(found):
+    """Of a line's direction's patterns, those kept: the PATTERNS commonest."""
+    return sorted(found.items(), key=lambda item: -item[1][0])[:PATTERNS]
+
+
+def main(target_dir, feeds):
+    stops, patterns, served = read_patterns(feeds)
     used = {}
     rows = []
     lines = defaultdict(list)
     for (line, _direction), found in sorted(patterns.items()):
-        kept = sorted(found.items(), key=lambda item: -item[1][0])[:PATTERNS]
-        for codes, (count, headsigns, totals) in kept:
+        for codes, (count, headsigns, totals) in kept(found):
             indices = []
             for code in codes:
                 if code not in used:

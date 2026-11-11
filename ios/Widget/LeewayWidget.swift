@@ -13,7 +13,7 @@ struct LeewayWidget: Widget {
                 .containerBackground(Color.routeBackground, for: .widget)
         }
         .configurationDisplayName("Saved Route")
-        .description("A route saved in the app: a train, a bus or a Citi Bike dock. Pick its kind, then which one, in its Edit menu.")
+        .description("Show a route you've saved in the app.")
         .supportedFamilies([.systemSmall, .systemMedium, .systemLarge,
                             .accessoryRectangular, .accessoryCircular, .accessoryInline])
         // For the edge-to-edge alert banner; TrainWidgetView adds margins elsewhere
@@ -73,8 +73,11 @@ struct TrainEntry: TimelineEntry {
     var tapToOpen = false
     /// With `tapToOpen`, the board is open, with a ✕ back to the card.
     var opened = false
-    /// A Saved Route for a bus or a Citi Bike dock: what it shows in place of trains.
+    /// A Saved Route's bus, or the Citi Bike widget's dock: what it shows in place of trains.
     var route: RouteTimes? = nil
+    /// A Saved Route that goes somewhere (`SavedWidget.hasEnd`): its id, for its button to open
+    /// New Trip on it (`PlanRouteTripIntent`) in place of the countdown's.
+    var plansRoute: UUID? = nil
 
     var stationName: String { route?.placeName ?? selection.station?.name ?? "Choose a station" }
     var heading: String { selection.heading }
@@ -114,8 +117,9 @@ struct Provider: AppIntentTimelineProvider {
 
     func snapshot(for configuration: TrainWidgetIntent, in context: Context) async -> TrainEntry {
         if context.isPreview { return placeholder(in: context) }
-        if let widget = routeWidget(configuration) {
-            return await routeTimeline(for: widget, configuration, in: context).entries[0]
+        if let moved = movedDockEntry(configuration, in: context) { return moved }
+        if let (widget, bus) = routeWidget(configuration) {
+            return await routeTimeline(for: widget, bus: bus, configuration, in: context).entries[0]
         }
         let shown = choice(configuration, family: context.family)
         let thisWidget = widgetID(configuration, context)
@@ -156,9 +160,13 @@ struct Provider: AppIntentTimelineProvider {
     func timeline(for configuration: TrainWidgetIntent, in context: Context) async -> Timeline<TrainEntry> {
         let signpost = Signposts.widget.beginInterval("Train timeline", id: Signposts.widget.makeSignpostID())
         defer { Signposts.widget.endInterval("Train timeline", signpost) }
+        // A dock from before docks were the Citi Bike widget's: says so, rather than a train
+        if let moved = movedDockEntry(configuration, in: context) {
+            return Timeline(entries: [moved], policy: .never)
+        }
         // A bus or a dock: its own times, no trains
-        if let widget = routeWidget(configuration) {
-            let (entries, reload) = await routeTimeline(for: widget, configuration, in: context)
+        if let (widget, bus) = routeWidget(configuration) {
+            let (entries, reload) = await routeTimeline(for: widget, bus: bus, configuration, in: context)
             return Timeline(entries: entries, policy: .after(reload))
         }
         // About once a day, a new timetable to fall back on, alongside the times. Not for
@@ -168,16 +176,23 @@ struct Provider: AppIntentTimelineProvider {
         let timetableDeadline = Date.now.addingTimeInterval(Self.timetableWait)
         let shown = choice(configuration, family: context.family)
         let thisWidget = widgetID(configuration, context)
-        async let other = Self.otherWayPlan(shown, family: context.family, widgetID: thisWidget,
-                                            reuseWithin: quickTripReuse(shown.trip))
-        let main = await Self.plan(for: shown.selection, change: shown.change, destination: shown.destination,
-                                   transfers: shown.transfers, tripSource: shown.tripSource,
-                                   family: context.family, widgetID: thisWidget,
-                                   reuseWithin: quickTripReuse(shown.trip), reloadsOthers: !directions,
-                                   // A tap on Transit Directions waits for this, and any tap after
-                                   // it for the extension, which draws one widget at a time
-                                   extrasWait: directions ? TimelinePlan.firstDrawWait : nil)
-        let plan = Self.merging(await other, into: main)
+        // Both ways' feeds downloaded once for the two (`TrainService.sharingFeeds`)
+        var stops = TrainService.routeFeedStops(for: shown.selection, change: shown.change, destination: shown.destination)
+        if shown.bothWays {
+            stops.formUnion(TrainService.feedStops(for: shown.selection.otherWay, change: nil, destination: nil))
+        }
+        let plan = await TrainService.sharingFeeds(atStops: stops) {
+            async let other = Self.otherWayPlan(shown, family: context.family, widgetID: thisWidget,
+                                                reuseWithin: quickTripReuse(shown.trip))
+            let main = await Self.plan(for: shown.selection, change: shown.change, destination: shown.destination,
+                                       transfers: shown.transfers, tripSource: shown.tripSource,
+                                       family: context.family, widgetID: thisWidget,
+                                       reuseWithin: quickTripReuse(shown.trip), reloadsOthers: !directions,
+                                       // A tap on Transit Directions waits for this, and any tap after
+                                       // it for the extension, which draws one widget at a time
+                                       extrasWait: directions ? TimelinePlan.firstDrawWait : nil)
+            return Self.merging(await other, into: main)
+        }
         // iOS rations reloads, so this may come late; until then the entries step through
         // the known trains.
         var reload = TimelinePlan.reload(now: .now, fetched: plan.fetched, old: plan.old, failed: plan.failed,
@@ -201,19 +216,55 @@ struct Provider: AppIntentTimelineProvider {
         }
         if let timetable { _ = await TrainService.value(of: timetable, by: timetableDeadline) }
         if entries.isEmpty { entries = plan.entries }
+        if let route = directions ? Self.journeyRoute(shown.tripSource) : plannableRoute(configuration) {
+            for index in entries.indices { entries[index].plansRoute = route }
+        }
         if taps(context) { entries = Self.withCards(entries, widgetID: thisWidget) }
         return Timeline(entries: entries, policy: .after(reload))
     }
 
-    /// The Saved Route's saved widget when it's a bus or a Citi Bike dock; nil for a train. For
-    /// Transit Directions, only Favorite Stop's home stop, when it's a bus.
-    private func routeWidget(_ configuration: TrainWidgetIntent) -> SavedWidget? {
+    /// A Saved Route showing a Citi Bike dock saved before docks were the Citi Bike widget's
+    /// (`SavedWidgets.movedDocks`): its dock, saying it's moved; nil otherwise.
+    private func movedDockEntry(_ configuration: TrainWidgetIntent, in context: Context) -> TrainEntry? {
+        guard !transfers, !directions, let id = configuration.widget.flatMap({ UUID(uuidString: $0.id) }),
+              let dock = SharedStore.loadWidgets().movedDock(id)?.dock else { return nil }
+        let settings = SharedStore.loadSettings()
+        var entry = TrainEntry(date: .now, selection: .fallback, trains: [], widgetID: widgetID(configuration, context),
+                               settings: settings)
+        entry.route = .dock(SavedDockBoard(dock: dock, kinds: settings.bikeKinds, fetched: .now,
+                                           problem: "Moved to the Citi Bike widget"))
+        return entry
+    }
+
+    /// The Saved Route's id, as it shows now, if it goes somewhere New Trip can plan to
+    /// (`SavedWidget.hasEnd`); nil for Transit Directions, home stations and countdown-only routes.
+    private func plannableRoute(_ configuration: TrainWidgetIntent) -> UUID? {
+        guard !directions else { return nil }
+        let widgets = SharedStore.loadWidgets()
+        guard let widget = transfers ? configuration.transfersWidget(in: widgets) : configuration.savedWidget(in: widgets)
+        else { return nil }
+        return widget.shown(at: .now).hasEnd ? widget.id : nil
+    }
+
+    /// One of Trip's journeys on Transit Directions (`TripSource.saved`, by its title): its Saved
+    /// Route's id, for the same New Trip button as that widget's, if it goes somewhere.
+    static func journeyRoute(_ source: TripSource?) -> UUID? {
+        guard case .saved(let title) = source else { return nil }
+        let now = Date.now
+        return SharedStore.loadWidgets().widgets.first { widget in
+            let shown = widget.shown(at: now)
+            return shown.title == title && shown.hasEnd
+        }?.id
+    }
+
+    /// The Saved Route's saved widget when it's a bus; nil for a train. For Transit Directions,
+    /// only Favorite Stop's home stop, when it's a bus. Citi Bike docks are the Citi Bike widget's.
+    private func routeWidget(_ configuration: TrainWidgetIntent) -> (SavedWidget, BusChoice)? {
         guard !transfers, let widget = configuration.savedWidget(in: SharedStore.loadWidgets()),
               !directions || widget.id == SavedWidget.defaultID else { return nil }
         switch widget.kind {
-        case .subway: return nil
-        case .bus: return widget.bus == nil ? nil : widget
-        case .bike: return widget.dock == nil ? nil : widget
+        case .subway, .bike: return nil
+        case .bus: return widget.bus.map { (widget, $0) }
         }
     }
 
@@ -228,55 +279,43 @@ struct Provider: AppIntentTimelineProvider {
     private static let routeLockReload: TimeInterval = 15 * 60
     private static let routeCardReload: TimeInterval = 30 * 60
 
-    /// Seconds a bus or dock widget waits for its times before drawing without them.
+    /// Seconds a bus widget waits for its times before drawing without them.
     private static let routeFetchWait: TimeInterval = 8
 
-    /// A bus or dock's entries: its times now, then for a bus one as each bus comes and a minute
-    /// apart for the minutes to go; as cards on the Home Screen until a tap.
-    private func routeTimeline(for widget: SavedWidget, _ configuration: TrainWidgetIntent,
+    /// A bus's entries: its times now, then one as each bus comes and a minute apart for the
+    /// minutes to go; as cards on the Home Screen until a tap.
+    private func routeTimeline(for widget: SavedWidget, bus: BusChoice, _ configuration: TrainWidgetIntent,
                                in context: Context) async -> (entries: [TrainEntry], reload: Date) {
         let now = Date.now
         let settings = SharedStore.loadSettings()
         let thisWidget = widgetID(configuration, context)
-        var dates = [now]
-        let route: RouteTimes
         // Each fetch's timeout only counts idle time, so a slow connection could hold the widget
         // past iOS's limit and leave it blank, as `NearbyWidget`'s: late by this, shown unreachable
         let deadline = now.addingTimeInterval(Self.routeFetchWait)
-        if widget.kind == .bus, let bus = widget.bus {
-            let fetching = Task { await SavedBusBoard.fetch(bus, now: now) }
-            let board = await TrainService.value(of: fetching, by: deadline)
-                ?? SavedBusBoard.saved(bus, now: now)
-            route = .bus(board)
-            let known = (board.buses + board.otherBuses).compactMap(\.time).filter { $0 > now }
-            let ahead = directions ? Self.routeAhead
-                : min(max(Self.routeAhead, (known.max() ?? now).timeIntervalSince(now) + AtStation.busSeconds), Self.routeMostAhead)
-            let last = now.addingTimeInterval(ahead)
-            let coming = known.filter { $0 < last }
-            // As each is due ("At Stop"), and once it's gone from there
-            let gone = coming.map { $0.addingTimeInterval(AtStation.busSeconds) }
-            dates += Set(coming + gone + stride(from: now.addingTimeInterval(60), to: last, by: 60)).sorted()
-        } else if let dock = widget.dock {
-            let kinds = settings.bikeKinds
-            let fetching = Task { await SavedDockBoard.fetch(dock, kinds: kinds, now: now) }
-            route = .dock(await TrainService.value(of: fetching, by: deadline)
-                ?? SavedDockBoard(dock: dock, kinds: kinds, fetched: now, problem: "Couldn't reach Citi Bike"))
-        } else {
-            route = .dock(SavedDockBoard(dock: DockChoice(id: "", name: "Choose a dock", latitude: 0, longitude: 0),
-                                         fetched: now, problem: "Choose a dock"))
-        }
+        let fetching = Task { await SavedBusBoard.fetch(bus, now: now) }
+        let board = await TrainService.value(of: fetching, by: deadline)
+            ?? SavedBusBoard.saved(bus, now: now)
+        let route = RouteTimes.bus(board)
+        let known = (board.buses + board.otherBuses).compactMap(\.time).filter { $0 > now }
+        let ahead = directions ? Self.routeAhead
+            : min(max(Self.routeAhead, (known.max() ?? now).timeIntervalSince(now) + AtStation.busSeconds), Self.routeMostAhead)
+        let last = now.addingTimeInterval(ahead)
+        let coming = known.filter { $0 < last }
+        // As each is due ("At Stop"), and once it's gone from there
+        let gone = coming.map { $0.addingTimeInterval(AtStation.busSeconds) }
+        var dates = [now] + Set(coming + gone + stride(from: now.addingTimeInterval(60), to: last, by: 60)).sorted()
         // A bus counted down to from this widget: its walk button lit until the countdown ends
         let countdown = SharedStore.loadCountdown()
-        let countdownEnds = widget.bus.flatMap { bus in
-            countdown?.isShown(onWidget: thisWidget, for: bus.countdownID) == true ? countdown?.ends : nil
-        }
+        let countdownEnds = countdown?.isShown(onWidget: thisWidget, for: bus.countdownID) == true ? countdown?.ends : nil
         // Walk goes out as the countdown ends, which nothing reloads the widget for, as `plan`'s
         if let ends = countdownEnds, ends > now, !dates.contains(ends) {
             dates = (dates + [ends]).sorted()
         }
+        let plansRoute = directions ? nil : plannableRoute(configuration)
         var entries = dates.map { date in
             var entry = TrainEntry(date: date, selection: widget.selection, trains: [], widgetID: thisWidget, settings: settings)
             entry.route = route
+            entry.plansRoute = plansRoute
             entry.countingDown = countdownEnds.map { date < $0 } ?? false
             return entry
         }
@@ -322,7 +361,14 @@ struct Provider: AppIntentTimelineProvider {
                                    transfers: option.change != nil, tripSource: .saved(title),
                                    family: context.family, widgetID: widgetID(TrainWidgetIntent(), context),
                                    atOnce: true, anyAge: true, until: horizon)
-        return plan.drewAtOnce ? plan.entries : []
+        guard plan.drewAtOnce else { return [] }
+        // Its button as the redraw has it
+        let route = Self.journeyRoute(.saved(title))
+        return plan.entries.map { entry in
+            var entry = entry
+            entry.plansRoute = route
+            return entry
+        }
     }
 
     /// How far ahead Transit Directions' boards are drawn.
@@ -613,7 +659,7 @@ struct Provider: AppIntentTimelineProvider {
     private static func quietReload(for selection: Selection, change: Change?, destination: Station?,
                                     now: Date) -> Date? {
         guard let timetable = TimetableStore.load(now: now) else { return nil }
-        let timed = change.map { TrainService.board(for: selection, change: $0, from: timetable, now: now) }
+        let timed = change.map { TrainService.routeBoard(for: selection, change: $0, from: timetable, now: now) }
             ?? TrainService.board(for: selection, arrivingAt: destination, from: timetable, now: now)
         let next = change == nil ? timed.trains.map(\.time).min() : timed.connections.map(\.first.time).min()
         let latest = now.addingTimeInterval(quietMax)
@@ -650,7 +696,7 @@ struct Provider: AppIntentTimelineProvider {
     private static func timetableBoard(saved: SharedStore.SavedBoard?, selection: Selection, change: Change?,
                                        destination: Station?, now: Date) -> (board: SharedStore.SavedBoard, used: Bool)? {
         guard let timetable = TimetableStore.load(now: now) else { return nil }
-        let timed = change.map { TrainService.board(for: selection, change: $0, from: timetable, now: now) }
+        let timed = change.map { TrainService.routeBoard(for: selection, change: $0, from: timetable, now: now) }
             ?? TrainService.board(for: selection, arrivingAt: destination, from: timetable, now: now)
         var board = saved ?? SharedStore.SavedBoard(fetched: now, trains: [], notice: nil)
         board.trains = TimelinePlan.filling(saved?.trains ?? [], from: timed.trains, selection: selection, now: now)
@@ -724,14 +770,15 @@ struct Provider: AppIntentTimelineProvider {
         let wait = saved == nil ? TimelinePlan.firstDrawWait : extrasWait ?? TimelinePlan.extrasWait
         let board: Board
         if let change {
-            board = await TrainService.addingBuses(
-                to: try await TrainService.board(for: selection, change: change, includingAlerts: alerts,
-                                                 includingOutages: selection.elevatorAlerts,
-                                                 waitingAfterOwnLines: wait, now: now),
-                change: change, now: now)
+            board = try await TrainService.routeBoard(for: selection, change: change, includingAlerts: alerts,
+                                                      includingOutages: selection.elevatorAlerts,
+                                                      waitingAfterOwnLines: wait, now: now)
             // Its trains for Next train widgets showing the same, which redraw with them; only
-            // their own alerts, not the changed-to lines'
-            SharedStore.saveBoard(board.withoutChange, for: selection, fetched: .now)
+            // their own alerts, not the changed-to lines'. Not a planned trip's: its first
+            // rides, cut to those it follows, aren't all the station's trains
+            if change.planned == nil {
+                SharedStore.saveBoard(board.withoutChange, for: selection, fetched: .now)
+            }
         } else {
             board = try await TrainService.board(for: selection, arrivingAt: destination, includingAlerts: alerts,
                                                  includingOutages: selection.elevatorAlerts,
@@ -913,7 +960,10 @@ struct TrainWidgetView: View {
             Text("Show the times")
         }
         .toggleStyle(style)
-        .accessibilityLabel("\(entry.stationName), \(cardHeading)")
+        .accessibilityLabel(entry.route == nil
+            ? "\(entry.stationName), \(cardHeading), \(Lines.spokenList(entry.selection.routes))"
+            : "\(entry.stationName), \(cardHeading)")
+        .accessibilityRemoveTraits(.isToggle)
         .accessibilityHint(entry.route.map { route -> String in
             if case .dock = route { return "Shows the bikes and docks" }
             return "Shows the next buses"
@@ -928,26 +978,26 @@ struct TrainWidgetView: View {
         HStack(spacing: 4) {
             switch source {
             case .maps(let app):
-                Image(systemName: "map.fill")
+                Image(systemName: "map.fill").accessibilityHidden(true)
                 Text("Showing directions from \(app.name)")
             case .quickTrip(let to):
-                Image(systemName: QuickTripSymbol.name)
+                Image(systemName: QuickTripSymbol.name).accessibilityHidden(true)
                 Text("Quick Trip · \(entry.stationName) → \(to)")
             case .favorite:
-                Image(systemName: "star.fill")
+                Image(systemName: "star.fill").accessibilityHidden(true)
                 Text("Favorite Stop")
             case .nearby:
-                Image(systemName: "location.fill")
+                Image(systemName: "location.fill").accessibilityHidden(true)
                 Text("Nearby · \(entry.stationName)")
             case .saved(let title):
-                Image(systemName: QuickTripSymbol.name)
+                Image(systemName: QuickTripSymbol.name).accessibilityHidden(true)
                 Text("Trip · \(title)")
             }
         }
         .lineLimit(1)
         .minimumScaleFactor(0.8)
         .font(.caption2.weight(.semibold))
-        .foregroundStyle(Color.boardGray)
+        .foregroundStyle(BoardInk.gray)
         // Fits the bottom margin
         .dynamicTypeSize(...DynamicTypeSize.large)
         .padding(.horizontal, 8)
@@ -975,8 +1025,34 @@ struct TrainWidgetView: View {
                     .toggleStyle(style)
             }
         }
+        .accessibilityLabel(lockScreenLabel)
+        .accessibilityRemoveTraits(.isToggle)
         .accessibilityAddTraits(.isButton)
         .accessibilityHint("Refreshes the times")
+    }
+
+    /// What VoiceOver says for the circular and rectangular Lock Screen widgets: "R train,
+    /// Prospect Av, Manhattan, leave in 8 minutes, at 8:12 AM. Refresh".
+    private var lockScreenLabel: String {
+        let face = lockFace
+        let mark: String = switch face.mark {
+        case .line(let route): Lines.spokenName(of: route)
+        case .bus(let line): BusBadge.spokenName(line)
+        case .bike: "Citi Bike"
+        }
+        let when: String
+        if let countdown = face.countdown {
+            let minutes = MinutesToGo(until: countdown.end, from: entry.date)
+            let leave = entry.route == nil && walking
+            when = minutes.isNow ? (leave ? "leave now" : "now")
+                : "\(leave ? "leave in" : "in") \(minutes.spoken), at \(Spoken.clock(countdown.end))"
+        } else if !face.counts.isEmpty {
+            when = face.counts.map { "\($0.number) \($0.name)" }.joined(separator: ", ")
+        } else {
+            when = face.problem
+        }
+        return ([mark, face.name, face.way, when].compactMap { $0 }.filter { !$0.isEmpty }
+            .joined(separator: ", ")) + ". Refresh"
     }
 
     /// A Home Screen widget's picture, whose whole face is ↻ as on the Lock Screen: a toggle
@@ -1018,6 +1094,7 @@ struct TrainWidgetView: View {
                 }
             }
             .accessibilityLabel("Refresh")
+            .accessibilityRemoveTraits(.isToggle)
             .accessibilityHint("Refreshes the times")
         }
     }
@@ -1093,10 +1170,14 @@ struct TrainWidgetView: View {
         case .accessoryInline:
             if let next, walking {
                 Text("\(next.lineLabel): leave \(entry.selection.leaveTime(for: next).clock) for \(next.time.clock)")
+                    .accessibilityLabel("\(Lines.spokenName(of: next.route)): leave at "
+                        + "\(Spoken.clock(entry.selection.leaveTime(for: next))) for \(Spoken.clock(next.time))")
             } else if let next, let notice = entry.notice {
                 Text("\(next.lineLabel) \(next.time.clock) · \(notice.label)")
+                    .accessibilityLabel("\(Lines.spokenName(of: next.route)) at \(Spoken.clock(next.time)), \(notice.label)")
             } else if let next {
                 Text(inlineTimes([next] + later.prefix(2)))
+                    .accessibilityLabel(spokenInlineTimes([next] + later.prefix(2)))
             } else {
                 Text(noTrains)
             }
@@ -1106,6 +1187,8 @@ struct TrainWidgetView: View {
                 VStack(spacing: 0) {
                     HStack(spacing: 2) {
                         Text(next?.lineLabel ?? entry.lineLabel).font(.headline)
+                            .accessibilityLabel(next.map { Lines.spokenName(of: $0.route) }
+                                ?? Lines.spokenList(entry.selection.routes, joinedBy: "or"))
                         if refreshing {
                             refreshMark(size: 9)
                         } else if let next {
@@ -1202,6 +1285,15 @@ struct TrainWidgetView: View {
             return "\(entry.lineLabel) " + trains.map(\.time.clock).joined(separator: " · ")
         }
         return trains.map { "\($0.lineLabel) \($0.time.clock)" }.joined(separator: " · ")
+    }
+
+    /// `inlineTimes` for VoiceOver: "R train at 8:12 AM, 8:20 AM, 8:28 AM".
+    private func spokenInlineTimes(_ trains: [Arrival]) -> String {
+        if !trains.contains(where: entry.selection.marksLine) {
+            return "\(Lines.spokenList(entry.selection.routes, joinedBy: "or")) at "
+                + trains.map { Spoken.clock($0.time) }.joined(separator: ", ")
+        }
+        return trains.map { "\(Lines.spokenName(of: $0.route)) at \(Spoken.clock($0.time))" }.joined(separator: ", ")
     }
 
     // MARK: Transfers
@@ -1700,4 +1792,11 @@ extension TrainEntry {
 /// Quick Trip's symbol, on its button and its trips' note.
 enum QuickTripSymbol {
     static let name = "point.topleft.down.to.point.bottomright.curvepath.fill"
+}
+
+/// Nearby's and Trip's colours on the buttons, from hues no line's bullet is near, so Favorite
+/// Stop's card, in its line's colour, never matches them. Here for setup's picture of them too.
+enum HomeTint {
+    static let nearby = Color(hex: 0x00A3A3)
+    static let trip = Color(hex: 0x7B61FF)
 }

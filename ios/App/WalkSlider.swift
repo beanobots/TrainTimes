@@ -5,8 +5,9 @@ import SwiftUI
 /// end. The thumb follows the finger and springs to the nearest stop when let go. The stretch past
 /// 45 is dashed and pulls back: the thumb follows at a third of the finger's speed there, and only
 /// a drag to the very end springs it onto No Limit, as dragging back past halfway springs it off;
-/// let go short and it springs back to 45. At No Limit the tint grows along the whole track and the
-/// thumb carries the infinity sign.
+/// let go short and it springs back to 45, though a tap anywhere past 45, on its ring or on ∞, picks
+/// No Limit, and a tap on 15–45 its nearest stop. At No Limit the tint grows along the whole track
+/// and the thumb carries the infinity sign.
 struct WalkSlider: View {
     @Binding var minutes: Int
     /// Where the thumb is while it's dragged, from the track's start; nil when it rests on its stop.
@@ -25,6 +26,9 @@ struct WalkSlider: View {
     private static let give: CGFloat = 0.35
     /// How far into the last stretch the finger must be let go for No Limit.
     private static let landing: CGFloat = 0.95
+    /// How far past the track a touch still takes it: above it, down over the numbers under it,
+    /// and out past each end, so the thumb's easy to catch, on No Limit at the far end most of all.
+    private static let reach = EdgeInsets(top: 14, leading: 12, bottom: 30, trailing: 16)
     /// How much of the track 15–45 takes; the dashed stretch to No Limit gets the rest.
     private static let solidShare: CGFloat = 0.75
 
@@ -112,12 +116,27 @@ struct WalkSlider: View {
             .offset(x: thumbX)
         }
         .frame(maxHeight: .infinity)
+        // The stops' labels, each under its place on the track; not taps of their own, so drags
+        // and taps on them reach the track (a tap on ∞ is past 45, so No Limit)
+        .overlay(alignment: .topLeading) {
+            ForEach(labels, id: \.position) { label in
+                Text(label.text)
+                    .font(label.position == Self.last ? .footnote.weight(.semibold) : .caption2)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 40)
+                    .allowsHitTesting(false)
+                    .position(x: x(CGFloat(label.position)) + Self.thumb / 2, y: Self.thumb + 10)
+            }
+        }
+        // Touches taken around the track too (`reach`), then the layout put back as it was; the
+        // gestures' x is then from the reach's edge, so `reach.leading` comes off it
+        .padding(Self.reach)
         .contentShape(Rectangle())
         .gesture(
             DragGesture(minimumDistance: 0)
                 .onChanged { drag in
                     if finger == nil { leaving = noLimit }
-                    let at = min(max(0, drag.location.x - Self.thumb / 2), end)
+                    let at = min(max(0, drag.location.x - Self.reach.leading - Self.thumb / 2), end)
                     // How far past 45 into the dashed stretch, 0…1 across it
                     let past = (at - lastSolid) / (end - lastSolid)
                     // No Limit's caught only near the end, and once caught kept until dragged well back
@@ -151,23 +170,39 @@ struct WalkSlider: View {
                         set(index)
                     }
                 }
-                .onEnded { _ in
-                    // Settles on the stop picked; short of No Limit, back to 45
+                .onEnded { drag in
+                    // Settles on the stop picked; short of No Limit, back to 45. A tap past 45,
+                    // on the dashed stretch or the ring, is a pick of No Limit; the 45 thumb
+                    // itself spans lastSolid…lastSolid + thumb, so only taps beyond it count
+                    let tapped = abs(drag.translation.width) < 8
+                        && drag.startLocation.x - Self.reach.leading > lastSolid + Self.thumb
                     pulling = false
-                    withAnimation(.spring(duration: 0.35, bounce: 0.15)) { finger = nil }
+                    withAnimation(.spring(duration: 0.35, bounce: 0.15)) {
+                        finger = nil
+                        if tapped { set(Self.last) }
+                    }
+                }
+        )
+        // A tap of its own: in a scroll view (Settings) a tap that doesn't move never reaches the
+        // drag. Past 45, the dashed stretch or No Limit's ring, is No Limit, as ∞ under it is;
+        // on 15–45, the nearest stop
+        .simultaneousGesture(
+            SpatialTapGesture()
+                .onEnded { tap in
+                    let tapX = tap.location.x - Self.reach.leading
+                    let at = min(max(0, tapX - Self.thumb / 2), end)
+                    let index = tapX > lastSolid + Self.thumb ? Self.last
+                        : Int((min(at, lastSolid) / lastSolid * CGFloat(Self.last - 1)).rounded())
+                    pulling = false
+                    withAnimation(.spring(duration: 0.35, bounce: 0.15)) {
+                        finger = nil
+                        set(index)
+                    }
                 }
         )
         .sensoryFeedback(.selection, trigger: stop)
-        // The stops' labels, each under its place on the track
-        .overlay(alignment: .topLeading) {
-            ForEach(labels, id: \.position) { label in
-                Text(label.text)
-                    .font(label.position == Self.last ? .footnote.weight(.semibold) : .caption2)
-                    .foregroundStyle(.secondary)
-                    .frame(width: 40)
-                    .position(x: x(CGFloat(label.position)) + Self.thumb / 2, y: Self.thumb + 10)
-            }
-        }
+        .padding(EdgeInsets(top: -Self.reach.top, leading: -Self.reach.leading,
+                            bottom: -Self.reach.bottom, trailing: -Self.reach.trailing))
     }
 
     private func set(_ index: Int) {

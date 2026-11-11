@@ -101,16 +101,23 @@ struct HTTPServices: Sendable {
     var limits: Limits
     var feeds: FeedRelay
     var timetable: TimetableCopy
-    /// Nil without a Google key: `GET /routes` isn't offered.
+    /// The subway's for 30 days, and the buses' for a week, for phones saving them for offline.
+    var monthTimetable: TimetableCopy
+    var busTimetable: TimetableCopy
+    /// Trips between two places for `GET /routes`; nil only in tests that don't offer it.
     var routes: TransitRoutes?
     /// Nil without a Bus Time key: `GET /buses` isn't offered.
     var buses: BusTime?
+    /// Citi Bike's docks, for `GET /docks`.
+    var docks: CitiBikeDocks
 
     init(store: Store, auth: AuthMode, appID: String, limits: Limits, roots: [Certificate]? = nil,
          feeds: FeedRelay = FeedRelay(interval: 20), timetable: TimetableCopy = TimetableCopy(),
-         routes: TransitRoutes? = nil, buses: BusTime? = nil,
+         monthTimetable: TimetableCopy = TimetableCopy(), busTimetable: TimetableCopy = TimetableCopy(),
+         routes: TransitRoutes? = nil, buses: BusTime? = nil, docks: CitiBikeDocks = CitiBikeDocks(),
          diagnostics: DiagnosticStore? = nil) {
         self.store = store
+        self.docks = docks
         self.diagnostics = diagnostics ?? DiagnosticStore(maxReports: limits.maxDiagnostics)
         diagnosticsPerKey = DailyLimiter(limit: limits.diagnosticsPerKeyPerDay)
         self.routes = routes
@@ -119,6 +126,8 @@ struct HTTPServices: Sendable {
         self.limits = limits
         self.feeds = feeds
         self.timetable = timetable
+        self.monthTimetable = monthTimetable
+        self.busTimetable = busTimetable
         challenges = ChallengeStore()
         limiter = RateLimiter(perMinute: limits.requestsPerMinute, burst: limits.requestBurst)
         feedLimiter = RateLimiter(perMinute: limits.feedRequestsPerMinute, burst: limits.feedRequestBurst)
@@ -138,6 +147,16 @@ enum HTTPRoutes {
         var challenge: String
     }
 
+    /// A timetable (`TimetableCopy.current`): 503 if it isn't built yet, 304 if the phone has it.
+    private static func served(_ current: (data: Data, etag: String)?, for request: Request) throws -> Response {
+        guard let (data, etag) = current else { throw HTTPError(.serviceUnavailable) }
+        let headers: HTTPFields = [.contentType: "application/octet-stream", .eTag: etag, .cacheControl: "no-cache"]
+        if request.headers[.ifNoneMatch] == etag {
+            return Response(status: .notModified, headers: headers)
+        }
+        return Response(status: .ok, headers: headers, body: .init(byteBuffer: ByteBuffer(bytes: data)))
+    }
+
     static func router(_ services: HTTPServices) -> Router<AppContext> {
         let router = Router(context: AppContext.self)
         // First, so it covers every route, and requests for none
@@ -147,8 +166,9 @@ enum HTTPRoutes {
         router.get("/health") { _, _ in "ok" }
 
         // An MTA feed as the poller last read it (`FeedRelay`), for the app and widgets to read
-        // here before the MTA; never read for a request. Public data, so no authentication:
-        // widgets can't sign requests.
+        // here before the MTA; read for a request only after an idle spell, when there's no
+        // copy (`FeedRelay.served`). Public data, so no authentication: widgets can't sign
+        // requests.
         // With `stops` (a train feed's) or `routes` (the alerts'), comma-separated, only what
         // those need (`FeedRelay.served`); gzipped for a client that takes it. Both save phones
         // with little signal below ground most of the download.
@@ -172,25 +192,27 @@ enum HTTPRoutes {
             return Response(status: .ok, headers: headers, body: .init(byteBuffer: ByteBuffer(bytes: served.data)))
         }
 
-        // The timetable the app falls back on when the MTA can't be reached (`TimetableMaker`).
-        // Public, like the feeds; with If-None-Match, 304 if the phone has the current one.
+        // The timetable the app falls back on when the MTA can't be reached (`TimetableMaker`):
+        // the week's, or with days=30 the month's (the week's until that's built). Public, like
+        // the feeds; with If-None-Match, 304 if the phone has the current one.
         router.get("/timetable") { request, _ -> Response in
-            guard let (data, etag) = await services.timetable.current else {
-                throw HTTPError(.serviceUnavailable)
+            if request.uri.queryParameters.get("days") == "30", let month = await services.monthTimetable.current {
+                return try served(month, for: request)
             }
-            let headers: HTTPFields = [.contentType: "application/octet-stream", .eTag: etag,
-                                       .cacheControl: "no-cache"]
-            if request.headers[.ifNoneMatch] == etag {
-                return Response(status: .notModified, headers: headers)
-            }
-            return Response(status: .ok, headers: headers, body: .init(byteBuffer: ByteBuffer(bytes: data)))
+            return try served(await services.timetable.current, for: request)
         }
 
-        // Google's subway routes between two places in the city (`TransitRoutes`), for directions
-        // shared to the app's Share extension, which can't sign requests: from=lat,lon&to=lat,lon,
-        // optionally at=<seconds since 1970> to leave then, bus=1 for bus rides too, and with it
-        // subway=0 for bus rides alone (missing, as from older apps: subway too). Daily
-        // limits keep it in Google's free allowance; where trips are isn't logged.
+        // The buses' week, the same way.
+        router.get("/bus-timetable") { request, _ -> Response in
+            try served(await services.busTimetable.current, for: request)
+        }
+
+        // Trips between two places in the city, planned on the timetables (`TransitRoutes`), for
+        // New Trip and directions shared to the app's Share extension, which can't sign requests:
+        // from=lat,lon&to=lat,lon, optionally at=<seconds since 1970> to leave then, bus=1 for bus
+        // rides too, and with it subway=0 for bus rides alone (missing, as from older apps: subway
+        // too). Daily limits keep one client from keeping the server busy; where trips are isn't
+        // logged.
         if let routes = services.routes {
             router.get("/routes") { request, context -> Response in
                 let query = request.uri.queryParameters
@@ -199,7 +221,7 @@ enum HTTPRoutes {
                       TransitRoutes.isInCity(from), TransitRoutes.isInCity(to) else {
                     throw HTTPError(.badRequest)
                 }
-                // Not in the past, which Google refuses, nor over a week on
+                // Not in the past, nor over a week on, past the timetables
                 let now = Date.now
                 let asked = query.get("at").flatMap { Double($0) }.flatMap { $0.isFinite ? $0 : nil }.map { Date(timeIntervalSince1970: $0) } ?? now
                 let departure = min(max(asked, now), now.addingTimeInterval(7 * 86400))
@@ -221,7 +243,7 @@ enum HTTPRoutes {
         }
 
         // Bus Time's next buses for a bus ride from `GET /routes?bus=1` (`BusTime`):
-        // line=<Google's name for it>&stop=lat,lon, where the ride boards. Public, like the
+        // line=<its name>&stop=lat,lon, where the ride boards. Public, like the
         // routes, and to daily limits like them; where riders wait isn't logged.
         if let buses = services.buses {
             router.get("/buses") { request, context -> Response in
@@ -268,6 +290,49 @@ enum HTTPRoutes {
                 return Response(status: .ok, headers: [.contentType: "application/json", .cacheControl: "no-store"],
                                 body: .init(byteBuffer: ByteBuffer(bytes: json)))
             }
+        }
+
+        // Citi Bike's docks with their counts now (`CitiBikeDocks`), for Nearby and the widgets,
+        // which then needn't each download the whole city's: at=lat,lon for up to limit (1–10,
+        // 5 if not given) within within meters (at most 2000, 800 if not given), nearest first,
+        // has= any (the default), service, bike, ebike or either picking which; or ids=a,b (up
+        // to 10) for those docks; or places=1 for where every dock is, without counts, which
+        // changes once a day or so: with an ETag (304 for a phone that has it) and kept an hour.
+        // Public, like the feeds; where riders are isn't logged.
+        router.get("/docks") { request, _ -> Response in
+            let query = request.uri.queryParameters
+            let found: [CitiBikeDocks.Dock]?
+            if query.get("places") == "1" {
+                guard let (json, etag) = await services.docks.everyPlaceAnswer() else { throw HTTPError(.badGateway) }
+                let headers: HTTPFields = [.contentType: "application/json", .eTag: etag, .cacheControl: "max-age=3600"]
+                if request.headers[.ifNoneMatch] == etag {
+                    return Response(status: .notModified, headers: headers)
+                }
+                return Response(status: .ok, headers: headers, body: .init(byteBuffer: ByteBuffer(bytes: json)))
+            } else if let ids = query.get("ids") {
+                let split = ids.split(separator: ",")
+                guard (1...CitiBikeDocks.maxLimit).contains(split.count), split.allSatisfy(CitiBikeDocks.validID) else {
+                    throw HTTPError(.badRequest)
+                }
+                found = await services.docks.docks(ids: split.map(String.init))
+            } else {
+                guard let point = TransitRoutes.point(query.get("at")), TransitRoutes.isInCity(point),
+                      let has = CitiBikeDocks.Has(rawValue: query.get("has") ?? "any") else {
+                    throw HTTPError(.badRequest)
+                }
+                let limit = query.get("limit").flatMap { Int($0) } ?? 5
+                let within = query.get("within").flatMap { Double($0) } ?? 800
+                guard (1...CitiBikeDocks.maxLimit).contains(limit), within.isFinite,
+                      (0...CitiBikeDocks.maxWithin).contains(within) else {
+                    throw HTTPError(.badRequest)
+                }
+                found = await services.docks.nearest(to: (point.0, point.1), limit: limit,
+                                                     within: within, has: has)
+            }
+            guard let found else { throw HTTPError(.badGateway) }
+            let json = try JSONEncoder().encode(["docks": found])
+            return Response(status: .ok, headers: [.contentType: "application/json", .cacheControl: "no-store"],
+                            body: .init(byteBuffer: ByteBuffer(bytes: json)))
         }
 
         if case .attest = services.auth {
@@ -373,9 +438,10 @@ enum HTTPRoutes {
                 revision: UUID(),
                 lastState: registration.state,
                 // Dropped if it's no longer a change for this train, as a saved widget's is
-                change: registration.bus == nil ? registration.change?.validated(for: registration.selection) : nil,
+                // Without any plan (`Change.forCountdown`), which only the app's widgets follow
+                change: registration.bus == nil ? registration.change?.validated(for: registration.selection)?.forCountdown : nil,
                 widgetToken: widgetToken ?? nil,
-                bus: registration.bus.map { var bus = $0; bus.changes = nil; return bus }
+                bus: registration.bus?.forCountdown
             )
             switch try await services.store.upsert(entry, maxTotal: services.limits.maxRegistrations,
                                                    maxPerOwner: services.limits.maxRegistrationsPerKey) {

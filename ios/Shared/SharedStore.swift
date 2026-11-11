@@ -354,7 +354,8 @@ enum SharedStore {
     }
 
     /// Alerts and outages as the app or a widget last downloaded them (`TrainService.sharedCache`),
-    /// in the container's Library/Caches, which iOS may clear. A file per name, named by its hash
+    /// in the container's Library/Caches, which iOS may clear (they're only fallen back on). A
+    /// file per name, named by its hash
     /// and dated when saved.
     struct FeedCache: FeedCaching {
         private static let folder = SharedStore.container?.appendingPathComponent("Library/Caches/Feeds", isDirectory: true)
@@ -365,15 +366,20 @@ enum SharedStore {
             return try? Data(contentsOf: file)
         }
 
-        /// Also deletes any saved over an hour ago, such as alerts for routes no widget shows now.
+        /// How long they're kept: a week, to fall back on without signal (`TrainService`'s
+        /// `sharedFeeds`), as planned work's alerts hold for days.
+        var keeps: TimeInterval { 7 * 24 * 60 * 60 }
+
+        /// Also deletes any saved over `keeps` ago, such as alerts for routes no widget shows now.
         func save(_ data: Data, for name: String) {
             guard let folder = Self.folder, let file = Self.file(for: name) else { return }
             let manager = FileManager.default
             try? manager.createDirectory(at: folder, withIntermediateDirectories: true)
             try? data.write(to: file, options: .atomic)
             let now = Date.now
+            let keeps = keeps
             for old in (try? manager.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
-            where !(SharedStore.modified(old)?.isWithin(60 * 60, before: now) ?? false) {
+            where !(SharedStore.modified(old)?.isWithin(keeps, before: now) ?? false) {
                 try? manager.removeItem(at: old)
             }
         }
@@ -417,9 +423,11 @@ enum SharedStore {
         return try JSONDecoder().decode(SavedWidgets.self, from: Data(contentsOf: widgetsFile))
     }
 
-    /// Before any widgets are saved: one, of the app's saved selection.
+    /// Before any widgets are saved: one, of the app's saved selection both ways, until setup
+    /// makes it Home Station's (`WidgetStore.startFirstRoute`).
     static var firstWidgets: SavedWidgets {
-        SavedWidgets(widgets: [SavedWidget(id: SavedWidget.firstID, selection: savedSelection() ?? .fallback)])
+        SavedWidgets(widgets: [SavedWidget(id: SavedWidget.firstID, selection: savedSelection() ?? .fallback,
+                                           bothWays: true)])
     }
 
     /// Backs up undecodable widgets to widgets.json.bad before the app saves over them. If the file

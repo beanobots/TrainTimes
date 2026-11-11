@@ -30,6 +30,19 @@ private actor FakeMTA {
     func fail(_ failing: Bool) { self.failing = failing }
 }
 
+/// Counts reads of each feed.
+private actor ReadCounts {
+    private var counts: [URL: Int] = [:]
+
+    @discardableResult
+    func add(_ url: URL) -> Int {
+        counts[url, default: 0] += 1
+        return counts[url] ?? 0
+    }
+
+    func of(_ url: URL) -> Int { counts[url] ?? 0 }
+}
+
 @Suite struct FeedRelayTests {
     @Test func namesEveryFeedTheAppReads() {
         #expect(Set(FeedRelay.feeds.keys) == [
@@ -212,8 +225,13 @@ private actor FakeMTA {
         let mta = FakeMTA()
         let relay = FeedRelay(interval: 20) { await mta.read($0) }
         try await withApp(relay: relay) { client in
-            // Before the first tick: nothing to pass on, so the phone tries the MTA
+            // Before the first tick, the MTA down: the request's read gets nothing to pass on,
+            // so the phone tries the MTA; the next within the tick doesn't read again
+            await mta.fail(true)
             try await client.execute(uri: "/feeds?name=nyct/gtfs-l", method: .get) { #expect($0.status == .badGateway) }
+            try await client.execute(uri: "/feeds?name=nyct/gtfs-l", method: .get) { #expect($0.status == .badGateway) }
+            #expect(await mta.reads == FeedRelay.feeds.count)
+            await mta.fail(false)
             await relay.refresh()
             try await client.execute(uri: "/feeds?name=nyct/gtfs-nqrw", method: .get) { response in
                 #expect(response.status == .ok)
@@ -224,7 +242,78 @@ private actor FakeMTA {
             try await client.execute(uri: "/feeds", method: .get) { #expect($0.status == .badRequest) }
             try await client.execute(uri: "/feeds?name=https://example.com", method: .get) { #expect($0.status == .notFound) }
         }
-        #expect(await mta.reads == FeedRelay.feeds.count)
+        #expect(await mta.reads == 2 * FeedRelay.feeds.count)
+    }
+
+    @Test func alertsAndOutagesAreReadLessOftenAndKeptLongerToMatch() async throws {
+        let reads = ReadCounts()
+        let relay = FeedRelay(interval: 20) { url in
+            await reads.add(url)
+            if url == AlertsFeed.url || url == OutagesFeed.url { return Data("[]".utf8) }
+            return GTFSFeed.feed([GTFSFeed.trip("R1", stops: [])])
+        }
+        let nqrw = try #require(FeedRelay.feeds["nyct/gtfs-nqrw"])
+        let start = Date.now
+        // Ticks a little off the 20 s still read each on its own
+        for (tick, offset) in [0, -0.5, 0.5, -0.3, 0.2, 0.1, 0].enumerated() {
+            await relay.refresh(now: start.addingTimeInterval(Double(tick) * 20 + offset))
+        }
+        #expect(await reads.of(nqrw) == 7)
+        #expect(await reads.of(AlertsFeed.url) == 3)
+        #expect(await reads.of(OutagesFeed.url) == 2)
+        // Read a minute ago, still served; train feeds only for two ticks
+        #expect(await relay.feed(named: "camsys/subway-alerts.json", now: start.addingTimeInterval(120 + 129)) != nil)
+        #expect(await relay.feed(named: "camsys/subway-alerts.json", now: start.addingTimeInterval(120 + 130)) == nil)
+        #expect(await relay.feed(named: "nyct/nyct_ene.json", now: start.addingTimeInterval(120 + 249)) != nil)
+        #expect(await relay.maxAge(of: nqrw) == 50)
+    }
+
+    @Test func aFeedReadTheSameKeepsWhatWasMadeFromIt() async throws {
+        let reads = ReadCounts()
+        let relay = FeedRelay(interval: 20) { url in
+            // Each train feed new each read, the alerts the same
+            let count = await reads.add(url)
+            if url == AlertsFeed.url || url == OutagesFeed.url { return Data("{\"entity\": []}".utf8) }
+            return GTFSFeed.feed([GTFSFeed.trip("R\(count)", stops: [])])
+        }
+        let start = Date.now
+        await relay.refresh(now: start)
+        let alerts = FeedRelay.Ask(name: "camsys/subway-alerts.json", gzip: true)
+        let trains = FeedRelay.Ask(name: "nyct/gtfs-nqrw", gzip: true)
+        _ = await relay.served(alerts, now: start)
+        let first = try #require(await relay.served(trains, now: start))
+        #expect(await relay.madeCount == 2)
+        await relay.refresh(now: start.addingTimeInterval(60))
+        // The alerts' still made, and its copy read again; the train feed's to make again
+        #expect(await relay.madeCount == 1)
+        #expect(await relay.feed(named: "camsys/subway-alerts.json", now: start.addingTimeInterval(60 + 129)) != nil)
+        let served = try #require(await relay.served(trains, now: start.addingTimeInterval(60)))
+        #expect(served.data != first.data)
+        #expect(await relay.madeCount == 2)
+    }
+
+    @Test func idleWithNoCountdownsTheFeedsArentReadTillAsked() async throws {
+        let mta = FakeMTA()
+        let relay = FeedRelay(interval: 20) { await mta.read($0) }
+        let store = try Store(directory: nil)
+        let start = Date.now
+        #expect(await !Poller.wantsFeeds(store: store, feeds: relay, now: start))
+        await relay.refresh(now: start)
+        _ = await relay.served(FeedRelay.Ask(name: "nyct/gtfs-nqrw"), now: start)
+        #expect(await Poller.wantsFeeds(store: store, feeds: relay, now: start.addingTimeInterval(FeedRelay.wantedFor - 1)))
+        #expect(await !Poller.wantsFeeds(store: store, feeds: relay, now: start.addingTimeInterval(FeedRelay.wantedFor)))
+        // A train countdown wants them whoever's asked
+        _ = try await store.upsert(testRegistration(), maxTotal: 10, maxPerOwner: 5)
+        #expect(await Poller.wantsFeeds(store: store, feeds: relay, now: start.addingTimeInterval(FeedRelay.wantedFor)))
+
+        // The first ask after the idle spell, its copy gone: read then, and answered
+        let later = start.addingTimeInterval(10 * 60)
+        #expect(await relay.feed(named: "nyct/gtfs-nqrw", now: later) == nil)
+        #expect(await relay.served(FeedRelay.Ask(name: "nyct/gtfs-nqrw"), now: later) != nil)
+        #expect(await mta.reads == 2 * FeedRelay.feeds.count)
+        // And the next not
+        #expect(await relay.served(FeedRelay.Ask(name: "nyct/gtfs-l"), now: later.addingTimeInterval(1)) != nil)
+        #expect(await mta.reads == 2 * FeedRelay.feeds.count)
     }
 
     @Test func feedsHaveARateLimitOfTheirOwn() async throws {

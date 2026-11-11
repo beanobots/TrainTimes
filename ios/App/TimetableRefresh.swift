@@ -7,10 +7,17 @@ extension TimetableStore {
 
     private static let log = AppLog(category: "Timetable")
 
-    /// The background refresh: a new timetable, and another refresh a day on.
+    /// The background refresh: a new timetable, the buses' too if it's due, and another refresh
+    /// a day on.
     static func backgroundRefresh() async {
-        await refresh()
+        await refreshAll()
         scheduleRefresh()
+    }
+
+    /// The subway's timetable and the buses', each if it's due.
+    static func refreshAll() async {
+        await refresh()
+        await buses.refresh()
     }
 
     /// Asks iOS for a background refresh when the downloaded one's due, so it stays current

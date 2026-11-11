@@ -27,6 +27,8 @@ struct DirectionsWidget: Widget {
                                                                     size: proxy.size))
                     } else if let board = entry.board {
                         TrainWidgetView(entry: board)
+                            // One of Trip's journeys as its Saved Route draws it
+                            .environment(\.routeLook, entry.showsRoute)
                             // In at once, without the fade WidgetKit gives a view that's new: after
                             // Favorite Stop's tap, its toggle already drew the same board
                             .transition(.identity)
@@ -41,10 +43,10 @@ struct DirectionsWidget: Widget {
                 .environment(\.widgetSize, proxy.size)
             }
             .coordinateSpace(.named(EndTripFace.space))
-            .containerBackground(Color.boardBackground, for: .widget)
+            .containerBackground(entry.showsRoute ? Color.routeBackground : Color.boardBackground, for: .widget)
         }
         .configurationDisplayName("Magic Widget")
-        .description("Plan a Quick Trip, see your favorite stop or a train near you, or show directions shared to Leeway from Apple Maps or Google Maps.")
+        .description("Automatically updates to show your current trip on your Home Screen and makes it easy to see nearby departures or start a favorite trip.")
         .supportedFamilies([.systemMedium])
         .contentMarginsDisabled()
     }
@@ -80,6 +82,11 @@ struct DirectionsEntry: TimelineEntry {
     /// On `.nearbyLine`, shown straight from Nearby as the only station: the one within
     /// `DirectionsProvider.nearbyRange`, or the nearest when none is.
     var onlyNearby: Bool { quickTrip.nearbyOnly == true }
+
+    /// Showing one of Trip's journeys, a Saved Route: drawn as that widget is (`routeLook`).
+    var showsRoute: Bool {
+        if case .saved = board?.tripSource { true } else { false }
+    }
 
     /// The Quick Trip and Favorite Stop buttons, as a board's ✕ goes back to.
     var home: DirectionsEntry {
@@ -276,10 +283,7 @@ struct DirectionsProvider: TimelineProvider {
     /// downloaded once for them all (`TrainService.sharingFeeds`).
     private func prefetch(_ options: [SharedTrip.Option], named name: StaticString) async {
         // The same train and change twice is fetched once anyway (`Provider.prefetch` reuses it)
-        let stops = options.reduce(into: Set<String>()) { stops, option in
-            stops.formUnion(TrainService.feedStops(for: option.selection, change: option.change,
-                                                   destination: option.directDestination))
-        }
+        let stops = options.reduce(into: Set<String>()) { $0.formUnion($1.feedStops) }
         await Signposts.interval(name) {
             await TrainService.sharingFeeds(atStops: stops) {
                 await withTaskGroup(of: Void.self) { group in
@@ -552,6 +556,7 @@ struct QuickTripView: View {
                 }
                 .toggleStyle(style)
                 .accessibilityLabel(favoriteLabel)
+                .accessibilityRemoveTraits(.isToggle)
                 .accessibilityAddTraits(.isButton)
             } else {
                 Button(intent: ShowQuickTripScreenIntent(.favorite, from: .home)) {
@@ -596,6 +601,7 @@ struct QuickTripView: View {
         .toggleStyle(style)
         .accessibilityLabel(label)
         .accessibilityHint(hint)
+        .accessibilityRemoveTraits(.isToggle)
         .accessibilityAddTraits(.isButton)
     }
 
@@ -723,12 +729,15 @@ struct QuickTripView: View {
                         TrainWidgetView(entry: board, still: true)
                     }
                 }
+                // As the journey's redraw shows it, a Saved Route
+                .environment(\.routeLook, true)
         }
         return Toggle(isOn: false, intent: StartSavedTripIntent(trip)) {
             Text(trip.title)
         }
         .toggleStyle(style)
         .accessibilityLabel(tripLabel(trip))
+        .accessibilityRemoveTraits(.isToggle)
         .accessibilityAddTraits(.isButton)
     }
 
@@ -782,6 +791,7 @@ struct QuickTripView: View {
                 Image(systemName: "arrow.right")
                     .font(.system(size: size * 0.6, weight: .bold))
                     .foregroundStyle(Color.boardGray)
+                    .accessibilityLabel("then")
                 ForEach(shownOnward, id: \.self) { LineBullet(route: $0, size: size) }
             }
             if more > 0 {
@@ -922,7 +932,8 @@ struct QuickTripView: View {
                     ForEach(result.station.routes.prefix(shown), id: \.self) { LineBullet(route: $0, size: size) }
                 }
             }
-            .accessibilityLabel("\(result.station.name), \(result.walkMinutes) minute walk")
+            .accessibilityLabel("\(result.station.name), \(Lines.spokenList(result.station.routes)), "
+                                + "\(result.walkMinutes) minute walk")
         case .bus(let bus):
             let lines = bus.lines(at: entry.date).map(\.line)
             tappable(PickNearbyBusPlaceIntent(bus)) {
@@ -1015,14 +1026,15 @@ struct QuickTripView: View {
             nearbyHeader(result, route: nil, back: entry.onlyNearby ? nil : ShowQuickTripScreenIntent(.nearby),
                          backLabel: "Back to the stations near you")
             NearbyLineGrid(items: routes) { route, tall in
+                let ends = result.station.ways(of: route, trains: [:], now: .now).compactMap { $0 }
+                    .map { $0.label.isEmpty ? $0.direction.rawValue : $0.label }
                 tappable(PickNearbyLineIntent(route, at: result, only: entry.onlyNearby)) {
-                    let ends = result.station.ways(of: route, trains: [:], now: .now).compactMap { $0 }
-                        .map { $0.label.isEmpty ? $0.direction.rawValue : $0.label }
                     NearbyLineCard(ends: ends, tall: tall) {
                         LineBullet(route: route, size: tall ? (routes.count > 3 ? 30 : 36) : 26)
                     }
                 }
-                .accessibilityLabel("\(Lines.name(of: route)) train")
+                .accessibilityLabel(ends.isEmpty ? Lines.spokenName(of: route)
+                                    : "\(Lines.spokenName(of: route)), \(Lines.joined(ends, by: "or"))")
             }
         }
         .buttonStyle(.plain)
@@ -1153,13 +1165,6 @@ struct QuickTripView: View {
 
 }
 
-/// Nearby's and Trip's colours on the buttons, from hues no line's bullet is near, so Favorite
-/// Stop's card, in its line's colour, never matches them.
-enum HomeTint {
-    static let nearby = Color(hex: 0x00A3A3)
-    static let trip = Color(hex: 0x7B61FF)
-}
-
 // MARK: - Previews
 
 extension DirectionsEntry {
@@ -1197,6 +1202,10 @@ extension DirectionsEntry {
     DirectionsEntry(date: .now, quickTrip: QuickTrip(screen: .nearby), nearby: .locationOff(asked: false))
     // Trip: four saved widgets to pick from
     DirectionsEntry(date: .now, quickTrip: QuickTrip(screen: .trips), trips: DirectionsEntry.previewTrips)
+    // A journey picked, drawn as its Saved Route is
+    DirectionsEntry(date: .now, board: TrainEntry.transferPreview(selection: Selection(stationID: "R34", routes: ["R"], direction: .north))
+        .shown(as: .saved("R from Prospect Av")))
+    DirectionsEntry(date: .now, board: TrainEntry.toHeraldSq.shown(as: .saved("To Herald Sq")))
     DirectionsEntry(date: .now, board: TrainEntry.toHeraldSq.shown(as: .quickTrip(to: "34 St-Herald Sq")))
     DirectionsEntry(date: .now, board: TrainEntry.transferPreview().shown(as: .quickTrip(to: "34 St-Herald Sq")))
     DirectionsEntry(date: .now, board: TrainEntry.preview.shown(as: .favorite))

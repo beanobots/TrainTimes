@@ -122,7 +122,7 @@ final class Diagnostics: NSObject, MXMetricManagerSubscriber, @unchecked Sendabl
 
     private static let log = AppLog(category: "Diagnostics")
 
-    private static var pendingDirectory: URL {
+    static var pendingDirectory: URL {
         URL.applicationSupportDirectory.appending(path: "Diagnostics/Pending", directoryHint: .isDirectory)
     }
 
@@ -206,18 +206,23 @@ final class Diagnostics: NSObject, MXMetricManagerSubscriber, @unchecked Sendabl
 
     /// Whether `sendPending` is going, so two don't send the same report.
     @MainActor private static var sending = false
+    /// When reports were last sent, or tried.
+    @MainActor private static var lastTried: Date?
 
     /// Sends the reports waiting, oldest first, stopping at the first the server can't take now
     /// for the next launch or return to the app to try again. Drops all of them once diagnostics
-    /// aren't shared, and any older than `pendingLifetime`.
-    @MainActor static func sendPending() async {
+    /// aren't shared, and any older than `pendingLifetime`. `retrying`, on coming back to the
+    /// app: not within 5 minutes of the last try, as at launch, moments before.
+    @MainActor static func sendPending(retrying: Bool = false) async {
         guard !sending else { return }
+        if retrying, let lastTried, lastTried.isWithin(5 * 60, before: .now) { return }
         sending = true
         defer { sending = false }
         let manager = FileManager.default
         guard let files = try? manager.contentsOfDirectory(at: pendingDirectory, includingPropertiesForKeys: [.creationDateKey]),
               !files.isEmpty else { return }
         guard isSharing else { return discardPending() }
+        lastTried = .now
         let dated = files.map { file in
             (file, (try? file.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast)
         }

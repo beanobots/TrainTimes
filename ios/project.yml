@@ -6,6 +6,12 @@ options:
     # WidgetKit push updates (the push server reloading widgets with the countdown's times), and
     # New Trip's Show on Widget as the tab bar's accessory (26.1)
     iOS: "26.1"
+# ONNX Runtime (MIT), for the walking voice's model (KokoroVoice): its last release is on main,
+# not a tag
+packages:
+  onnxruntime:
+    url: https://github.com/microsoft/onnxruntime-swift-package-manager
+    revision: b7fb7f7dea8a2469e6335d95a61b8f36d0dc83b2
 settings:
   base:
     SWIFT_VERSION: "5.0"
@@ -17,6 +23,16 @@ targets:
   Leeway:
     type: application
     platform: iOS
+    # A shared Leeway scheme: Xcode Cloud only builds shared schemes, and the ones Xcode makes
+    # on its own aren't. Its tests are run locally only, not by Xcode Cloud.
+    # From the command line, `xcodebuild test ... -collect-test-diagnostics never`: else any
+    # failure or Swift Testing known issue has xcodebuild gather the simulator's logs for the
+    # whole run after the tests (`simctl diagnose`, up to 10 minutes)
+    scheme:
+      testTargets:
+        - LeewayTests
+        - LeewayUITests
+      gatherCoverageData: true
     sources:
       - App
       # MapLayout.swift is the server's alone now, for its tests: nothing in the app draws it
@@ -35,6 +51,10 @@ targets:
       - target: LeewayWidget
         embed: true
       - target: ShareExtension
+        embed: true
+      - target: VoiceDownloader
+        embed: true
+      - target: Kokoro
         embed: true
     info:
       path: App/Info.plist
@@ -60,9 +80,16 @@ targets:
           - dev.dctp.leeway.timetable
         # fetch: as above; location: following a walk to and from the train with the screen
         # off, from Go (WalkSession), with the blue location pill
+        # audio: walking directions spoken with the screen off (WalkVoice)
         UIBackgroundModes:
           - fetch
           - location
+          - audio
+        # The walking voice's asset pack, hosted by Apple and fetched as Leeway installs
+        # (VoicePack, VoiceDownloader)
+        BAAppGroupID: group.dev.dctp.leeway
+        BAHasManagedAssetPacks: true
+        BAUsesAppleHosting: true
         # Stations near you, in the Nearby tab and on the Nearby widget; walks to and from trains
         NSLocationWhenInUseUsageDescription: Your location shows the stations near you and their next trains, in the app and on the Nearby widget, and the turns on your walk to and from the train.
         # With Precise Location off, a walk asks for it just for now (WalkFollower)
@@ -70,6 +97,9 @@ targets:
           Walking: Turn-by-turn walking directions need your precise location to tell when you've reached a turn or the station.
         # New Trip's search finds your contacts' addresses by name
         NSContactsUsageDescription: Your contacts' addresses come up when you search for someone in New Trip, for a trip to or from them.
+        # New Trip offers today's events with a place as where to go. Calendar can't be read
+        # without full access
+        NSCalendarsFullAccessUsageDescription: Today's events with a place come up in New Trip, for a trip to them. Your calendar stays on your iPhone.
         UILaunchScreen: {}
         # Only HTTPS, which is exempt: no export compliance question on each upload
         ITSAppUsesNonExemptEncryption: false
@@ -135,6 +165,107 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.dctp.leeway.widget
+        TARGETED_DEVICE_FAMILY: "1"
+        SKIP_INSTALL: YES
+  # The app's unit, performance and network tests, run inside the app (`TestHost` keeps its
+  # launch quiet). Fixtures are saved feeds and server responses, played back by `TestNetwork`
+  LeewayTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests/LeewayTests
+    dependencies:
+      - target: Leeway
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.dctp.leeway.tests
+        TARGETED_DEVICE_FAMILY: "1"
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/Leeway.app/Leeway
+        BUNDLE_LOADER: $(TEST_HOST)
+        GENERATE_INFOPLIST_FILE: YES
+  # Screens driven as you would, for smoothness (hitches while panning and scrolling) and launch
+  LeewayUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - Tests/LeewayUITests
+    dependencies:
+      - target: Leeway
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.dctp.leeway.uitests
+        TARGETED_DEVICE_FAMILY: "1"
+        TEST_TARGET_NAME: Leeway
+        GENERATE_INFOPLIST_FILE: YES
+  # The walking voice's model runner and words (KokoroVoice, Phonemizer), with ONNX Runtime:
+  # a framework of its own, as ONNX Runtime's static library linked into the app stops Xcode's
+  # previews launching it
+  Kokoro:
+    type: framework
+    platform: iOS
+    sources:
+      - Kokoro
+    dependencies:
+      - package: onnxruntime
+    info:
+      path: Kokoro/Info.plist
+      properties:
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.dctp.leeway.kokoro
+        TARGETED_DEVICE_FAMILY: "1"
+        SKIP_INSTALL: YES
+        GENERATE_INFOPLIST_FILE: YES
+  # Voice Lab: the Voice Mixer on the Mac, for mixing walking voices at the desk with the same
+  # Kokoro, phonemes and mixing as the phone, from ios/VoicePack; sends a mix to the simulator or
+  # an iPhone as a voice file. Never shipped: not sandboxed, signed to run locally
+  VoiceLab:
+    type: application
+    platform: macOS
+    deploymentTarget: "26.0"
+    sources:
+      - VoiceLab
+      - Kokoro/KokoroVoice.swift
+      - Kokoro/Phonemizer.swift
+      - App/Voice/VoiceMix.swift
+      - App/Voice/SpokenText.swift
+    dependencies:
+      - package: onnxruntime
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.dctp.leeway.voicelab
+        PRODUCT_NAME: Voice Lab
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+        ENABLE_APP_SANDBOX: NO
+        ENABLE_HARDENED_RUNTIME: NO
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"
+        DEVELOPMENT_TEAM: ""
+  # Downloads the walking voice's asset pack while the app isn't running (VoicePack)
+  VoiceDownloader:
+    type: extensionkit-extension
+    platform: iOS
+    sources:
+      - VoiceDownloader
+    info:
+      path: VoiceDownloader/Info.plist
+      properties:
+        CFBundleDisplayName: Leeway
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        EXAppExtensionAttributes:
+          EXExtensionPointIdentifier: com.apple.background-asset-downloader-extension
+    entitlements:
+      path: Config/VoiceDownloader.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.dev.dctp.leeway
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.dctp.leeway.voicedownloader
         TARGETED_DEVICE_FAMILY: "1"
         SKIP_INSTALL: YES
   # The Share sheet's action for Apple Maps and Google Maps directions, which the Transit

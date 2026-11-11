@@ -54,7 +54,8 @@ enum ActivityPush {
 
     /// Each countdown's token and state watchers.
     private static var watchers: [String: [Task<Void, Never>]] = [:]
-    /// Countdowns registered (or tried) since launch, so a token iOS gives again isn't sent again.
+    /// Countdowns registered (or tried) since launch, so a token iOS gives again isn't sent again,
+    /// and their backoff holds. One registered before launch is skipped by its record (`isRegistered`).
     private static var tried: Set<String> = []
     /// Activity ID and token of registrations under way.
     private static var inFlight: Set<String> = []
@@ -65,8 +66,9 @@ enum ActivityPush {
     }
 
     /// Registers `activity` with each push token iOS gives it, and forgets it if it ends by
-    /// itself (swiped away, or ended by the push server after 30 minutes). `started`: when the
-    /// app started it.
+    /// itself (swiped away, or ended by the push server after 30 minutes); swiped away, it's
+    /// stopped as its walk button used to (`TrainActivityController.swipedAway`). `started`: when
+    /// the app started it.
     static func watch(_ activity: Activity<TrainActivityAttributes>, started: Date? = nil) {
         let id = activity.id
         if let started, records[id]?.started == nil { records[id, default: Record()].started = started }
@@ -79,6 +81,8 @@ enum ActivityPush {
         let states = Task {
             for await state in activity.activityStateUpdates where state == .ended || state == .dismissed {
                 ended(id)
+                // The app stops watching those it ends first, so dismissed here is a swipe
+                if state == .dismissed { await TrainActivityController.swipedAway(activity) }
                 break
             }
         }
@@ -92,9 +96,15 @@ enum ActivityPush {
         Task { await unregister(token) }
     }
 
+    /// When `resume` last ran.
+    private static var resumed: Date?
+
     /// At launch and on becoming active: watches countdowns still running, forgets ended ones,
-    /// and registers any the server doesn't have yet.
+    /// and registers any the server doesn't have yet. Once for both at launch, which come
+    /// moments apart.
     static func resume() {
+        if let resumed, resumed.isWithin(10, before: .now) { return }
+        resumed = .now
         let running = running
         let ids = Set(running.map(\.id))
         for id in records.keys where !ids.contains(id) { ended(id) }
@@ -102,8 +112,8 @@ enum ActivityPush {
         Task { await retry() }
     }
 
-    /// Registers running countdowns the server doesn't have, or not yet since launch, and sends
-    /// deletes that failed. `force` ignores the backoff, for the background refresh.
+    /// Registers running countdowns the server doesn't have as they are now (`isRegistered`), and
+    /// sends deletes that failed. `force` ignores the backoff, for the background refresh.
     static func retry(force: Bool = false) async {
         for token in pendingDeletes {
             // Already taken by another retry running at the same time (the background refresh
@@ -119,8 +129,7 @@ enum ActivityPush {
             let id = activity.id
             guard let token = records[id]?.token ?? activity.pushToken.map(CountdownLookup.hex) else { continue }
             let record = records[id]
-            if tried.contains(id) && record?.serverBacked == true && record?.token == token
-                && record?.widgetToken == widgetToken && record?.alertKinds == alertKinds { continue }
+            if isRegistered(id, token: token, widgetToken: widgetToken, alertKinds: alertKinds) { continue }
             if !force, tried.contains(id), let retryAfter = record?.retryAfter, retryAfter > now { continue }
             records[id, default: Record()].token = token
             await register(activity, token: token)
@@ -132,7 +141,7 @@ enum ActivityPush {
     /// slow network running this past iOS's time for it doesn't lose it.
     static func backgroundRefresh() async {
         scheduleRefreshIfNeeded()
-        await TrainActivityController.refresh()
+        await TrainActivityController.refresh(retryingPush: false)
         resume()
         guard !Task.isCancelled else { return }
         await retry(force: true)
@@ -157,8 +166,14 @@ enum ActivityPush {
         let old = records[id]?.token
         // For widgets showing its train, to find its state as the server last pushed it
         TrainActivityController.share(activity)
-        // The token it already has, sent since launch: `retry` handles any failure
-        if old == token && tried.contains(id) { return }
+        // The token it already has, sent since launch (`retry` handles any failure), or the
+        // server has it as it is now, as iOS gives the same token again after a relaunch
+        if old == token {
+            if tried.contains(id) { return }
+            if isRegistered(id, token: token, widgetToken: await currentWidgetToken(), alertKinds: currentAlertKinds()) {
+                return
+            }
+        }
         records[id, default: Record()].token = token
         await register(activity, token: token)
         // Only after the new token's registered, so pushes don't stop in between
@@ -169,6 +184,14 @@ enum ActivityPush {
     /// moves it on as its train's due (`TrainActivityController.content`).
     static func isServerBacked(_ id: String) -> Bool {
         records[id]?.serverBacked == true
+    }
+
+    /// Whether `id`'s last registration, saved across launches, succeeded with `token`, the
+    /// widget token and the alert kinds there are now, so there's nothing new to send.
+    private static func isRegistered(_ id: String, token: String, widgetToken: String?, alertKinds: [Int]) -> Bool {
+        guard let record = records[id] else { return false }
+        return record.serverBacked && record.token == token && record.widgetToken == widgetToken
+            && record.alertKinds == alertKinds
     }
 
     /// The countdown posted again if whether the server has it changed, for its stale date; not
@@ -195,10 +218,11 @@ enum ActivityPush {
             started: records[id]?.started,
             alertKinds: alertKinds,
             state: activity.content.state,
-            change: activity.attributes.change,
+            // Without the plans, which the server doesn't use (and older activities still have)
+            change: activity.attributes.change?.forCountdown,
             widgetToken: widgetToken,
             // Without its changes to trains, which the server doesn't use and refuses
-            bus: activity.attributes.bus.map { var bus = $0; bus.changes = nil; return bus }
+            bus: activity.attributes.bus?.forCountdown
         )
         let prefix = String(token.prefix(8))
         do {

@@ -92,6 +92,22 @@ final class WidgetStore {
     }
 
     func update(_ widget: SavedWidget) { change { $0.update(widget) } }
+
+    /// After setup: the first route, made at launch before setup asked, departs from Home Station
+    /// (or the home bus stop) both ways, as a medium widget. Not once it's been made your own.
+    func startFirstRoute(train: Selection, bus: BusChoice?) {
+        guard let first = saved.widget(SavedWidget.firstID), !first.isNamed, first.change == nil,
+              first.destinationID == nil, first.kind != .bike else { return }
+        var route = if let bus {
+            SavedWidget.bus(bus)
+        } else {
+            SavedWidget(selection: train, bothWays: true)
+        }
+        route.id = SavedWidget.firstID
+        route.bothWays = true
+        update(route)
+        setLook(.medium, for: route.id)
+    }
     func add(_ widget: SavedWidget) { change { $0.add(widget) } }
     func delete(_ id: UUID) {
         change { $0.delete(id) }

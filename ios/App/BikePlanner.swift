@@ -73,14 +73,14 @@ enum BikePlanner {
     /// with the subway too if `subway`. None walks more than `walkRange` to or from a dock (or a
     /// train). None if Citi Bike's feed can't be had.
     static func plan(from start: CLLocation, to end: CLLocation, kind: CitiBike.Kind, subway: Bool,
-                     walkRange: Double, at now: Date = .now) async -> [BikeTrip] {
+                     walkRange: Double, at now: Date = AppClock.now) async -> [BikeTrip] {
         await planned(from: start, to: end, kind: kind, subway: subway, walkRange: walkRange, at: now).trips
     }
 
     /// `plan`'s trips, and where there are none, why, if it's that there's no dock or the ride's
     /// too long.
     static func planned(from start: CLLocation, to end: CLLocation, kind: CitiBike.Kind, subway: Bool,
-                        walkRange: Double, at now: Date = .now) async -> (trips: [BikeTrip], none: NoBike?) {
+                        walkRange: Double, at now: Date = AppClock.now) async -> (trips: [BikeTrip], none: NoBike?) {
         guard let docks = await CitiBike.docks() else { return ([], nil) }
         let timetable = subway ? TimetableStore.load(now: now) : nil
         let pickups = docksToTry(docks, near: start, within: walkRange) { $0.available(kind) }
@@ -644,7 +644,7 @@ extension BikePlanner {
     /// time the rides (`NoBike.maps`).
     static func plannedOwn(from start: CLLocation, to end: CLLocation, endName: String, kind: CitiBike.Kind,
                            carry: BikeCarry, subway: Bool, walkRange: Double,
-                           at now: Date = .now) async -> (trips: [BikeTrip], none: NoBike?) {
+                           at now: Date = AppClock.now) async -> (trips: [BikeTrip], none: NoBike?) {
         let home = CitiBike.Dock.place("Start", start)
         let there = CitiBike.Dock.place(endName, end)
         var found: [OwnFound] = []
@@ -714,6 +714,9 @@ extension BikePlanner {
                               let arrival = TripPlanner.arrival(of: train, from: station, to: end, at: atStation,
                                                                 timetable: timetable) {
                         arrives = arrival.timeIntervalSince(now)
+                    } else {
+                        // No train timed from then: the guessed ride's arrival, by the real ride
+                        arrives += ride - guess(from: trip.from, to: trip.to, kind: kind)
                     }
                 } else {
                     arrives += ride - guess(from: trip.from, to: trip.to, kind: kind)

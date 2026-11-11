@@ -29,6 +29,11 @@ enum WalkCosts {
     static let turnReach = 8.0
     /// Degrees a way turns before it's a turn.
     static let turning = 30.0
+    /// Seconds for crossing both streets at a corner the street you're on first: the street
+    /// ahead first is the way people do it, straight on and then turning to cross, so it's
+    /// said simply. More than the crossings' widths differ by, as both orders have the
+    /// junction's one light.
+    static let turnFirst = 5.0
 
     // A crossing, per carriageway crossed
     static let perMetreWide = 0.8
@@ -126,6 +131,43 @@ enum WalkCosts {
     /// Steps take this much longer than the flat.
     static let stepsTimes = 1.5
 
+    // Night: crime against people outdoors (`WalkGraph.crime`), dark paths and empty streets,
+    // on Balanced and Safest only. A street's crime counts by how far over its neighbours'
+    // it is, so a walk takes the better of the streets beside each other, not another way
+    // round a part of town.
+    /// Per crime per 100 m over the neighbours' in three years, walking along it, past
+    /// `crimeFree` and up to `crimesAtMost`.
+    static let perCrime = 15.0
+    static let crimesAtMost = 8.0
+    /// Per crime over the neighbours' at a junction's corners in three years, crossing there.
+    static let perCornerCrime = 6.0
+    static let cornerCrimesAtMost = 10.0
+    /// Crimes over the neighbours' (per 100 m, or at a corner) that don't count: about one in
+    /// three years, which says little about a street.
+    static let crimeFree = 0.5
+    /// How much crime counts at each part of the day: a little by day, most of all late.
+    static func crimeShare(_ band: WalkGraph.Band) -> Double {
+        switch band {
+        case .day: 0.25
+        case .evening: 0.75
+        case .late: 1
+        }
+    }
+    /// After dark (evening and late), per 100 m: a path away from the street lights.
+    static let dark = 60.0
+    /// 1–6, per 100 m: a path in a park, which is shut.
+    static let parkClosed = 120.0
+    /// After dark, per 100 m: a street with no shops, less with some, none from `busy` shops
+    /// per 100 m, where there are people about.
+    static let quiet = 10.0
+    static let busy = 2.0
+    /// After dark, a crossing with no light has its risk this many times: drivers see someone
+    /// crossing less well, so a lit way's kept to rather than traded for a darker one.
+    static let unsignalledDarkTimes = 1.5
+    /// Seconds of night cost (unweighted) a walk must keep clear of, against the way it'd go
+    /// without them, to be said to go "via safer streets": more than a short empty block.
+    static let saferAtNight = 20.0
+
     /// How much risk counts against time, by preference.
     static func weight(_ preference: WalkPreference) -> Double {
         switch preference {
@@ -176,10 +218,16 @@ final class WalkRouter {
     /// it came to, or -1: carried over crossings, crosswalks and the short bits between, so a
     /// turn made through them is still a turn.
     private var heading: [Int32] = []
+    /// Whether, since that stretch of sidewalk, the walk's crossed its street (`turnFirst`):
+    /// carried as `heading` is.
+    private var crossedAlong: [Bool] = []
     private var stamp: [UInt32] = []
     private var generation: UInt32 = 0
     /// The blocks along the way a walk was going (`Options.along`), for this search.
     private var followed: Set<Int> = []
+    /// When the walk's walked, for the night costs (`nightRisk`): nil while finding the fastest
+    /// route, which they don't touch, and on Fastest.
+    private var night: Options.Time?
     /// Each block's sides' metres as walked, corner to corner (`sideMetres`), by block × 2,
     /// and 1 more for its right; 0 till worked out.
     private var walkedMetres: [Float] = []
@@ -261,6 +309,28 @@ final class WalkRouter {
         /// `WalkCosts.followShare` of what they would, so it's rejoined unless another way's
         /// clearly better, rather than a new one picked between two much the same.
         var along: [Walk.Point] = []
+        /// When it's walked, for the night costs.
+        var time = Time.midday
+
+        /// When a walk's walked: crime counts for more after dark, dark paths and empty streets
+        /// only then, and parks are shut 1–6.
+        struct Time: Hashable, Sendable {
+            var band: WalkGraph.Band
+            var parksClosed: Bool
+            static let midday = Time(hour: 12)
+
+            init(hour: Int) {
+                band = WalkGraph.Band(hour: hour)
+                parksClosed = 1..<6 ~= hour
+            }
+
+            /// At `date`, in New York.
+            init(_ date: Date) {
+                var calendar = Calendar(identifier: .gregorian)
+                calendar.timeZone = TimeZone(identifier: "America/New_York") ?? .current
+                self.init(hour: calendar.component(.hour, from: date))
+            }
+        }
     }
 
     /// One piece of a route.
@@ -285,6 +355,9 @@ final class WalkRouter {
         var weight = 0.0
         /// The fastest route's seconds, for the budget.
         var fastestSeconds = 0.0
+        /// After dark, whether the night costs took it another way, clear of more crime, dark
+        /// paths or empty streets than `WalkCosts.saferAtNight` (`nightCost`): "via safer streets".
+        var saferAtNight = false
     }
 
     struct Route: Sendable {
@@ -300,7 +373,8 @@ final class WalkRouter {
     /// the fastest route's time. Nil where either's off the graph, or they aren't joined.
     func route(from start: Walk.Point, to end: Walk.Point, options: Options = Options()) -> Route? {
         followed = blocks(along: options.along)
-        defer { followed = [] }
+        night = nil
+        defer { followed = []; night = nil }
         // Where it starts and ends doesn't change with the weight: found once for every search
         let starts = snaps(near: start), ends = snaps(near: end)
         guard let fastest = search(from: start, to: end, starts: starts, ends: ends,
@@ -309,9 +383,22 @@ final class WalkRouter {
         if options.preference == .fastest { return finish(fastest, fastestSeconds: fastest.stats.seconds) }
         let budget = WalkCosts.budget(options.preference, fastest: fastest.stats.seconds)
         var weight = WalkCosts.weight(options.preference)
+        night = options.time
         for _ in 0..<4 {
-            if let route = search(from: start, to: end, starts: starts, ends: ends, weight: weight, options: options),
+            if var route = search(from: start, to: end, starts: starts, ends: ends, weight: weight, options: options),
                route.stats.seconds <= budget {
+                if options.time.band != .day {
+                    // The way it'd go without the night costs, to say whether they changed it
+                    night = nil
+                    let without = search(from: start, to: end, starts: starts, ends: ends, weight: weight, options: options)
+                    night = options.time
+                    if let without, nightCost(of: without, options: options) - nightCost(of: route, options: options)
+                        >= WalkCosts.saferAtNight {
+                        var stats = route.stats
+                        stats.saferAtNight = true
+                        route = Route(legs: route.legs, stats: stats, costs: route.costs)
+                    }
+                }
                 return finish(route, fastestSeconds: fastest.stats.seconds)
             }
             weight /= 2
@@ -339,6 +426,32 @@ final class WalkRouter {
             }
         }
         return found
+    }
+
+    /// What the night costs add to a route, unweighted (`night` as it is): its crime, dark
+    /// paths, empty streets and unlit crossings after dark.
+    private func nightCost(of route: Route, options: Options) -> Double {
+        let saved = night
+        defer { night = saved }
+        func total() -> Double {
+            route.legs.reduce(0) { sum, leg in
+                switch leg {
+                case let .side(block, left, _, _, fromAlong, toAlong):
+                    let cost = sideCost(block: block, left: left, weight: 1, options: options)
+                    guard cost.isFinite else { return sum }
+                    return sum + cost * min(1, abs(toAlong - fromAlong) / max(graph.length(of: block), 1))
+                case let .cross(node, arm, _, _):
+                    // Between the corners either side of its arm, whichever way over
+                    return sum + (crossCost(node: node, arm: arm, from: arm, to: graph.previous(arm, at: node), weight: 1,
+                                            stepFree: options.stepFree) ?? 0)
+                case .access:
+                    return sum
+                }
+            }
+        }
+        let withNight = total()
+        night = nil
+        return withNight - total()
     }
 
     private func finish(_ route: Route, fastestSeconds: Double) -> Route {
@@ -529,6 +642,7 @@ final class WalkRouter {
             cost = [Float](repeating: .infinity, count: states)
             parent = [Int32](repeating: -1, count: states)
             heading = [Int32](repeating: -1, count: states)
+            crossedAlong = [Bool](repeating: false, count: states)
             stamp = [UInt32](repeating: 0, count: states)
             generation = 0
         }
@@ -546,13 +660,15 @@ final class WalkRouter {
             let dx = cornerX[corner] - endXY.0, dy = cornerY[corner] - endXY.1
             return (dx * dx + dy * dy).squareRoot() / Float(WalkCosts.pace) * lowest
         }
-        func relax(_ state: Int, _ value: Double, from previous: Int32, _ move: Move, heading came: Int32) {
+        func relax(_ state: Int, _ value: Double, from previous: Int32, _ move: Move, heading came: Int32,
+                   crossed: Bool = false) {
             let v = Float(value)
             if stamp[state] != generation || v < cost[state] {
                 stamp[state] = generation
                 cost[state] = v
                 parent[state] = previous
                 heading[state] = came
+                crossedAlong[state] = crossed
                 heap.push(Entry(f: v + h(state / 3), state: Int32(state)))
             }
         }
@@ -607,6 +723,16 @@ final class WalkRouter {
             let g = Double(cost[state])
             let corner = state / 3, came = state % 3
             let into = heading[state]
+            // Over the street come along at a corner, then the other: the street ahead first
+            // instead (`turnFirst`). A crossing over `name`, `metres` across, as a crosswalk or
+            // at a junction: whether the street come along's crossed after it, and the extra
+            let along = into >= 0 ? graph.blockName[Int(graph.armBlock[Int(into)])] : 0
+            let crossed = crossedAlong[state]
+            func over(_ name: UInt32, metres: Double) -> (crossed: Bool, extra: Double) {
+                guard metres >= 1, name != 0, along != 0 else { return (crossed, 0) }
+                if name == along { return (true, 0) }
+                return (crossed, crossed ? WalkCosts.turnFirst : 0)
+            }
             if let out = exits[corner] {
                 for (exitCost, snap) in out where g + exitCost < (best?.cost ?? .infinity) {
                     best = (g + exitCost, Int32(state), snap, nil)
@@ -632,23 +758,30 @@ final class WalkRouter {
                 // A stretch of sidewalk turns from the last one; crosswalks and bits between
                 // carry it on
                 var onward = into
+                var crossedOn = crossed
                 if Self.setsHeading(graph, block) {
                     if into >= 0 { step += turnCost(into: Int(into), outOf: arm) }
                     onward = Int32(arrive == 0 ? destination : graph.next(destination, at: graph.node(ofArm: destination)))
+                    crossedOn = false
+                } else if graph.flags(of: block).contains(.crosswalk) {
+                    let crossing = over(graph.blockName[block], metres: graph.length(of: block))
+                    step += crossing.extra
+                    crossedOn = crossing.crossed
                 }
-                relax(destination * 3 + arrive, g + step, from: Int32(state), move, heading: onward)
+                relax(destination * 3 + arrive, g + step, from: Int32(state), move, heading: onward, crossed: crossedOn)
             }
             // Between a city corner and its OSM sidewalk junction, either way
             let linked = graph.cornerLink[corner]
             if linked != WalkGraph.noLink {
                 let step = linkCost(corner: corner, node: Int(linked))
                 for arm in graph.arms(of: Int(linked)) {
-                    relax(arm * 3 + 2, g + step, from: Int32(state), .start, heading: into)
+                    relax(arm * 3 + 2, g + step, from: Int32(state), .start, heading: into, crossed: crossed)
                 }
             }
             if let corners = linkedCorners[Int32(node)] {
                 for other in corners {
-                    relax(Int(other) * 3 + 2, g + linkCost(corner: Int(other), node: node), from: Int32(state), .start, heading: into)
+                    relax(Int(other) * 3 + 2, g + linkCost(corner: Int(other), node: node), from: Int32(state), .start,
+                          heading: into, crossed: crossed)
                 }
             }
             // Over either arm, at a junction (or a signalled crosswalk mid-block)
@@ -659,7 +792,9 @@ final class WalkRouter {
                       let step = crossCost(node: node, arm: arm, from: corner, to: destination, weight: weight,
                                            stepFree: options.stepFree)
                 else { continue }
-                relax(destination * 3 + 2, g + step, from: Int32(state), move, heading: into)
+                let crossing = over(graph.blockName[Int(graph.armBlock[arm])], metres: crossingMetres(from: corner, to: destination))
+                relax(destination * 3 + 2, g + step + crossing.extra, from: Int32(state), move, heading: into,
+                      crossed: crossing.crossed)
             }
         }
         guard let best else { return nil }
@@ -701,9 +836,9 @@ final class WalkRouter {
         var seconds = metres / WalkCosts.pace
         if flags.contains(.steps) { seconds *= WalkCosts.stepsTimes }
         let isStreet = graph.class(of: block) == .walk
-        guard isStreet || flags.contains(.osmSidewalk) else { return seconds }
+        guard isStreet || flags.contains(.osmSidewalk) else { return seconds + weight * nightRisk(block: block) * metres / 100 }
         if isStreet && graph.isCovered(block, left: left) { return .infinity }
-        var risk = WalkCosts.besideTraffic
+        var risk = WalkCosts.besideTraffic + nightRisk(block: block)
         if flags.contains(.truckLocal) || flags.contains(.truckThrough) { risk += WalkCosts.besideTruckRoute }
         risk += WalkCosts.speed(Int(graph.blockSpeed[block])).beside
         if graph.blockLanes[block] >= 4 { risk += WalkCosts.besideManyLanes }
@@ -714,6 +849,29 @@ final class WalkRouter {
         if isStreet && graph.offset(of: block, left: left) == 0 && !flags.contains(.median) { risk += WalkCosts.noSidewalk }
         if isStreet && graph.isUnmapped(block, left: left) { risk += WalkCosts.unmappedSide }
         return seconds + weight * risk * metres / 100
+    }
+
+    /// A block's night risk per 100 m walked along it, at the walk's time (`night`): its crime,
+    /// and after dark a dark path, a shut park, a street with nobody about.
+    private func nightRisk(block: Int) -> Double {
+        guard let night else { return 0 }
+        let over = min(max(0, graph.crime(of: block, in: night.band) - WalkCosts.crimeFree), WalkCosts.crimesAtMost)
+        var risk = WalkCosts.perCrime * over * WalkCosts.crimeShare(night.band)
+        guard night.band != .day else { return risk }
+        let path = graph.night(of: block)
+        if path.contains(.dark) { risk += WalkCosts.dark }
+        if path.contains(.park) && night.parksClosed { risk += WalkCosts.parkClosed }
+        if graph.class(of: block) == .walk || graph.flags(of: block).contains(.osmSidewalk) {
+            risk += WalkCosts.quiet * max(0, 1 - graph.shops(of: block) / WalkCosts.busy)
+        }
+        return risk
+    }
+
+    /// The night risk of crossing where there's been `crime` over the neighbours' at the corners.
+    private func nightRisk(crossingCrime crime: Double) -> Double {
+        guard let night else { return 0 }
+        return WalkCosts.perCornerCrime * min(max(0, crime - WalkCosts.crimeFree), WalkCosts.cornerCrimesAtMost)
+            * WalkCosts.crimeShare(night.band)
     }
 
     /// What's crossed: the street's measure and traffic, and what's there for someone on foot.
@@ -734,6 +892,10 @@ final class WalkRouter {
         var crashes = 0
         /// No curb ramp at an end.
         var noRamp = false
+        /// Its night risk, from the crime at its corners (`nightRisk(crossingCrime:)`).
+        var night = 0.0
+        /// Crossed after dark (`WalkCosts.unsignalledDarkTimes`).
+        var dark = false
         /// The fixed part of a crossing's cost to pay: all of it, or half from or to a median.
         var fixed: Double
     }
@@ -756,6 +918,7 @@ final class WalkRouter {
             let extra = WalkCosts.unsignalledShortExtra + (WalkCosts.unsignalledExtra - WalkCosts.unsignalledShortExtra) * share
             risk = risk * times + extra
             if crossing.unmarked { risk += WalkCosts.unmarked }
+            if crossing.dark { risk *= WalkCosts.unsignalledDarkTimes }
             if isWide {
                 risk += WalkCosts.unsignalledWideExtra
                 floor += WalkCosts.unsignalledWideExtra * 0.5
@@ -774,6 +937,7 @@ final class WalkRouter {
         if crossing.priority { risk += WalkCosts.priorityIntersection }
         risk += WalkCosts.perCrash * Double(min(crossing.crashes, WalkCosts.crashesAtMost))
         if crossing.refuge { risk *= WalkCosts.refugeShare }
+        risk += crossing.night
         let wait = signal.contains(.signal) ? WalkCosts.signalWait : 0
         let ramp = stepFree && crossing.noRamp ? WalkCosts.noRamp : 0
         let seconds = width / WalkCosts.pace
@@ -797,6 +961,8 @@ final class WalkRouter {
                         flags: flags, signal: signal, ramp: bits.contains(.ramp), unmarked: bits.contains(.unmarked),
                         refuge: refuge, priority: safety.contains(.priority), crashes: Int(graph.blockCrashes[block]),
                         noRamp: !safety.contains(.rampAtStart) || !safety.contains(.rampAtEnd),
+                        night: night.map { nightRisk(crossingCrime: graph.crime(of: block, in: $0.band)) } ?? 0,
+                        dark: night.map { $0.band != .day } ?? false,
                         fixed: refuge ? WalkCosts.fixed / 2 : WalkCosts.fixed)
     }
 
@@ -848,6 +1014,8 @@ final class WalkRouter {
             priority: graph.safety(ofNode: node).contains(.priority), crashes: Int(graph.nodeCrashes[node]),
             // Off a sidewalk corner with no ramp; a median's level with the street
             noRamp: (fromKind == .sidewalk && !graph.hasRamp(from)) || (toKind == .sidewalk && !graph.hasRamp(to)),
+            night: night.map { nightRisk(crossingCrime: graph.crime(ofNode: node, in: $0.band)) } ?? 0,
+            dark: night.map { $0.band != .day } ?? false,
             fixed: fixed)
         return cost(of: crossing, weight: weight, stepFree: stepFree) + unmapped
     }

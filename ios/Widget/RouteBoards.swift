@@ -1,11 +1,12 @@
+import CoreLocation
 import SwiftUI
 import WidgetKit
 
-// The Saved Route widget's bus and Citi Bike boards: what a saved bus or dock widget shows in
+// The Saved Route widget's bus boards and the Citi Bike widget's dock boards: what they show in
 // place of trains (`TrainEntry.route`), drawn as the subway's Saved Route boards are (`routeLook`):
 // a card until a tap, then the times or counts, with a ✕ back to the card.
 
-/// A bus or a Citi Bike dock's Saved Route, fetched.
+/// A Saved Route's bus, or the Citi Bike widget's dock, fetched.
 enum RouteTimes {
     case bus(SavedBusBoard)
     case dock(SavedDockBoard)
@@ -18,11 +19,12 @@ enum RouteTimes {
         }
     }
 
-    /// Under the place on its card: "to Cobble Hill", "Both directions", "Citi Bike dock".
+    /// Under the place on its card: "to Cobble Hill", "Both directions", "Citi Bike dock";
+    /// for the nearest dock, which its card doesn't name, what VoiceOver says of it.
     var cardHeading: String {
         switch self {
         case .bus(let board): board.choice.bothWays && board.otherWay != nil ? "Both directions" : "to \(board.choice.wayName)"
-        case .dock: "Citi Bike dock"
+        case .dock(let board): board.nearest ? "nearest Citi Bike dock" : "Citi Bike dock"
         }
     }
 
@@ -46,6 +48,8 @@ struct SavedBusBoard {
     var problem: String? = nil
     /// With changes to a train (`BusChoice.changes`): each change's trains, in its order.
     var changeTrains: [[Arrival]] = []
+    /// Planned From and To (`BusChoice.planned`): the trains and buses its ways ride.
+    var plannedTimes: PlannedTrips.Times? = nil
 
     /// One change's trains, by its place in `BusChoice.changes`.
     private typealias ChangeTrains = (index: Int, trains: [Arrival])
@@ -57,16 +61,30 @@ struct SavedBusBoard {
         (other ? otherBuses : buses).filter { ($0.time ?? .distantPast) > date.addingTimeInterval(-AtStation.busSeconds) }
     }
 
+    /// Seconds a planned trip's trains and buses are waited for, well inside the widget's own
+    /// wait (`routeFetchWait`, 8 s); late, its ways are followed with the stop's buses alone.
+    private static let plannedFetchWait: TimeInterval = 5
+
     /// Its next buses now, and the other way's with both directions (MTA Bus Time, through the
     /// push server).
     static func fetch(_ choice: BusChoice, now: Date) async -> SavedBusBoard {
         let other = choice.bothWays ? choice.otherWay : nil
+        let key = savedKey(choice)
+        // Saved within the server's own keeping of Bus Time (`BusTimes.reuse`), by another
+        // widget or the app's preview: what the server would send again, so not asked
+        let fresh = SharedStore.loadBuses(for: key).flatMap { $0.fetched.isWithin(BusTimes.reuse, before: .now) ? $0 : nil }
         // Every line a home stop rides, merged
-        async let times = BusTimes.arrivals(lines: choice.allLines, at: choice.place, now: now)
-        async let otherTimes = other.asyncMap { await BusTimes.arrivals(lines: $0.allLines, at: $0.place, now: now) }
+        async let times = fresh != nil ? nil : BusTimes.arrivals(lines: choice.allLines, at: choice.place, now: now)
+        async let otherTimes = fresh != nil ? nil
+            : other.asyncMap { await BusTimes.arrivals(lines: $0.allLines, at: $0.place, now: now) }
+        // A planned trip's trains and buses, every ride's: by a deadline of its own, inside the
+        // widget's, so a slow leg leaves the board its stop's buses rather than all old ones
+        let plannedBy = Date.now.addingTimeInterval(Self.plannedFetchWait)
+        let plannedFetch = choice.planned.map { trip in Task { await PlannedTrips.fetch(trip, now: now) } }
+        async let planned = plannedFetch.asyncMap { await TrainService.value(of: $0, by: plannedBy) ?? nil }
         // Each change's trains, alongside: just the trains, no alerts
         async let trains = withTaskGroup(of: ChangeTrains.self) { group in
-            for (index, change) in (choice.changes ?? []).enumerated() {
+            for (index, change) in (choice.planned == nil ? choice.changes ?? [] : []).enumerated() {
                 group.addTask {
                     let board = try? await TrainService.board(for: change.selection, arrivingAt: nil, includingAlerts: false,
                                                               includingOutages: false,
@@ -78,9 +96,14 @@ struct SavedBusBoard {
             for await (index, found) in group { trains[index] = found }
             return trains
         }
+        if let fresh {
+            let coming = { (buses: [BusArrival]) in buses.filter { ($0.time ?? .distantPast) > now } }
+            return SavedBusBoard(choice: choice, buses: coming(fresh.buses), otherWay: other,
+                                 otherBuses: other == nil ? [] : coming(fresh.otherBuses), changeTrains: await trains,
+                                 plannedTimes: await planned ?? nil)
+        }
         let mine = await times
         let theirs = await otherTimes
-        let key = savedKey(choice)
         // A failed fetch keeps the last good one's buses still to come
         let saved = mine == nil || (other != nil && (theirs ?? nil) == nil) ? SharedStore.loadBuses(for: key) : nil
         let buses = mine?.arrivals ?? saved?.buses.filter { ($0.time ?? .distantPast) > now } ?? []
@@ -89,7 +112,8 @@ struct SavedBusBoard {
             SharedStore.saveBuses(.init(fetched: now, buses: mine.arrivals, otherBuses: otherBuses), for: key)
         }
         return SavedBusBoard(choice: choice, buses: buses, otherWay: other, otherBuses: otherBuses,
-                             problem: mine == nil && buses.isEmpty ? "Couldn't reach Bus Time" : nil, changeTrains: await trains)
+                             problem: mine == nil && buses.isEmpty ? "Couldn't reach Bus Time" : nil, changeTrains: await trains,
+                             plannedTimes: await planned ?? nil)
     }
 
     /// When a fetch doesn't finish in time: the last good one's buses still to come, if any.
@@ -111,6 +135,20 @@ struct SavedBusBoard {
     /// With changes to a train, `entry` as a train's change board at its date: each bus with its
     /// ways on (`BusChoice.connections`); nil without changes.
     func changeEntry(_ entry: TrainEntry) -> (entry: TrainEntry, change: Change)? {
+        if let trip = choice.planned, trip.ways.contains(where: { $0.rides.count > 1 }) {
+            // Its ways followed, every ride train or bus; the change for the board's names and alerts
+            var change = choice.trainChange ?? Change(stationID: "", routes: [])
+            change.planned = trip
+            change.destinationID = trip.destinationID
+            var times = plannedTimes ?? PlannedTrips.Times(trains: [], buses: [:])
+            // The buses at the stop as fetched for the board, not again
+            if let start = trip.start?.bus { times.buses[PlannedTrips.busKey(start)] = buses }
+            var shown = entry
+            shown.connections = PlannedTrips.connections(trip, times: times, now: entry.date)
+            shown.change = change
+            shown.transfers = true
+            return (shown, change)
+        }
         guard let change = choice.trainChange else { return nil }
         var shown = entry
         shown.connections = choice.connections(buses: buses, trains: changeTrains, at: entry.date)
@@ -120,7 +158,8 @@ struct SavedBusBoard {
     }
 }
 
-/// A saved Citi Bike widget's dock: its counts now, and the nearest other docks'.
+/// The Citi Bike widget's dock, its favorite or the nearest to you: its counts now, and the
+/// nearest other docks'.
 struct SavedDockBoard {
     var dock: DockChoice
     var counts: CitiBike.Dock?
@@ -129,6 +168,9 @@ struct SavedDockBoard {
     var kinds = SharedBikeKinds.both
     var fetched: Date
     var problem: String? = nil
+    /// The dock nearest you rather than a favorite: its card says "Nearby", and `nearby` are the
+    /// next nearest to you.
+    var nearest = false
 
     struct Nearby: Hashable {
         var dock: CitiBike.Dock
@@ -137,22 +179,53 @@ struct SavedDockBoard {
 
     /// The nearby docks the large widget lists.
     static let nearbyCount = 3
+    /// How far it looks for them, and for the nearest dock: as far as the push server looks.
+    private static let nearbyRange: Double = 2000
 
     /// The dock's counts now, with its nearest others: with E-Bikes alone, only those with one.
     static func fetch(_ dock: DockChoice, kinds: SharedBikeKinds, now: Date) async -> SavedDockBoard {
-        guard let docks = await CitiBike.docks() else {
+        // The few round the dock, itself among them at 0 m: not the whole city's. With E-Bikes
+        // alone, those without one are left out here (`nearest`), so it's one request, for more
+        // of them, to have three that do
+        let asked = kinds == .eBikes ? CitiBike.mostAsked : nearbyCount + 1
+        guard let around = await CitiBike.docks(near: dock.location, limit: asked, within: nearbyRange,
+                                                has: .any) else {
             return SavedDockBoard(dock: dock, kinds: kinds, fetched: now, problem: "Couldn't reach Citi Bike")
         }
-        let here = dock.location
-        let nearby = docks
-            .filter { $0.id != dock.id && (kinds != .eBikes || $0.available(.eBike) > 0) }
+        // Asked for by id only if it's not among them (moved, or another at the same spot)
+        var counts = around.first { $0.id == dock.id }
+        if counts == nil {
+            guard let own = await CitiBike.docks(ids: [dock.id]) else {
+                return SavedDockBoard(dock: dock, kinds: kinds, fetched: now, problem: "Couldn't reach Citi Bike")
+            }
+            counts = own.first
+        }
+        return SavedDockBoard(dock: dock, counts: counts,
+                              nearby: nearest(to: dock.location, among: around, except: dock.id, kinds: kinds),
+                              kinds: kinds, fetched: now, problem: counts == nil ? "This dock isn't in service" : nil)
+    }
+
+    /// The dock nearest `here` that's in service (with E-Bikes alone, the nearest with one), and
+    /// the next nearest to `here`. Nil if Citi Bike can't be reached or has none.
+    static func fetchNearest(to here: CLLocation, kinds: SharedBikeKinds, now: Date) async -> SavedDockBoard? {
+        // The nearest few, not the whole city's
+        guard let docks = await CitiBike.docks(near: here, limit: nearbyCount + 1, within: nearbyRange,
+                                               has: kinds == .eBikes ? .ebike : .service) else { return nil }
+        guard let closest = docks.first else { return nil }
+        return SavedDockBoard(dock: DockChoice(closest), counts: closest,
+                              nearby: nearest(to: here, among: docks, except: closest.id, kinds: kinds),
+                              kinds: kinds, fetched: now, nearest: true)
+    }
+
+    /// The `nearbyCount` docks nearest `here` but `id`: with E-Bikes alone, only those with one.
+    private static func nearest(to here: CLLocation, among docks: [CitiBike.Dock], except id: String,
+                                kinds: SharedBikeKinds) -> [Nearby] {
+        docks
+            .filter { $0.id != id && (kinds != .eBikes || $0.available(.eBike) > 0) }
             .map { (dock: $0, meters: $0.location.distance(from: here)) }
             .sorted { $0.meters < $1.meters }
             .prefix(nearbyCount)
             .map { Nearby(dock: $0.dock, walkMinutes: TripPlanner.walkMinutes($0.meters)) }
-        let counts = docks.first { $0.id == dock.id }
-        return SavedDockBoard(dock: dock, counts: counts, nearby: Array(nearby), kinds: kinds, fetched: now,
-                         problem: counts == nil ? "This dock isn't in service" : nil)
     }
 
     /// The counts it shows, in order: Bikes and E-Bikes as Settings has them, then Docks.
@@ -215,6 +288,7 @@ struct CitiBikeMark: View {
                         .offset(x: size * 0.08, y: -size * 0.08)
                 }
             }
+            .accessibilityElement(children: .ignore)
             .accessibilityLabel(eBikes ? "Citi Bike e-bikes" : "Citi Bike")
     }
 }
@@ -229,15 +303,17 @@ struct RouteCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(route.placeName)
+            Text(isNearest ? "Nearby" : route.placeName)
                 .font(.headline)
                 .foregroundStyle(BoardInk.text)
                 .lineLimit(2)
                 .minimumScaleFactor(0.7)
-            Text(route.cardHeading)
-                .font(.caption)
-                .foregroundStyle(BoardInk.gray)
-                .lineLimit(2)
+            if !isNearest {
+                Text(route.cardHeading)
+                    .font(.caption)
+                    .foregroundStyle(BoardInk.gray)
+                    .lineLimit(2)
+            }
             Spacer(minLength: 4)
             ViewThatFits(in: .vertical) {
                 ForEach([52, 44, 36, 28] as [CGFloat], id: \.self) { mark($0) }
@@ -248,6 +324,11 @@ struct RouteCard: View {
         .background(RoundedRectangle(cornerRadius: 18, style: .continuous)
             .fill(renderingMode == .fullColor ? tint.opacity(0.14) : BoardInk.color(.tile, route: true)))
         .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    /// The nearest dock's card, which says only "Nearby": the dock may be another by the tap.
+    private var isNearest: Bool {
+        if case .dock(let board) = route { board.nearest } else { false }
     }
 
     private var tint: Color {
@@ -432,7 +513,8 @@ private struct BusRouteBoard: View {
     /// Counts down to the bus on the Lock Screen, lit while it does, as Next train's.
     private var walkButton: some View {
         WalkButton(intent: ToggleBusCountdownIntent(bus: board.choice, widgetID: entry.widgetID),
-                   route: BusLeg.prefix + line, running: entry.countingDown, large: !isSmall)
+                   route: BusLeg.prefix + line, running: entry.countingDown, large: !isSmall,
+                   plansRoute: entry.plansRoute)
     }
 
     // MARK: Times
@@ -624,7 +706,7 @@ private struct BusRouteBoard: View {
     }
 }
 
-/// A saved Citi Bike dock: its counts (Bikes, E-Bikes and Docks, as Settings has them). Small:
+/// The Citi Bike widget's dock: its counts (Bikes, E-Bikes and Docks, as Settings has them). Small:
 /// stacked rows in a box. Medium: a tile each. Large: the tiles, then the nearest other docks'
 /// counts under column headers.
 private struct DockRouteBoard: View {
@@ -671,25 +753,57 @@ private struct DockRouteBoard: View {
         }
     }
 
-    private var header: some View {
-        HStack(spacing: 8) {
-            CitiBikeMark(size: isSmall ? 22 : isLarge ? 30 : 26, eBikes: board.kinds == .eBikes)
-            Text(board.dock.name)
-                .font(isSmall ? .footnote.bold() : .body.bold())
-                .foregroundStyle(BoardInk.text)
-                .lineLimit(isSmall ? 2 : 1)
-                .minimumScaleFactor(0.75)
-            Spacer(minLength: 0)
-            if !isSmall {
-                // When the counts were had
-                Text(board.fetched, format: .dateTime.hour().minute())
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(BoardInk.gray)
-                    .accessibilityLabel("At \(Spoken.clock(board.fetched))")
+    /// The mark, the dock's name, the time and ✕ on one line. Only on small, and only when the
+    /// name doesn't fit beside them, it goes on the line under.
+    @ViewBuilder private var header: some View {
+        if isSmall {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    mark
+                    name.fixedSize()
+                    Spacer(minLength: 0)
+                    headerEnd
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        mark
+                        Spacer(minLength: 0)
+                        headerEnd
+                    }
+                    name.minimumScaleFactor(0.75)
+                }
             }
-            RefreshMark(entry: entry, refreshing: refreshing)
-            CloseRoom(entry: entry, large: !isSmall)
+        } else {
+            HStack(spacing: 8) {
+                mark
+                name.minimumScaleFactor(0.75)
+                Spacer(minLength: 0)
+                headerEnd
+            }
         }
+    }
+
+    private var mark: some View {
+        CitiBikeMark(size: isSmall ? 22 : isLarge ? 30 : 26, eBikes: board.kinds == .eBikes)
+    }
+
+    private var name: some View {
+        Text(board.dock.name)
+            .font(isSmall ? .footnote.bold() : .body.bold())
+            .foregroundStyle(BoardInk.text)
+            .lineLimit(1)
+    }
+
+    /// When the counts were had (not on small), ↻ and room for the ✕.
+    @ViewBuilder private var headerEnd: some View {
+        if !isSmall {
+            Text(board.fetched, format: .dateTime.hour().minute())
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(BoardInk.gray)
+                .accessibilityLabel("At \(Spoken.clock(board.fetched))")
+        }
+        RefreshMark(entry: entry, refreshing: refreshing)
+        CloseRoom(entry: entry, large: !isSmall)
     }
 
     private func row(_ dock: CitiBike.Dock, _ column: SavedDockBoard.Column) -> some View {
@@ -731,7 +845,7 @@ private struct DockRouteBoard: View {
         if !board.nearby.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 10) {
-                    Text("Nearby docks")
+                    Text(board.nearest ? "Next nearest" : "Nearby docks")
                     Spacer(minLength: 6)
                     ForEach(board.columns, id: \.self) { column in
                         Text(column.name).lineLimit(1).fixedSize().frame(width: Self.countColumn)
@@ -802,51 +916,51 @@ extension TrainEntry {
     }
 
     /// A saved dock at 5 Av & 3 St, counting as Settings has `kinds`.
-    static func dockPreview(kinds: SharedBikeKinds = .both) -> TrainEntry {
+    /// The Citi Bike widget's favorite dock at 5 Av & 3 St (or `name`), counting as Settings has
+    /// `kinds`; with `nearest`, the dock nearest you, 4 Av & 9 St.
+    static func dockPreview(kinds: SharedBikeKinds = .both, nearest: Bool = false, name: String? = nil) -> TrainEntry {
         let dock = { (id: String, name: String, bikes: Int, eBikes: Int, docks: Int) in
             CitiBike.Dock(id: id, name: name, lat: 40.67, lon: -73.98, bikes: bikes, eBikes: eBikes, docks: docks,
                           renting: true, returning: true)
         }
-        let nearby: [SavedDockBoard.Nearby] = [
+        let others: [SavedDockBoard.Nearby] = nearest ? [
+            .init(dock: dock("1", "5 Av & 3 St", 6, 2, 9), walkMinutes: 6),
+            .init(dock: dock("3", "7 Av & 9 St", 11, 4, 3), walkMinutes: 7),
+            .init(dock: dock("4", "Prospect Park West & 8 St", 14, 2, 12), walkMinutes: 9),
+        ] : [
             .init(dock: dock("2", "4 Av & 9 St", 0, 1, 22), walkMinutes: 2),
             .init(dock: dock("3", "7 Av & 9 St", 11, 4, 3), walkMinutes: 4),
             .init(dock: dock("4", "Prospect Park West & 8 St", 14, 2, 12), walkMinutes: 8),
         ]
-        let board = SavedDockBoard(dock: DockChoice(id: "1", name: "5 Av & 3 St", latitude: 40.67, longitude: -73.98),
-                                   counts: dock("1", "5 Av & 3 St", 6, 2, 9), nearby: nearby, kinds: kinds, fetched: .now)
+        let counts = nearest ? dock("2", name ?? "4 Av & 9 St", 3, 1, 22) : dock("1", name ?? "5 Av & 3 St", 6, 2, 9)
+        let board = SavedDockBoard(dock: DockChoice(counts), counts: counts, nearby: others, kinds: kinds,
+                                   fetched: .now, nearest: nearest)
         var entry = TrainEntry(date: .now, selection: .fallback, trains: [])
         entry.route = .dock(board)
         return entry
     }
 }
 
-#Preview("Bus and Citi Bike", as: .systemMedium) {
+#Preview("Bus", as: .systemMedium) {
     LeewayWidget()
 } timeline: {
     TrainEntry.busPreview().asCard()
     TrainEntry.busPreview().asCard(opened: true)
     TrainEntry.busPreview(both: true).asCard(opened: true)
-    TrainEntry.dockPreview().asCard()
-    TrainEntry.dockPreview().asCard(opened: true)
-    TrainEntry.dockPreview(kinds: .eBikes).asCard(opened: true)
 }
 
-#Preview("Bus and Citi Bike, small", as: .systemSmall) {
+#Preview("Bus, small", as: .systemSmall) {
     LeewayWidget()
 } timeline: {
     TrainEntry.busPreview().asCard()
     TrainEntry.busPreview().asCard(opened: true)
-    TrainEntry.dockPreview().asCard()
-    TrainEntry.dockPreview().asCard(opened: true)
 }
 
-#Preview("Bus and Citi Bike, large", as: .systemLarge) {
+#Preview("Bus, large", as: .systemLarge) {
     LeewayWidget()
 } timeline: {
     TrainEntry.busPreview().asCard(opened: true)
     TrainEntry.busPreview(both: true).asCard(opened: true)
-    TrainEntry.dockPreview().asCard(opened: true)
-    TrainEntry.dockPreview(kinds: .eBikes).asCard(opened: true)
 }
 
 // MARK: - Lock Screen
@@ -899,7 +1013,8 @@ struct RouteLockScreen: View {
         switch family {
         case .accessoryInline: inline
         case .accessoryCircular: circular
-        default: rectangular
+        // The rectangle is too small for bigger text sizes: they'd only shrink the name away
+        default: rectangular.dynamicTypeSize(...DynamicTypeSize.large)
         }
     }
 
@@ -964,10 +1079,10 @@ struct RouteLockScreen: View {
 
     private var heading: some View {
         HStack(spacing: 6) {
-            mark(face.counts.isEmpty ? 21 : 17)
+            mark(face.counts.isEmpty ? 17 : 15)
             // As big as fits: a long name shrinks before the mark or countdown do
             Text(face.name)
-                .font(.title3.weight(.semibold))
+                .font(.headline)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
             if refreshing {
@@ -986,7 +1101,7 @@ struct RouteLockScreen: View {
                 HStack(spacing: 0) {
                     ForEach(face.counts, id: \.name) { count in
                         VStack(spacing: -2) {
-                            Text("\(count.number)").font(.system(size: 22, weight: .bold, design: .rounded))
+                            Text("\(count.number)").font(.system(size: 18, weight: .bold, design: .rounded))
                             Text(count.name).font(.caption2)
                         }
                         .frame(maxWidth: .infinity)
@@ -1002,7 +1117,7 @@ struct RouteLockScreen: View {
                     heading
                     if let way = face.way {
                         Text(way)
-                            .font(.subheadline)
+                            .font(.footnote)
                             .lineLimit(1)
                             .minimumScaleFactor(0.85)
                     }
@@ -1010,14 +1125,14 @@ struct RouteLockScreen: View {
                 VStack(alignment: .trailing, spacing: -3) {
                     if let time = face.countdown {
                         countdown(time)
-                            .font(.system(size: 28, weight: .bold, design: .rounded))
+                            .font(.system(size: 22, weight: .bold, design: .rounded))
                             .lineLimit(1)
                             .minimumScaleFactor(0.6)
                         if let then = face.then {
-                            Text(then).font(.caption.weight(.semibold))
+                            Text(then).font(.caption2.weight(.semibold))
                         }
                     } else {
-                        Text(face.problem).font(.caption).multilineTextAlignment(.trailing)
+                        Text(face.problem).font(.caption2).multilineTextAlignment(.trailing)
                     }
                 }
                 .monospacedDigit()
@@ -1033,6 +1148,7 @@ struct RouteLockScreen: View {
             VStack(spacing: 1) {
                 if refreshing {
                     Image(systemName: "arrow.clockwise").font(.system(size: 12, weight: .bold))
+                        .accessibilityLabel("Refreshing")
                 } else {
                     switch face.mark {
                     case .line: mark(26)
@@ -1057,7 +1173,18 @@ struct RouteLockScreen: View {
                 .padding(.horizontal, 6)
             }
             .accessibilityElement(children: .combine)
+            // Not "6 · 2": what each count is
+            .accessibilityLabel(Text(spokenCounts), isEnabled: !refreshing && !face.counts.isEmpty)
         }
+    }
+
+    /// "Citi Bike, 6 bikes, 2 e-bikes", for the circular face.
+    private var spokenCounts: String {
+        let counts = face.counts.filter { $0.name != "Docks" }.map { count in
+            let name = count.name.lowercased()
+            return "\(count.number) \(count.number == 1 ? String(name.dropLast()) : name)"
+        }
+        return (["Citi Bike"] + counts).joined(separator: ", ")
     }
 }
 
@@ -1086,7 +1213,6 @@ extension RouteTimes {
 } timeline: {
     TrainEntry.preview
     TrainEntry.busPreview()
-    TrainEntry.dockPreview()
 }
 
 #Preview("Lock Screen, circular", as: .accessoryCircular) {
@@ -1094,7 +1220,6 @@ extension RouteTimes {
 } timeline: {
     TrainEntry.preview
     TrainEntry.busPreview()
-    TrainEntry.dockPreview(kinds: .eBikes)
 }
 
 #Preview("Lock Screen, inline", as: .accessoryInline) {
@@ -1102,7 +1227,6 @@ extension RouteTimes {
 } timeline: {
     TrainEntry.preview
     TrainEntry.busPreview()
-    TrainEntry.dockPreview()
 }
 
 #Preview("Lock Screen faces") {

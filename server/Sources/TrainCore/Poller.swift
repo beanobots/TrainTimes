@@ -40,21 +40,34 @@ final class Poller: Service {
     }
 
     func run() async throws {
-        // The feeds read before the first pass, then every tick by themselves, countdowns or
-        // not (the app and widgets read them too), so a pass that overruns doesn't leave the
-        // relay's copies to expire (`FeedRelay.maxAge`) with `GET /feeds` failing meanwhile
+        // The feeds read before the first pass, then every tick by themselves (the app and
+        // widgets read them too), so a pass that overruns doesn't leave the relay's copies to
+        // expire (`FeedRelay.maxAge(of:)`) with `GET /feeds` failing meanwhile
         guard let feeds else { return await passes() }
         await feeds.refresh()
+        let store = store
         await withTaskGroup(of: Void.self) { group in
-            group.addTask { await Self.refreshing(feeds, every: self.interval) }
+            group.addTask {
+                await Self.refreshing(feeds, every: self.interval) { await Self.wantsFeeds(store: store, feeds: feeds) }
+            }
             group.addTask { await self.passes() }
             await group.next()
             group.cancelAll()
         }
     }
 
-    /// Reads the feeds every `interval` (the first tick's already read) until shut down.
-    private static func refreshing(_ feeds: FeedRelay, every interval: TimeInterval) async {
+    /// Whether the feeds are worth reading this tick: there's a train countdown (a bus's uses
+    /// none), or a phone's asked for one lately (`FeedRelay.isWanted`). Otherwise, as through
+    /// the night, nothing's read till someone asks, and the first `GET /feeds` reads them.
+    static func wantsFeeds(store: Store, feeds: FeedRelay, now: Date = .now) async -> Bool {
+        if await store.all.contains(where: { $0.bus == nil }) { return true }
+        return await feeds.isWanted(now: now)
+    }
+
+    /// Reads the feeds every `interval` (the first tick's already read) until shut down, on
+    /// the ticks they're `wanted`.
+    private static func refreshing(_ feeds: FeedRelay, every interval: TimeInterval,
+                                   wanted: @Sendable () async -> Bool) async {
         let clock = ContinuousClock()
         var next = clock.now.advanced(by: .seconds(interval))
         while !Task.isCancelled && !Task.isShuttingDownGracefully {
@@ -64,7 +77,7 @@ final class Poller: Service {
             } catch {
                 return
             }
-            await feeds.refresh()
+            if await wanted() { await feeds.refresh() }
             // On the next tick not yet begun, as a slow read skips those it ran over
             next = next.advanced(by: .seconds(interval))
             while next < clock.now { next = next.advanced(by: .seconds(interval)) }
@@ -227,8 +240,10 @@ final class Poller: Service {
                                                   lastPush: registration.lastPush, now: now, timing: timing)
                 guard decision != .none else { continue }
                 let push = Push(token: registration.token, environment: registration.environment, event: .update,
-                                state: state, priority: decision == .update ? 10 : 5, timestamp: now,
-                                staleDate: ActivityState.staleDate(for: state))
+                                state: state,
+                                priority: ActivityState.priority(of: decision, state, last: registration.lastState,
+                                                                 timing: timing),
+                                timestamp: now, staleDate: ActivityState.staleDate(for: state))
                 jobs.append(Job(kind: decision == .update ? .update : .refresh, registration: registration, push: push))
             }
             if !trainsWithoutFeeds.isEmpty {
@@ -296,8 +311,9 @@ final class Poller: Service {
                                               lastPush: registration.lastPush, now: now, timing: timing)
             guard decision != .none else { continue }
             let push = Push(token: registration.token, environment: registration.environment, event: .update,
-                            state: state, priority: decision == .update ? 10 : 5, timestamp: now,
-                            staleDate: ActivityState.staleDate(for: state))
+                            state: state,
+                            priority: ActivityState.priority(of: decision, state, last: registration.lastState, timing: timing),
+                            timestamp: now, staleDate: ActivityState.staleDate(for: state))
             pass.jobs.append(Job(kind: decision == .update ? .update : .refresh, registration: registration, push: push))
         }
         if pass.without > 0 { Log.error("no Bus Time for \(pass.without) bus countdowns: keeping their last state") }
@@ -370,8 +386,9 @@ final class Poller: Service {
     }
 
     /// Sends `jobs`' pushes, `concurrency` at a time, and saves what happened in one
-    /// transaction, counting it in `stats`.
-    private func send(_ jobs: [Job], now: Date, stats: inout Stats) async {
+    /// transaction, counting it in `stats`; with `reloadingWidgets`, then tells phones whose
+    /// widgets would show other times (`reloadWidgets`).
+    private func send(_ jobs: [Job], now: Date, stats: inout Stats, reloadingWidgets: Bool = true) async {
         let pusher = pusher
         let results = await Concurrency.map(jobs, limit: concurrency) { job -> (Job, PushResult?) in
             guard let push = job.push else { return (job, nil) }
@@ -418,7 +435,7 @@ final class Poller: Service {
             }
         }
         if stats.failed > errorLines { Log.error("… and \(stats.failed - errorLines) more failed pushes") }
-        outcomes += await reloadWidgets(after: results, stats: &stats)
+        if reloadingWidgets { outcomes += await reloadWidgets(after: results, stats: &stats) }
         do {
             try await store.apply(outcomes)
         } catch {
@@ -436,7 +453,7 @@ final class Poller: Service {
             // Not for a bus's: no widget shows a bus countdown's times (`CountdownLookup` is by train)
             guard job.kind != .end, job.registration.bus == nil, result == .sent, let push = job.push,
                   let widgetToken = job.registration.widgetToken,
-                  ActivityState.changesWidgets(push.state, from: job.registration.lastState) else { continue }
+                  ActivityState.changesWidgets(push.state, from: job.registration.lastState, timing: timing) else { continue }
             phones[widgetToken, default: (job.registration.environment, [])].registrations.append(job.registration)
         }
         guard !phones.isEmpty else { return [] }
@@ -489,7 +506,8 @@ final class Poller: Service {
         }
         var stats = Stats(registrations: jobs.count)
         guard !jobs.isEmpty else { return stats }
-        await send(jobs, now: now, stats: &stats)
+        // No widget reload: widgets move on by themselves, as the Lock Screen does (`CountdownSync.aligned`)
+        await send(jobs, now: now, stats: &stats, reloadingWidgets: false)
         Log.info("due: \(stats.updates) moved on, \(stats.dropped) dropped, \(stats.failed) failed")
         return stats
     }

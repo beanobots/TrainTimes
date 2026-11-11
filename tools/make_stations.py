@@ -3,11 +3,12 @@
 
     curl -o Stations.csv http://web.mta.info/developers/data/nyct/subway/Stations.csv
     curl -o entrances.json 'https://data.ny.gov/resource/i9wp-a4ja.json?$limit=5000'
-    curl -o entrances_2015.csv https://raw.githubusercontent.com/P8105/p8105.github.io/master/data/NYC_Transit_Subway_Entrance_And_Exit_Data.csv
+    curl -L -o entrances_2015.zip https://www.kaggle.com/api/v1/datasets/download/new-york-state/nys-nyc-transit-subway-entrance-and-exit-data
+    unzip -p entrances_2015.zip nyc-transit-subway-entrance-and-exit-data.csv > entrances_2015.csv
     curl -o equipment.json https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fnyct_ene_equipments.json
     curl -o google_transit.zip http://web.mta.info/developers/data/nyct/subway/google_transit.zip
     unzip google_transit.zip -d gtfs
-    python3 tools/make_stations.py Stations.csv entrances.json entrances_2015.csv equipment.json gtfs ios/Shared
+    python3 tools/make_stations.py Stations.csv entrances.json entrances_2015.csv tools/entrance_names.json equipment.json gtfs ios/Shared
 
 Each station keeps its GTFS stop id (the real-time feeds name platforms by adding
 N or S to it), the lines that serve it as real-time route ids, the labels the MTA
@@ -29,9 +30,11 @@ D N R to its B Q, the length of the station and its stairs), kept with the
 platform walked from; the app takes 3 minutes for any other.
 
 For walking directions to and from the trains, each entrance is named by its
-streets and corner, from the MTA's 2015 entrance list (data.ny.gov took it down
-for today's, which leaves them out; a course's copy is above). That list also
-says which stations' platforms aren't joined inside, such as 23 St on the 6,
+streets and corner, from tools/entrance_names.json (made by make_entrances.py,
+mostly from the city's street centerlines, some from the MTA's 2015 entrance
+list). The 2015 list (data.ny.gov took it down for today's, which leaves its
+streets out; New York State's copy on Kaggle is above) also says which
+stations' platforms aren't joined inside, such as 23 St on the 6,
 whose Downtown stairs are on Park Av's west side; there each entrance says
 which side it goes to, by where it is beside the tracks. And each says how far
 along its platform it is, by the GTFS shapes' way through it, for which part of
@@ -60,6 +63,9 @@ SERVER_RESOURCES = os.path.join(REPO, "server", "Sources", "TrainResources", "Re
 # the platform they're part of: the Rockaway Park Shuttle ends on H19, its own
 # track at Broad Channel
 ALIASES = {"H04": ["H19"]}
+# Entrances the list files under the wrong stop, by their place, with the stop they're at: 77 St's
+# (R) exit-only stair at 4 Av & 76 St, 55 m from it, is listed under 86 St, 880 m away
+MOVED = {(40.63023, -74.025458): "R43"}
 
 
 def route_ids(row):
@@ -105,7 +111,9 @@ def entrances_by_stop(path):
         if row.get("exit_allowed") == "NO":
             entrance["entryOnly"] = True
         # A station on two levels lists both its stops: "A32; D20"
-        for stop in row["gtfs_stop_id"].split(";"):
+        stops = [MOVED[(entrance["lat"], entrance["lon"])]] if (entrance["lat"], entrance["lon"]) in MOVED \
+            else row["gtfs_stop_id"].split(";")
+        for stop in stops:
             entrances.setdefault(stop.strip(), []).append(entrance)
     return entrances
 
@@ -193,27 +201,14 @@ OLD_MATCH = 25
 BESIDE, ALONG = 60, 120
 # Within this many metres of the middle of the tracks, which side an entrance is on isn't known
 MIDDLE = 4
-WORDS = [(r"\bAvenue\b|\bAve\b", "Av"), (r"\bStreet\b", "St"), (r"\bBoulevard\b", "Blvd"),
-         (r"\bParkway\b", "Pkwy"), (r"\bRoad\b", "Rd"), (r"\bPlace\b", "Pl"),
-         (r"\b(\d+)(st|nd|rd|th)\b", r"\1"), (r"^East (?=\d)", "E "), (r"^West (?=\d)", "W ")]
-
-
-def street_name(text):
-    """"4th Ave" -> "4 Av", "East 143rd St" -> "E 143 St": the MTA's way, as its stations are named."""
-    name = " ".join(text.split())
-    for pattern, replacement in WORDS:
-        name = re.sub(pattern, replacement, name)
-    return name
-
-
 def metres(lat, lon):
     """Metres east and north, near enough at the city's latitude."""
     return (lon * 111320 * math.cos(math.radians(40.72)), lat * 111320)
 
 
 def old_entrances(path):
-    """The 2015 list's entrances, which name their streets and corner and whether their station's
-    platforms are joined inside, by where they are: each (metres east, north, row)."""
+    """The 2015 list's entrances, which say whether their station's platforms are joined inside,
+    by where they are: each (metres east, north, row)."""
     with open(path, encoding="utf-8-sig", newline="") as file:
         return [(*metres(float(row["Entrance Latitude"]), float(row["Entrance Longitude"])), row)
                 for row in csv.DictReader(file)]
@@ -265,10 +260,10 @@ def southward(gtfs_dir, stations):
     return headings
 
 
-def place_entrances(stations, old_path, headings):
+def place_entrances(stations, old_path, names_path, headings):
     """Gives each platform's entrances what the walk to them needs:
-    - "streets" and "corner", from the 2015 list's entrance within OLD_MATCH metres: ["4 Av",
-      "9 St"] (its north-south street first), "NW".
+    - "streets" and "corner", from the names file, by its place: ["4 Av", "9 St"] (its
+      north-south street first), "NW".
     - "along": metres from the platform's stop the way its `south` trains go, for those beside and
       along it; where to board for an exit there.
     - "side": "N" or "S", the platform its stairs go down to, named as `north` and `south` are,
@@ -276,6 +271,8 @@ def place_entrances(stations, old_path, headings):
       stairs to the right of the way south go to the southbound side.
     A complex's entrances are listed under each of its platforms, so each gets its own copies."""
     old = old_entrances(old_path)
+    with open(names_path, encoding="utf-8") as file:
+        names = {(n["lat"], n["lon"]): n for n in json.load(file)}
     unnamed = 0
     for station in stations:
         station["entrances"] = [dict(entrance) for entrance in station["entrances"]]
@@ -283,20 +280,20 @@ def place_entrances(stations, old_path, headings):
         x0, y0 = metres(station["lat"], station["lon"])
         heading = headings.get(station["id"])
         for entrance in station["entrances"]:
+            named = names.get((entrance["lat"], entrance["lon"]))
+            if named:
+                entrance["streets"] = named["streets"]
+                if named.get("corner") in CORNERS:
+                    entrance["corner"] = named["corner"]
+            else:
+                unnamed += 1
             x, y = metres(entrance["lat"], entrance["lon"])
             gap, row = min(((math.hypot(x - ox, y - oy), row) for ox, oy, row in old), key=lambda pair: pair[0])
             if gap <= OLD_MATCH:
-                streets = [street_name(row[key]) for key in ("North South Street", "East West Street") if row[key].strip()]
-                if streets:
-                    entrance["streets"] = streets
-                if row["Corner"] in CORNERS:
-                    entrance["corner"] = row["Corner"]
                 # Only its own lines' entrances say whether its platforms are joined
                 lines = {row[f"Route{n}"].strip().upper() for n in range(1, 12)} - {""}
                 if lines & set(station["routes"]):
                     crossings[row["Free Crossover"] == "TRUE"] += 1
-            else:
-                unnamed += 1
         apart = crossings[False] > crossings[True]
         if apart:
             station["noCrossover"] = True
@@ -401,10 +398,14 @@ def equipment(path, stations):
     return machines
 
 
-def main(source, entrances_path, old_path, equipment_path, gtfs_dir, target_dir):
+def main(source, entrances_path, old_path, names_path, equipment_path, gtfs_dir, target_dir):
     with open(source, encoding="utf-8-sig", newline="") as file:
         rows = list(csv.DictReader(file))
     entrances = entrances_by_stop(entrances_path)
+    listed = {(e["lat"], e["lon"]) for found in entrances.values() for e in found}
+    for place, stop in MOVED.items():
+        if place not in listed:
+            print(f"warning: no entrance at {place} to move to {stop}", file=sys.stderr)
     stations = [
         {
             "id": row["GTFS Stop ID"],
@@ -450,7 +451,7 @@ def main(source, entrances_path, old_path, equipment_path, gtfs_dir, target_dir)
         if station["id"] in walks:
             station["walks"] = dict(sorted(walks[station["id"]].items()))
     headings = southward(gtfs_dir, stations)
-    unnamed = place_entrances(stations, old_path, headings)
+    unnamed = place_entrances(stations, old_path, names_path, headings)
     # Kept too, in degrees clockwise from north, for placing the station's other platforms'
     # entrances along this one, as the app does for an exit a passage away
     for station in stations:
@@ -460,7 +461,7 @@ def main(source, entrances_path, old_path, equipment_path, gtfs_dir, target_dir)
     wrong = check_corners(stations)
     listed = [e for s in stations for e in s["entrances"]]
     print(f"Entrances: {sum('streets' in e for e in listed)} of {len(listed)} named by their streets "
-          f"({unnamed} not in the 2015 list), {sum('corner' in e for e in listed)} by their corner "
+          f"({unnamed} not in the names file), {sum('corner' in e for e in listed)} by their corner "
           f"(left out at {len(wrong)} crossings where they're the wrong way round), "
           f"{sum('along' in e for e in listed)} placed along their platform, "
           f"{sum('side' in e for e in listed)} going to one side, at {sum('noCrossover' in s for s in stations)} "
@@ -491,6 +492,6 @@ def main(source, entrances_path, old_path, equipment_path, gtfs_dir, target_dir)
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 7:
+    if len(sys.argv) != 8:
         sys.exit(__doc__)
-    main(*sys.argv[1:7])
+    main(*sys.argv[1:8])

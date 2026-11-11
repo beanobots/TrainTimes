@@ -100,6 +100,7 @@ enum Lines {
 
     /// For VoiceOver: "R train", or a shuttle's name, "42 St Shuttle".
     static func spokenName(of route: String) -> String {
+        if route == "SI" { return "Staten Island Railway" }
         let label = LineStyle.of(route).label
         let called = name(of: route)
         return called == label ? "\(label) train" : called
@@ -117,7 +118,7 @@ enum Lines {
 
     /// For VoiceOver, naming shuttles in full: "N or R", "7 or 42 St Shuttle".
     static func spokenList(_ routes: [String], joinedBy conjunction: String = "and") -> String {
-        joined(routes.map(name(of:)), by: conjunction)
+        joined(routes.map { $0 == "SI" ? "Staten Island Railway" : name(of: $0) }, by: conjunction)
     }
 
     /// "D, N and R".

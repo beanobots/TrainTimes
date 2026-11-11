@@ -7,37 +7,23 @@ enum TrackShapes {
     /// Each GTFS route id's shapes, the longest first.
     static let byRoute = load("shapes")
 
-    /// Each bus line's streets (bus_shapes.json, made by tools/make_bus_shapes.py), by its name
-    /// as `busKey` has it, the longest first: both ways once where they run the same street.
-    static let byBusLine = load("bus_shapes")
-
-    /// A bus stop and the lines stopping there, named as `busKey` has them.
+    /// A bus stop and the lines stopping there, named as `busKey` has them; and, one of
+    /// `busStops`, the way its buses go, as map points have it (x east, y south) in radians.
     struct BusStop {
         let coordinate: CLLocationCoordinate2D
         let lines: [String]
+        var angle: Double?
     }
 
-    /// Every bus stop (bus_stops.json, made by tools/make_bus_stops.py).
-    static let busStops: [BusStop] = {
-        struct File: Decodable {
-            var lines: [String]
-            var stops: [[Int]]
-        }
-        guard let url = Bundle.main.url(forResource: "bus_stops", withExtension: "json"),
-              let data = try? Data(contentsOf: url),
-              let file = try? JSONDecoder().decode(File.self, from: data) else { return [] }
-        return file.stops.compactMap { row in
-            guard row.count > 2 else { return nil }
-            return BusStop(coordinate: CLLocationCoordinate2D(latitude: Double(row[0]) / 1e5, longitude: Double(row[1]) / 1e5),
-                           lines: row.dropFirst(2).compactMap { file.lines.indices.contains($0) ? file.lines[$0] : nil })
-        }
-    }()
+    /// Every bus stop, each on its line (`BusNetwork`), with the way its buses go there.
+    static let busStops: [BusStop] = BusNetwork.stops.map {
+        BusStop(coordinate: $0.coordinate, lines: $0.lines, angle: $0.angle)
+    }
 
-    /// A bus line's name as bus_shapes.json is keyed: "M15-SBS" and "M15 SBS" are "M15+".
+    /// A bus line's name as bus_network.json has it, keyed as bus_routes.json is
+    /// (`BusRoutes.key`): "M15-SBS" and "M15 SBS" are "M15+", an older save's "Q06" the Q6.
     static func busKey(_ line: String) -> String {
-        var name = line.uppercased().filter { !$0.isWhitespace && $0 != "-" }
-        if name.hasSuffix("SBS") { name = String(name.dropLast(3)) + "+" }
-        return name
+        BusRoutes.key(line)
     }
 
     private static func load(_ name: String) -> [String: [[CLLocationCoordinate2D]]] {
@@ -83,15 +69,17 @@ enum TrackShapes {
     }
 
     /// Meters of curve at most at each of a path's corners.
-    private static let cornerRadius: CLLocationDistance = 200
+    static let cornerRadius: CLLocationDistance = 200
     /// Points along each corner's curve.
-    private static let cornerSteps = 12
+    static let cornerSteps = 12
 
     /// `path` with its corners curved, as the track runs, rather than the sharp turns where its
-    /// simplified points meet: each corner's cut back along both sides, by `cornerRadius` or
-    /// under half of the shorter side, and joined by a curve through where the corner was.
-    static func rounded(_ path: [CLLocationCoordinate2D]) -> [CLLocationCoordinate2D] {
+    /// simplified points meet: each corner's cut back along both sides, by `radius` or
+    /// under half of the shorter side, and joined by a curve of `steps` through where the corner was.
+    static func rounded(_ path: [CLLocationCoordinate2D], radius: CLLocationDistance = cornerRadius,
+                        steps cornerSteps: Int = cornerSteps) -> [CLLocationCoordinate2D] {
         guard path.count > 2 else { return path }
+        let cornerRadius = radius
         func distance(_ a: CLLocationCoordinate2D, _ b: CLLocationCoordinate2D) -> CLLocationDistance {
             CLLocation(latitude: a.latitude, longitude: a.longitude)
                 .distance(from: CLLocation(latitude: b.latitude, longitude: b.longitude))

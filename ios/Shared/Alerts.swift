@@ -191,7 +191,7 @@ enum AlertsFeed {
     }
 
     /// Alerts in effect now or within the hour; drops the feed's later planned work.
-    static func entries(in data: Data, now: Date = Date()) throws -> [Entry] {
+    static func entries(in data: Data, now: Date = AppClock.now) throws -> [Entry] {
         let feed = try JSONDecoder().decode(Feed.self, from: data)
         let time = now.timeIntervalSince1970
         return feed.entity.compactMap(\.value).compactMap { entity in
@@ -249,7 +249,7 @@ enum AlertsFeed {
 
     /// Alerts in effect at `now` for `selection`'s lines, platforms and direction, most important
     /// first, including ones that change its trains further along.
-    static func alerts(for selection: Selection, in entries: [Entry], now: Date = Date()) -> [ServiceAlert] {
+    static func alerts(for selection: Selection, in entries: [Entry], now: Date = AppClock.now) -> [ServiceAlert] {
         let time = now.timeIntervalSince1970
         let platforms = selection.platforms.map(\.id)
         // Per line, as lines can differ: toward Manhattan from Marcy Av, the J is S and the M is N
@@ -300,7 +300,7 @@ enum AlertsFeed {
 
     /// `alerts(for:in:now:)` for each of `selections` (a transfer's train and the lines it changes
     /// to), each alert once: as the most important kind any matched it as, with all their lines.
-    static func alerts(for selections: [Selection], in entries: [Entry], now: Date = Date()) -> [ServiceAlert] {
+    static func alerts(for selections: [Selection], in entries: [Entry], now: Date = AppClock.now) -> [ServiceAlert] {
         merged(selections.map { alerts(for: $0, in: entries, now: now) })
     }
 

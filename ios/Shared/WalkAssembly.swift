@@ -11,6 +11,9 @@ extension WalkRouter {
     /// Metres of another name between two bits of the same street shorter than which it's all
     /// the one street: round a little square, a jog at a junction.
     static let shortDetour = 60.0
+    /// Metres of the next street walked at a corner before crossing the one a step's on, and
+    /// the step still ending before that crossing.
+    static let cornerBit = 5.0
     /// Degrees a crossing's next piece over may turn from the last, on an island, and still be
     /// the same crossing.
     static let islandTurn = 35.0
@@ -89,6 +92,7 @@ extension WalkRouter {
         // Walking, and waiting at the lights, as the route's budget was kept to
         var walk = Walk(steps: steps, seconds: route.stats.seconds, meters: Self.metres(path),
                         crossings: crossings, lights: lights, streets: streets)
+        walk.saferAtNight = route.stats.saferAtNight
         walk.addCrossingSteps()
         return walk
     }
@@ -374,20 +378,31 @@ extension WalkRouter {
     /// next, or before you cross the street you're on to go along the next; the last arriving.
     private func steps(of items: [Item], path: [Walk.Point], end: Leg?) -> [Walk.Step] {
         // Walking with no name goes by the street before it, or at the start (or after stairs)
-        // the one after
+        // the one after. Just after crossing the street before, a short bit (a corner's link)
+        // goes by the one after: you've crossed off that street, onto the next, so its step ends
+        // before the crossing, not on its far side
         var walks: [(name: String, from: Int, to: Int, item: Int)] = []
         var pending: [(from: Int, to: Int, item: Int)] = []
+        var crossedOff: String?
         for (index, item) in items.enumerated() {
-            guard case let .walk(name, from, to) = item else { continue }
-            if let name = name ?? walks.last.map(\.name).flatMap({ $0 == Self.stairs ? nil : $0 }) {
-                for walk in pending { walks.append((name, walk.from, walk.to, walk.item)) }
-                pending = []
-                walks.append((name, from, to, index))
-            } else {
-                pending.append((from, to, index))
+            switch item {
+            case let .crossing(over, _, from, to):
+                if from < to, pending.isEmpty, let last = walks.last?.name, StreetNames.same(over, last) { crossedOff = last }
+            case let .walk(name, from, to):
+                let before = crossedOff == nil ? walks.last.map(\.name).flatMap({ $0 == Self.stairs ? nil : $0 }) : nil
+                if let name = name ?? before {
+                    // Too long to be a corner's bit: still the street crossed, on its other side
+                    let long = pending.map { Self.metres(Array(path[$0.from...$0.to])) }.reduce(0, +) >= Self.shortestStep
+                    for walk in pending { walks.append((long ? crossedOff ?? name : name, walk.from, walk.to, walk.item)) }
+                    pending = []
+                    crossedOff = nil
+                    walks.append((name, from, to, index))
+                } else {
+                    pending.append((from, to, index))
+                }
             }
         }
-        for walk in pending { walks.append(("", walk.from, walk.to, walk.item)) }
+        for walk in pending { walks.append((crossedOff ?? "", walk.from, walk.to, walk.item)) }
 
         // Runs of the same name, however it's spelled (OSM's and the city's), a short one at a
         // junction part of the one before
@@ -440,10 +455,26 @@ extension WalkRouter {
         for (run, next) in zip(runs, runs.dropFirst()) {
             let afterItem = walks[run.last].item, nextItem = walks[next.first].item
             var end = walks[next.first].from
-            for case let .crossing(over, _, from, to) in items[(afterItem + 1)..<nextItem]
-            where from < to && StreetNames.same(over, run.name) {
-                end = from
-                break
+            let before = items[(afterItem + 1)..<nextItem].lazy.compactMap { item -> Int? in
+                guard case let .crossing(over, _, from, to) = item, from < to, StreetNames.same(over, run.name) else { return nil }
+                return from
+            }.first
+            if let before {
+                end = before
+            } else {
+                // Or just into the next street: a corner's bit of sidewalk already named for
+                // it, then over the street the step's on
+                var bit = 0.0
+                scan: for item in items[nextItem...] {
+                    switch item {
+                    case let .walk(_, from, to):
+                        bit += Self.metres(Array(path[from...to]))
+                        if bit > Self.cornerBit { break scan }
+                    case let .crossing(over, _, from, to):
+                        if from < to && StreetNames.same(over, run.name) { end = from }
+                        break scan
+                    }
+                }
             }
             ends.append(end)
         }

@@ -106,9 +106,10 @@ struct NextTrainBoard: View {
     /// controls layer draws there.
     private var header: some View {
         HStack(alignment: .center, spacing: isSmall ? 5 : 8) {
-            // Just the counted-down train's line lit
+            // Just the counted-down train's line lit; showing both ways, all lit, as each way's
+            // box has its own train's letter under its countdown
             let bullets = LineBullets(routes: entry.selection.routes, size: isSmall ? 22 : isLarge ? BoardStyle.large.bulletSize : 24,
-                                      lit: next?.route)
+                                      lit: otherWay == nil ? next?.route : nil)
             if isSmall && refreshing {
                 // ↻ in the bullets' place, so it doesn't take room from the heading
                 bullets.hidden()
@@ -200,7 +201,8 @@ struct NextTrainBoard: View {
     /// Next train uses the first train you can reach, so no trip.
     private var walkButton: some View {
         WalkButton(intent: ToggleCountdownIntent(selection: entry.selection, widgetID: entry.widgetID),
-                   route: entry.selection.firstRoute, running: entry.countingDown, large: !isSmall)
+                   route: entry.selection.firstRoute, running: entry.countingDown, large: !isSmall,
+                   plansRoute: entry.plansRoute)
     }
 
     // MARK: Countdown

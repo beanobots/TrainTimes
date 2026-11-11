@@ -1,37 +1,77 @@
 import Foundation
 
-/// The timetable to fall back on when the MTA can't be reached (`Timetable`), downloaded from
+/// The timetables to fall back on when the MTA can't be reached (`Timetable`), downloaded from
 /// the push server's `GET /timetable` about once a day into the App Group, so the widgets
-/// have it too. The app downloads it when opened and in the background; a widget does when
-/// it finds it's due.
+/// have it too, and its `GET /bus-timetable` every few days. The app
+/// downloads them when opened and in the background; a widget the subway's when it finds it's due.
 enum TimetableStore {
-    private static let file = SharedStore.url(named: "timetable.bin")
-    /// The server's ETag for the downloaded one, so an unchanged one isn't downloaded again.
-    private static let tagFile = SharedStore.url(named: "timetable-etag.txt")
+    /// The subway's month, for when there's no signal.
+    static let subway = TimetableFile(name: "timetable", refreshAfter: 20 * 60 * 60, failedKey: "timetableDownloadFailed")
+    /// Every bus line's week, only in the app: some 15 MB
+    /// read, past what a widget can hold. Downloaded every few days (6 MB), as it covers a week.
+    static let buses = TimetableFile(name: "bus-timetable", refreshAfter: 3 * 24 * 60 * 60,
+                                     failedKey: "busTimetableDownloadFailed", forBuses: true)
 
-    /// How old the downloaded one gets before it's downloaded again: the server builds a new one
-    /// each morning.
-    static let refreshAfter: TimeInterval = 20 * 60 * 60
+    /// How old the subway's gets before it's downloaded again: the server builds a new one each
+    /// morning.
+    static var refreshAfter: TimeInterval { subway.refreshAfter }
 
-    /// Seconds to wait for the timetable to download.
-    private static let timeout: TimeInterval = 20
+    /// The subway's downloaded timetable, if it has trains for `now`.
+    static func load(now: Date = AppClock.now) -> Timetable? { subway.load(now: now) }
+
+    /// Whether the subway's is missing or due.
+    static func isDue(now: Date = .now) -> Bool { subway.isDue(now: now) }
+
+    /// The subway's downloaded again if due (`TimetableFile.refresh`).
+    static func refresh(force: Bool = false) async { await subway.refresh(force: force) }
+
+    /// Whether this is a widget (or other extension), not the app.
+    static let isExtension = Bundle.main.bundleURL.pathExtension == "appex"
+}
+
+/// A timetable downloaded from the push server (`GET /<name>`) into the App Group, with the
+/// server's ETag, so an unchanged one isn't downloaded again.
+final class TimetableFile: Sendable {
+    private let name: String
+    private let file: URL?
+    private let tagFile: URL?
+    /// How old it gets before it's downloaded again.
+    let refreshAfter: TimeInterval
+    /// When a download last failed, in the App Group's defaults, so the app and widgets each
+    /// know; cleared when one succeeds.
+    private let failedKey: String
+    /// The buses': never in a widget.
+    private let forBuses: Bool
+
+    init(name: String, refreshAfter: TimeInterval, failedKey: String, forBuses: Bool = false) {
+        self.name = name
+        file = SharedStore.url(named: "\(name).bin")
+        tagFile = SharedStore.url(named: "\(name)-etag.txt")
+        self.refreshAfter = refreshAfter
+        self.failedKey = failedKey
+        self.forBuses = forBuses
+    }
+
+    /// Seconds to wait for it to download: the buses' is some 6 MB.
+    private var timeout: TimeInterval { forBuses ? 120 : 20 }
 
     /// How long after a download fails before it's tried again (but for `force`), so every
     /// widget reload and app open doesn't wait out `timeout` on the same failure. Shorter for
     /// the app, opened far less often than widgets reload, so a widget's failure doesn't keep it
     /// from trying for an hour.
-    static var retryAfter: TimeInterval { isExtension ? 60 * 60 : 5 * 60 }
-    /// Whether this is a widget (or other extension), not the app.
-    private static let isExtension = Bundle.main.bundleURL.pathExtension == "appex"
-    /// When a download last failed, in the App Group's defaults, so the app and widgets each
-    /// know; cleared when one succeeds.
-    private static let failedKey = "timetableDownloadFailed"
-    private static var defaults: UserDefaults? { UserDefaults(suiteName: SharedStore.groupID) }
+    var retryAfter: TimeInterval { TimetableStore.isExtension ? 60 * 60 : 5 * 60 }
+    private var defaults: UserDefaults? { UserDefaults(suiteName: SharedStore.groupID) }
+    /// When a download began, in the App Group's defaults, for the app and widgets not to
+    /// download it at the same time; cleared when it ends.
+    private var startedKey: String { "\(name)DownloadStarted" }
 
-    /// The downloaded timetable, if it has trains for `now`. Read once, and again only after a
+    /// Whether it's wanted here: the subway's always; the buses' in the app.
+    private var isWanted: Bool { !forBuses || !TimetableStore.isExtension }
+
+    /// The downloaded timetable, if it has trips for `now`. Read once, and again only after a
     /// new one's downloaded.
-    static func load(now: Date = .now) -> Timetable? {
-        guard let file, let changed = modified(file) else { return nil }
+    func load(now: Date = AppClock.now) -> Timetable? {
+        guard isWanted, let file, let changed = Self.modified(file) else { return nil }
         let timetable = cache.timetable(changed: changed) {
             (try? Data(contentsOf: file, options: .mappedIfSafe)).flatMap { try? Timetable(data: $0) }
         }
@@ -39,20 +79,27 @@ enum TimetableStore {
     }
 
     /// Whether there's none, or it's over `refreshAfter` old (checked, if not changed, then).
-    static func isDue(now: Date = .now) -> Bool {
-        guard let file, let changed = modified(file) else { return true }
+    func isDue(now: Date = .now) -> Bool {
+        guard let file, let changed = Self.modified(file) else { return true }
         return !changed.isWithin(refreshAfter, before: now)
     }
 
     /// Downloads a new one if due (or with `force`), and not failed within `retryAfter`. Kept
     /// only if it reads; on failure, the old one stays. Widgets reloading together share one
-    /// download. One cut short (cancelled, as when a widget's run ends) isn't a failure.
-    static func refresh(force: Bool = false) async {
+    /// download. One cut short (cancelled, as when a widget's run ends) isn't a failure. The
+    /// buses' not wanted (`isWanted`): nothing.
+    func refresh(force: Bool = false) async {
+        guard isWanted else { return }
         if !force {
             guard isDue() else { return }
             if let failed = defaults?.object(forKey: failedKey) as? Date, failed.isWithin(retryAfter, before: .now) { return }
+            // Nor while the app or a widget is already downloading it: each is its own process,
+            // which `downloads` can't see across
+            if let started = defaults?.object(forKey: startedKey) as? Date, started.isWithin(timeout, before: .now) { return }
         }
-        await downloads.run {
+        await downloads.run { [self] in
+            defaults?.set(Date.now, forKey: startedKey)
+            defer { defaults?.removeObject(forKey: startedKey) }
             switch await download() {
             case .downloaded: defaults?.removeObject(forKey: failedKey)
             case .failed: defaults?.set(Date.now, forKey: failedKey)
@@ -61,7 +108,7 @@ enum TimetableStore {
         }
     }
 
-    private static let downloads = Downloads()
+    private let downloads = Downloads()
 
     /// What came of a download (`download`).
     private enum Outcome {
@@ -72,11 +119,17 @@ enum TimetableStore {
         case interrupted
     }
 
-    private static func download() async -> Outcome {
+    private func download() async -> Outcome {
         guard let serverURL = ServerRoutes.baseURL, let file, let tagFile else { return .failed }
-        var request = URLRequest(url: serverURL.appendingPathComponent("timetable"),
-                                 cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout)
-        if modified(file) != nil, let tag = try? String(contentsOf: tagFile, encoding: .utf8) {
+        var url = serverURL.appendingPathComponent(name)
+        // A month of the subway's
+        if !forBuses {
+            url = url.appending(queryItems: [URLQueryItem(name: "days", value: "30")])
+        }
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout)
+        // The buses' 6 MB not in Low Data Mode: the old one, or Bus Time, does meanwhile
+        request.allowsConstrainedNetworkAccess = !forBuses
+        if Self.modified(file) != nil, let tag = try? String(contentsOf: tagFile, encoding: .utf8) {
             request.setValue(tag, forHTTPHeaderField: "If-None-Match")
         }
         let data: Data
@@ -90,9 +143,9 @@ enum TimetableStore {
         switch http.statusCode {
         case 304:
             // Unchanged: checked now. The one read stays, under the file's new date
-            let checked = modified(file)
+            let checked = Self.modified(file)
             try? FileManager.default.setAttributes([.modificationDate: Date.now], ofItemAtPath: file.path)
-            if let checked, let changed = modified(file) { cache.redate(from: checked, to: changed) }
+            if let checked, let changed = Self.modified(file) { cache.redate(from: checked, to: changed) }
             return .downloaded
         case 200:
             // Read once, to check it, and kept as the one read from the file: a widget hasn't
@@ -101,7 +154,7 @@ enum TimetableStore {
             cache.forget()
             guard let timetable = try? Timetable(data: data), (try? data.write(to: file, options: .atomic)) != nil
             else { return .failed }
-            if let changed = modified(file) { cache.keep(timetable, changed: changed) }
+            if let changed = Self.modified(file) { cache.keep(timetable, changed: changed) }
             if let tag = http.value(forHTTPHeaderField: "ETag") {
                 try? tag.write(to: tagFile, atomically: true, encoding: .utf8)
             } else {
@@ -130,7 +183,7 @@ enum TimetableStore {
         }
     }
 
-    private static let cache = Cache()
+    private let cache = Cache()
 
     /// The timetable read from the file, while the file's unchanged.
     private final class Cache: @unchecked Sendable {

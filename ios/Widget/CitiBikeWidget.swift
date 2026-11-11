@@ -92,7 +92,7 @@ struct DockEntity: AppEntity {
     }
 }
 
-/// Every dock in service, nearest you first when you're found (else by name); a search matches
+/// Every dock, nearest you first when you're found (else by name); a search matches
 /// any part of a dock's name.
 struct DockQuery: EntityStringQuery {
     func entities(for identifiers: [DockEntity.ID]) async throws -> [DockEntity] {
@@ -111,7 +111,8 @@ struct DockQuery: EntityStringQuery {
     }
 
     private func docks() async -> [DockEntity] {
-        let docks = (await CitiBike.docks() ?? []).filter { $0.renting || $0.returning }
+        // Where they are, not their counts
+        let docks = await CitiBike.places() ?? []
         guard case .found(let here) = await NearbyLocator.locateQuickly() else {
             return docks.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
                 .map { DockEntity(DockChoice($0)) }
@@ -244,6 +245,20 @@ struct CitiBikeProvider: AppIntentTimelineProvider {
 }
 
 #Preview("Citi Bike, Lock Screen", as: .accessoryRectangular) {
+    CitiBikeWidget()
+} timeline: {
+    TrainEntry.dockPreview(nearest: true)
+    TrainEntry.dockPreview()
+}
+
+#Preview("Citi Bike, Lock Screen circular", as: .accessoryCircular) {
+    CitiBikeWidget()
+} timeline: {
+    TrainEntry.dockPreview(nearest: true)
+    TrainEntry.dockPreview(kinds: .eBikes)
+}
+
+#Preview("Citi Bike, Lock Screen inline", as: .accessoryInline) {
     CitiBikeWidget()
 } timeline: {
     TrainEntry.dockPreview(nearest: true)

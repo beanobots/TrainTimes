@@ -64,8 +64,8 @@ struct WalkState: Codable, Hashable, Sendable {
     var instruction: String
     /// "Manhattan-bound only", or the turn after.
     var detail: String? = nil
-    /// Minutes to spare for the train counted down to, walking on as you are; under none means
-    /// you'll miss it. Nil once you're down, or unknown.
+    /// Minutes to spare for the train counted down to, walking on as you are: the first you can
+    /// catch, so never under none. Nil once you're down, or unknown.
     var spare: Int? = nil
     /// Which part of the train to ride in for the exit: "back", "middle" or "front".
     var part: String? = nil
@@ -76,6 +76,9 @@ struct WalkState: Codable, Hashable, Sendable {
     /// Where the walk ends, and when you'll be there.
     var endName: String
     var arrives: Date? = nil
+    /// Walking from the train, when you'll be at the next turn at your pace: the compact
+    /// Dynamic Island counts down to it. Nil from older apps: to `arrives`.
+    var turnAt: Date? = nil
     /// "Faster: Q from 7 Av, 5 min sooner", walking to the train.
     var faster: String? = nil
     /// On the train, what to do once it's due where you get off: "Up the stairs to the NE corner
@@ -85,6 +88,26 @@ struct WalkState: Codable, Hashable, Sendable {
     var nextSymbol: String? = nil
     /// Under `next`: "Tap for the turns to The Town Hall".
     var nextNote: String? = nil
+    /// Walking, the App Group pictures of the map round the next turn (`TurnMap`), light and
+    /// dark (`mapFile(dark:)`): a new name for each new picture, so iOS redraws. Nil until
+    /// they're drawn.
+    var map: String? = nil
+    /// Whether the phone's in Dark Mode, which the Lock Screen's colours follow rather than the
+    /// wallpaper's. Nil from older apps: as the Lock Screen is.
+    var dark: Bool? = nil
+
+    /// The map picture's height in points: the walk's Lock Screen countdown is all map, at
+    /// the Lock Screen's tallest.
+    static let mapHeight = 160.0
+
+    /// `map`'s picture file, light or dark.
+    func mapFile(dark: Bool) -> String? {
+        map.map { Self.mapFile(named: $0, dark: dark) }
+    }
+
+    static func mapFile(named name: String, dark: Bool) -> String {
+        "\(name)-\(dark ? "dark" : "light").jpg"
+    }
 
     /// On the train once it's due where you get off: `next` in its place, as `off`.
     func movedOn(at now: Date) -> WalkState {
@@ -218,10 +241,23 @@ extension CountdownState {
                   now: now, following: trip, after: last)
     }
 
-    /// Updates the running countdown from `board`: the same train while it's coming, then the
-    /// next. With no trains, keeps the last one and says so, or names the service alert (not an
-    /// elevator outage, which would otherwise take priority).
+    /// Updates the running countdown from `board`: the same train while it's coming or at the
+    /// station, then the next. With no trains, keeps the last one and says so, or names the
+    /// service alert (not an elevator outage, which would otherwise take priority).
     func refreshed(for selection: Selection, board: Board, settings: AppSettings, now: Date) -> CountdownState {
+        // Its train at the station (`AtStation`), gone from the board, which lists only trains
+        // still to leave (`TrainService.trains`): kept till it's been there, with the board's
+        // trains after it. With none, as below
+        if !board.trains.isEmpty, AtStation.covers(train, at: now, seconds: heldSeconds),
+           !board.trains.contains(where: { (!trip.isEmpty && $0.trip == trip) || $0.time == train }) {
+            var state = self
+            let after = board.trains.filter { $0.time > train }.prefix(2)
+            state.following = after.map(\.time)
+            state.followingRoutes = after.map(\.route)
+            state.notice = board.notice(for: selection, settings: settings)?.label
+            state.updated = now
+            return state
+        }
         if var state = CountdownState(for: selection, board: board, settings: settings, now: now,
                                       following: trip, after: train) {
             // The walk's the app's to change

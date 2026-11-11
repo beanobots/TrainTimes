@@ -136,6 +136,7 @@ struct ShareView: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Text("\(model.startName) → \(model.endName)")
+                    .accessibilityLabel("\(model.startName) to \(model.endName)")
                     .font(.headline)
                 Text("Transit directions")
                     .font(.subheadline)

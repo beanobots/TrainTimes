@@ -7,7 +7,7 @@ import Foundation
 extension TrainService {
     /// `board` with each connection's ways by bus added, among its trains' by when each leaves
     /// the change; unchanged without buses, or if Bus Time can't be reached.
-    static func addingBuses(to board: Board, change: Change, now: Date = .now) async -> Board {
+    static func addingBuses(to board: Board, change: Change, now: Date = AppClock.now) async -> Board {
         guard !change.buses.isEmpty else { return board }
         let found = await withTaskGroup(of: (BusLeg, [BusArrival]).self) { group in
             for leg in change.buses {

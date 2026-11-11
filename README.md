@@ -204,7 +204,13 @@ Built into the app (refresh them now and then):
 - `ios/Shared/stations.json`: the MTA's
   [station list](http://web.mta.info/developers/data/nyct/subway/Stations.csv)
   plus the [subway entrances](https://data.ny.gov/Transportation/MTA-Subway-Entrances-and-Exits-2024/i9wp-a4ja)
-  from data.ny.gov.
+  from data.ny.gov, each named by its streets and corner from `tools/entrance_names.json`.
+- `tools/entrance_names.json`: each entrance's streets and corner, worked out by
+  `tools/make_entrances.py` from the city's
+  [street centerlines](https://data.cityofnewyork.us/d/inkn-q76z),
+  except where the MTA's 2015 entrance list is better (`tools/entrance_exceptions.json`,
+  each with why). Rerun it when the MTA's entrance list changes, before `make_stations.py`;
+  its download steps are at its top.
 - `ios/Shared/equipment.json`: the MTA's list of elevators and escalators, which
   ties each one to its station and the platforms it serves.
 - `ios/Shared/lines.json`: the stations each line stops at, in order, from the
@@ -214,7 +220,7 @@ Built into the app (refresh them now and then):
 To refresh them, follow the download steps at the top of `tools/make_stations.py`
 (the GTFS schedule among them, which shows the lines that run the other way to a
 station's direction names), then run
-`python3 tools/make_stations.py Stations.csv entrances.json equipment.json gtfs ios/Shared`.
+`python3 tools/make_stations.py Stations.csv entrances.json entrances_2015.csv tools/entrance_names.json equipment.json gtfs ios/Shared`.
 It also copies the first two into the push server's resources, which can't
 link to them (`make_lines.py` does the same with `lines.json`). `lines.json`
 keeps only the stops `stations.json` lists, so then run

@@ -60,17 +60,16 @@ struct SharedTripPreview: View {
         let alerts = selection.mentionsAlerts(with: settings)
         do {
             let fetched = if let change = option.change {
-                try await TrainService.board(for: selection, change: change, includingAlerts: alerts,
+                try await TrainService.routeBoard(for: selection, change: change, includingAlerts: alerts,
                                              includingOutages: selection.elevatorAlerts)
             } else {
                 try await TrainService.board(for: selection, arrivingAt: destination, includingAlerts: alerts,
                                              includingOutages: selection.elevatorAlerts)
             }
             guard !Task.isCancelled else { return }
-            board = SharedStore.SavedBoard(fetched: .now, trains: fetched.trains,
-                                           notice: fetched.notice(for: selection, settings: settings),
-                                           connections: option.change == nil ? nil : fetched.connections,
-                                           destinationTimes: destination == nil ? nil : fetched.destinationTimes)
+            // Saved as the widget saves it, so its reload after "show" draws these, not fetches again
+            board = SharedStore.saveBoard(fetched, for: selection, change: option.change,
+                                          destinationID: destination?.id, fetched: .now)
         } catch {
             guard !Task.isCancelled else { return }
             failed = true
@@ -99,6 +98,7 @@ struct TripOptionRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 // Where from and to the row's whole width, the minutes on the line under it
                 Text("\(option.selection.station?.name ?? "") → \(option.endStation?.name ?? "")")
+                    .accessibilityLabel("\(option.selection.station?.name ?? "") to \(option.endStation?.name ?? "")")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.primary)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -115,6 +115,8 @@ struct TripOptionRow: View {
                         Image(systemName: "checkmark")
                             .font(.body.weight(.semibold))
                             .foregroundStyle(.tint)
+                            // Selected is said by the row's trait
+                            .accessibilityHidden(true)
                     }
                 }
             }
@@ -221,6 +223,6 @@ struct ChangeKindLabel: View {
             ForEach(routes, id: \.self) { LineBullet(route: $0, size: 14) }
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Lines.list(routes))
+        .accessibilityLabel(Lines.spokenList(routes))
     }
 }

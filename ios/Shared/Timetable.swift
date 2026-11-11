@@ -20,6 +20,17 @@ struct Timetable: Sendable {
     let patterns: [Pattern]
     /// Each pattern's trips' starts (seconds after `base`), soonest first, by pattern.
     let starts: [[UInt32]]
+    /// Where each of `stops` is and its name, by the same index: only the bus timetable's,
+    /// whose stops the app has no list of (the subway's are in stations.json).
+    let places: [Place]?
+
+    /// A stop's whereabouts and name.
+    struct Place: Hashable, Sendable {
+        let latitude: Double
+        let longitude: Double
+        /// As the GTFS writes it: "5 AV/9 ST".
+        let name: String
+    }
 
     /// Each stop's calls, as (pattern, call) indexes packed into one (`packed(pattern:call:)`), for
     /// `arrivals(at:from:to:)`: a quarter of the memory of the pairs, which a widget can't spare.
@@ -51,8 +62,8 @@ struct Timetable: Sendable {
 
     /// Calls shared by trips.
     struct Pattern: Hashable, Sendable {
-        /// Index into `routes`.
-        let route: UInt8
+        /// Index into `routes`: the subway's under 256, the buses' (a line each way it goes) more.
+        let route: UInt16
         let calls: [Call]
     }
 
@@ -61,8 +72,10 @@ struct Timetable: Sendable {
         case tooBig
     }
 
-    init(made: Date, base: Date, stops: [String], routes: [String], patterns: [Pattern], starts: [[UInt32]]) {
+    init(made: Date, base: Date, stops: [String], routes: [String], patterns: [Pattern], starts: [[UInt32]],
+         places: [Place]? = nil) {
         self.made = made
+        self.places = places.flatMap { $0.count == stops.count ? $0 : nil }
         self.base = base
         self.stops = stops
         self.routes = routes
@@ -186,31 +199,40 @@ struct Timetable: Sendable {
 
     /// "LWTT", for Leeway timetable.
     private static let magic: [UInt8] = [0x4C, 0x57, 0x54, 0x54]
-    private static let version: UInt8 = 1
+    /// 1: a byte for each pattern's route. 2: two, and then the stops' places, if any. Version 1
+    /// is still written where it'll do (the subway's), so apps that read only it read that.
+    private static let versions: ClosedRange<UInt8> = 1...2
 
     /// As sent and saved: the format below, zlib-compressed. Throws if it has too many stops,
     /// routes or patterns for the format's sizes, or patterns or calls for `calls`' index.
     func encoded() throws -> Data {
         let longest = patterns.lazy.map(\.calls.count).max() ?? 0
-        guard stops.count <= Int(UInt16.max), routes.count <= Int(UInt8.max),
+        guard stops.count <= Int(UInt16.max), routes.count <= Int(UInt16.max),
               patterns.count <= 1 << (32 - Self.callBits), longest <= 1 << Self.callBits
         else { throw Problem.tooBig }
+        let version: UInt8 = routes.count <= Int(UInt8.max) && places == nil ? 1 : 2
         var out = Writer()
         out.bytes(Self.magic)
-        out.integer(Self.version)
+        out.integer(version)
         out.integer(Int64(made.timeIntervalSince1970.rounded()))
         out.integer(Int64(base.timeIntervalSince1970.rounded()))
         for strings in [stops, routes] {
             out.integer(UInt16(strings.count))
             for string in strings {
-                let utf8 = Array(string.utf8.prefix(Int(UInt8.max)))
-                out.integer(UInt8(utf8.count))
-                out.bytes(utf8)
+                out.string(string)
+            }
+        }
+        if version >= 2 {
+            out.integer(UInt8(places == nil ? 0 : 1))
+            for place in places ?? [] {
+                out.integer(Int32((place.latitude * 1e6).rounded()))
+                out.integer(Int32((place.longitude * 1e6).rounded()))
+                out.string(place.name)
             }
         }
         out.integer(UInt32(patterns.count))
         for (pattern, starts) in zip(patterns, starts) {
-            out.integer(pattern.route)
+            if version >= 2 { out.integer(pattern.route) } else { out.integer(UInt8(pattern.route)) }
             out.integer(UInt16(pattern.calls.count))
             for call in pattern.calls {
                 out.integer(call.stop)
@@ -239,9 +261,9 @@ struct Timetable: Sendable {
     /// The decompressed format, read where it is rather than copied out first.
     private static func read(_ reader: Reader) throws -> Timetable {
         var reader = reader
-        guard try reader.bytes(4).elementsEqual(magic), try reader.integer(UInt8.self) == version else {
-            throw Problem.unreadable
-        }
+        guard try reader.bytes(4).elementsEqual(magic) else { throw Problem.unreadable }
+        let version = try reader.integer(UInt8.self)
+        guard versions.contains(version) else { throw Problem.unreadable }
         let made = Date(timeIntervalSince1970: TimeInterval(try reader.integer(Int64.self)))
         let base = Date(timeIntervalSince1970: TimeInterval(try reader.integer(Int64.self)))
         var lists: [[String]] = []
@@ -250,12 +272,22 @@ struct Timetable: Sendable {
             var strings: [String] = []
             strings.reserveCapacity(count)
             for _ in 0..<count {
-                let length = Int(try reader.integer(UInt8.self))
-                strings.append(String(decoding: try reader.bytes(length), as: UTF8.self))
+                strings.append(try reader.string())
             }
             lists.append(strings)
         }
         let (stops, routes) = (lists[0], lists[1])
+        var places: [Place]?
+        if version >= 2, try reader.integer(UInt8.self) == 1 {
+            var read: [Place] = []
+            read.reserveCapacity(min(stops.count, reader.remaining / 9))
+            for _ in stops {
+                let latitude = Double(try reader.integer(Int32.self)) / 1e6
+                let longitude = Double(try reader.integer(Int32.self)) / 1e6
+                read.append(Place(latitude: latitude, longitude: longitude, name: try reader.string()))
+            }
+            places = read
+        }
         let count = Int(try reader.integer(UInt32.self))
         // More than `calls`' index can hold
         guard count <= 1 << (32 - callBits) else { throw Problem.unreadable }
@@ -264,7 +296,7 @@ struct Timetable: Sendable {
         patterns.reserveCapacity(min(count, reader.remaining / 7))
         allStarts.reserveCapacity(min(count, reader.remaining / 7))
         for _ in 0..<count {
-            let route = try reader.integer(UInt8.self)
+            let route = version >= 2 ? try reader.integer(UInt16.self) : UInt16(try reader.integer(UInt8.self))
             let callCount = Int(try reader.integer(UInt16.self))
             guard callCount <= 1 << callBits else { throw Problem.unreadable }
             var calls: [Call] = []
@@ -285,7 +317,8 @@ struct Timetable: Sendable {
             patterns.append(Pattern(route: route, calls: calls))
             allStarts.append(starts)
         }
-        return Timetable(made: made, base: base, stops: stops, routes: routes, patterns: patterns, starts: allStarts)
+        return Timetable(made: made, base: base, stops: stops, routes: routes, patterns: patterns, starts: allStarts,
+                         places: places)
     }
 
     /// Little-endian integers and bytes.
@@ -298,6 +331,13 @@ struct Timetable: Sendable {
 
         mutating func integer<T: FixedWidthInteger>(_ value: T) {
             withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) }
+        }
+
+        /// Its length in a byte, then its UTF-8, cut to 255 bytes.
+        mutating func string(_ string: String) {
+            let utf8 = Array(string.utf8.prefix(Int(UInt8.max)))
+            integer(UInt8(utf8.count))
+            bytes(utf8)
         }
     }
 
@@ -323,6 +363,11 @@ struct Timetable: Sendable {
             guard size <= remaining else { throw Problem.unreadable }
             defer { at += size }
             return T(littleEndian: bytes.loadUnaligned(fromByteOffset: at, as: T.self))
+        }
+
+        mutating func string() throws -> String {
+            let length = Int(try integer(UInt8.self))
+            return String(decoding: try bytes(length), as: UTF8.self)
         }
     }
 }

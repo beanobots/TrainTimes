@@ -9,10 +9,15 @@ import UIKit
 struct LiveView: View {
     /// Set when the Nearby widget's "allow location" link opens the app.
     @Binding var allowingLocation: Bool
+    /// Which way you last turned the map, by hand or its compass, when not Settings' way: the
+    /// map's framed that way after, rather than turned back Grid North as the marks change.
+    /// Shared with Navigate's map, and cleared as Settings changes.
+    @Binding var keptHeading: Double?
     /// Counts taps on the Nearby tab, each one bringing the map back to you.
     let recenterRequests: Int
     @Environment(SettingsStore.self) private var settings
     @Environment(\.accessibilityDifferentiateWithoutColor) private var withoutColor
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var location = NearbyLocation()
     /// The bus home stop tapped in Spotlight, to open.
     @State private var opening = StationOpening.shared
@@ -21,19 +26,23 @@ struct LiveView: View {
     /// The map's middle once you've moved it, which Nearby lists what's near instead of you
     /// until the Nearby tab (or the note over the map) brings it back.
     @State private var mapCenter: CLLocation?
-    /// Where the map last came to rest, to tell a move of more than `followMeters` from it;
-    /// and till when a rest is the map settling where `frame()` put it, not you moving it.
-    @State private var restCenter: CLLocation?
+    /// What's kept as the map moves that nothing drawn reads: written as often as every frame,
+    /// and writing SwiftUI state drew all of Nearby, every mark on its map, again each time
+    /// (once on the first touch of each move, and ten times a second as it went on).
+    @State private var motion = MapMotion()
+    private static let restDelay: TimeInterval = 0.4
+    /// How much the map's scale must change, a share of it, to be taken as zoomed: well inside
+    /// `BusZoom`'s and `MapDetail`'s leeway.
+    private static let scaleChange = 0.02
     @State private var framingUntil = Date.distantPast
     /// Places tapped on the map since it was moved, their tiles saying how far they are from you.
     @State private var revealed: Set<String> = []
     /// Closest stations to `here`, nearest first. Recomputed only when `here` changes,
     /// not on every redraw.
     @State private var nearby: [Nearby.Result] = []
-    @State private var camera = MapCameraPosition.userLocation(fallback: .region(Self.cityRegion))
-    /// The map's size and safe area, and how far up it last rested, to frame it turned NY North.
+    @State private var camera = Self.startCamera
+    /// The map's size and safe area, and how far up it last rested, to frame it turned Grid North.
     @State private var room = MapRoom()
-    @State private var mapDistance: Double?
     @AppStorage(MapNorth.key) private var nyNorth = false
     /// The card over the map's bottom, for the map to frame clear of it.
     @State private var cardsHeight: CGFloat = 0
@@ -55,14 +64,9 @@ struct LiveView: View {
     /// Where each place's tile starts in the card's list, by its map mark's id.
     @State private var tileTops: [String: CGFloat] = [:]
     @State private var cardScroll = ScrollPosition()
-    /// Blank room under the list, for a place near its end to scroll to the top too; dropped
-    /// once scrolled back out of sight.
-    @State private var focusRoom: CGFloat = 0
-    /// The place open in the card, its times under it, by its map mark's id (a stop opened from
-    /// its dot, the stop's): one at a time, nil with all closed. And its height, measured, for
-    /// the card to grow to fit it.
+    /// The place tapped on the map, its tiles outlined, by its map mark's id (a stop opened from
+    /// its dot, the stop's): one at a time, nil with none.
     @State private var openedPlace: String?
-    @State private var openedHeight: CGFloat = 0
     /// The bus places near `here`, as last loaded.
     @State private var buses: NearbyBusList = .finding
     /// Where `buses` was found from, for a failed refresh to keep them only if still there.
@@ -76,18 +80,33 @@ struct LiveView: View {
     @State private var docksFailed = false
     /// When the last load finished, whatever it loaded.
     @State private var updated: Date?
+    /// When the trains were last loaded, and which, and `buses` and `docks` last found, and the
+    /// docks where: a load restarted by a toggle, or retried for the trains, doesn't fetch again
+    /// what hasn't changed (`refetchAfter`, `docksLife`), unless pulled to refresh.
+    @State private var trainsLoaded: (ids: [String], at: Date)?
+    @State private var busesLoaded: Date?
+    @State private var docksLoaded: (at: Date, near: CLLocation, has: CitiBike.Has)?
+    /// Whether Nearby shows, not another tab or a train's page over it; and that you're to be
+    /// found again once it does, back in the app elsewhere (`findsOnShow`).
+    @State private var shown = false
+    @State private var findsOnShow = false
     /// Each map mark's size as a sign and as a bubble, by its `mapMarks` id, and how each shows
     /// for them all to clear each other (`layOutMarks`).
     @State private var markSizes: [String: CGSize] = [:]
     @State private var bubbleSizes: [String: CGSize] = [:]
     @State private var markLayout = MarkLayout()
-    /// When the marks were last laid out as the map moved (`layoutEvery`).
-    @State private var laidOut = Date.distantPast
+    /// Each bus stop on the map named with lines (`findBusNames`), worked out once each time the
+    /// stops or their ways change, not every time the map's drawn or its marks laid out.
+    @State private var busNames: [String: [String]] = [:]
+    /// The lines of the bus stops nearest where Nearby is (`nearestBusLines`), drawn on its map.
+    @State private var nearbyBusLines: Set<String> = []
     /// The nearby stations' lines, worked out when the stations change; and a count of each new
     /// set, to tell the map's lines from the last ones'.
     @State private var lines = NearbyLines.none
     /// The other stops along the listed bus stops' lines, every few blocks (`findLines`).
     @State private var alongStops: [AlongStop] = []
+    /// Stops along the lines no longer marked, kept a moment to shrink away (`MarkBubble`).
+    @State private var leavingStops: [AlongStop] = []
     @State private var linesVersion = 0
     /// The map's height, and map points a point is once it last came to rest, to keep lines side
     /// by side the same points apart however far it's zoomed.
@@ -105,35 +124,19 @@ struct LiveView: View {
     @Environment(\.isSideways) private var sideways
     @State private var mapTop: CGFloat = 0
     @State private var mapPointsPerPoint: Double = 0
-    /// The lines' zoom, followed as the map moves (`LineScale`), and the lines last drawn at it.
-    @State private var linesScale: Double = 0
     @State private var linesCache = NearbyLinesLayer.Cache()
-    /// How much of the map shows, as it last came to rest, for centring on a stop opened.
-    @State private var mapSpan: MKCoordinateSpan?
     /// A stop along the lines opened by a tap on its dot: its buses in the card, its lines drawn.
     @State private var openedStop: OpenedStop?
     /// The grey dot at the map's middle, as the map moves: on its own, for only it to redraw
     /// every frame, not the whole page.
     @State private var middle = MapMiddleTracker()
-    /// Whether you've moved the map since it was last framed, which alone brings the grey dot.
-    @State private var userMovedMap = false
-    /// Whether you've zoomed, turned or moved the map yourself since it was last framed, even
-    /// by less than `followMeters`: `frame()` leaves it be, rather than snap back to 1 km north
-    /// up when the next load changes the marks. Cleared going back to you, or you moving on.
-    @State private var cameraMovedByHand = false
     /// How near the map is for bus stops' marks (`BusZoom`), as it last came to rest, and which
-    /// way it's turned, degrees from north, for the marks' stems and arrows.
+    /// way it's turned, degrees from north, for the marks' arrows.
     @State private var busZoom = BusZoom.far
     @State private var mapDetail = MapDetail.full
     @State private var mapHeading: Double = 0
     /// Which way each bus stop marked's buses go, by its mark's id (`findLines`).
     @State private var busWays: [String: BusSides.Way] = [:]
-    /// Points out toward its kerb each bus stop marked's line is drawn, at the zoom: moved out
-    /// from under the subway, or its own way's (`findBusLineOuts`).
-    @State private var busLineOuts: [String: CGFloat] = [:]
-    /// Points further out toward its kerb each bus stop's lines are than they'd sit, to clear
-    /// marks they'd cover (`layOutMarks`), on a longer stem.
-    @State private var tagPushes: [String: CGSize] = [:]
 
     /// The page's side margin and its card's corners, as New Trip's.
     private static let margin: CGFloat = 16
@@ -144,7 +147,6 @@ struct LiveView: View {
     /// past it the trains scroll within it.
     private static let cardHeight: CGFloat = 250
     /// The most it grows to with a place open, to fit its times; less on a short screen.
-    private static let openedCardHeight: CGFloat = 560
     /// The modes row's height at the card's foot, as New Trip's.
     private static let modesRowHeight: CGFloat = 58
     /// The margin around the card's list of places.
@@ -157,14 +159,39 @@ struct LiveView: View {
     private static let cityRegion = MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: 40.73, longitude: -73.97),
                                                        latitudinalMeters: 8_000, longitudinalMeters: 8_000)
 
+    /// Where the map starts: on your last fix, if Leeway may know it and it's in the city,
+    /// `framedMeters` across as `frame()` will have it. Following your location instead
+    /// (`.userLocation`) has MapKit run its own best-for-navigation GPS till framed, so only
+    /// with no fix known yet. Once, as Nearby's first made: `@State` keeps only the first.
+    private static let startCamera: MapCameraPosition = {
+        let manager = CLLocationManager()
+        let allowed = [.authorizedWhenInUse, .authorizedAlways].contains(manager.authorizationStatus)
+        // Within the map's bounds' middles (`cityBounds`)
+        guard let fix = PretendLocation.current ?? (allowed ? manager.location : nil),
+              abs(fix.coordinate.latitude - 40.70) <= 0.25, abs(fix.coordinate.longitude + 73.95) <= 0.3 else {
+            return .userLocation(fallback: .region(cityRegion))
+        }
+        return .region(MKCoordinateRegion(center: fix.coordinate, latitudinalMeters: framedMeters,
+                                          longitudinalMeters: framedMeters))
+    }()
+
     /// The map kept on the city, zoomed out no further than New Trip's (`NewTripView.cityBounds`).
     private static let cityBounds = MapCameraBounds(
         centerCoordinateBounds: MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: 40.70, longitude: -73.95),
                                                    span: MKCoordinateSpan(latitudeDelta: 0.5, longitudeDelta: 0.6)),
         maximumDistance: 60_000)
 
-    /// How far the map's middle moves, once it comes to rest, for Nearby to list what's there.
-    private static let followMeters: Double = 100
+    /// How far the map's middle moves, once it comes to rest, for Nearby to list what's there:
+    /// a few blocks (250 m since 11/9, was 100), as each listing holds the map up a moment.
+    private static let followMeters: Double = 250
+    /// The docks asked for round `here`, with either kind of bike: three show with the bikes
+    /// Settings picks (`shownDocks`), the rest there for a toggle's change.
+    private static let docksAsked = 5
+    /// Seconds within which trains or buses loaded for the same are not fetched again.
+    private static let refetchAfter: TimeInterval = 30
+    /// Seconds docks found within `followMeters` stand, not fetched again: they don't follow
+    /// the trains' retries.
+    private static let docksLife: TimeInterval = 60
 
     /// Home as first-run setup picked it, for Nearby to load near before your location's found.
     @State private var setupHome = SetupHome.shared
@@ -188,25 +215,36 @@ struct LiveView: View {
     /// Back to you: the map framed on you again, re-located even if you haven't moved. Times
     /// reload once the nearby stations change.
     private func recenter() {
+        let wasLoading = loadKey
         revealed = []
         openedStop = nil
         openedPlace = nil
         // The grey dot merges back into yours as the map goes back to you
-        userMovedMap = false
-        cameraMovedByHand = false
+        motion.userMovedMap = false
+        motion.cameraMovedByHand = false
         let wasMoved = mapCenter != nil
         mapCenter = nil
         // Right where you are now, not setup's Home
         if location.location != nil { setupHome.location = nil }
-        loadedYou = nil
+        // Moved back from elsewhere, right where you are; already on you (as on coming back to
+        // the tab), still where it loaded, so a fix a few metres off doesn't load it all again
+        if wasMoved { loadedYou = nil }
         location.find()
-        if here == nil {
-            withAnimation(.smooth) { camera = .userLocation(fallback: .region(Self.cityRegion)) }
-        } else if !wasMoved {
-            // Still `here`, so not framed by its change
-            frame()
+        // Framed on you as you are now, whatever's toggled on and however it was zoomed, turned
+        // the way it was kept (on either tab)
+        if let you = location.location ?? here {
+            let region = MKCoordinateRegion(center: you.coordinate,
+                                            latitudinalMeters: Self.framedMeters, longitudinalMeters: Self.framedMeters)
+            framingUntil = .now.addingTimeInterval(1.5)
+            withAnimation(.smooth) { camera = framing(region) }
+        } else {
+            // Not found yet: the city, still turned the kept way, and framed on you once you're
+            // found (`here` changing)
+            framingUntil = .now.addingTimeInterval(1.5)
+            withAnimation(.smooth) { camera = framing(Self.cityRegion) }
         }
-        Task { await load() }
+        // Back to you elsewhere reloads by itself (`updatingTrains`); not here as well
+        if loadKey == wasLoading { Task { await load() } }
     }
 
     /// Whether the note over the map shows: the map moved more than 0.15 miles off you.
@@ -218,44 +256,31 @@ struct LiveView: View {
     private static let middleMeters = 0.15 * 1609.344
 
     /// The map's come to rest at `center`: past `followMeters` from where it last rested, by
-    /// your hand rather than `frame()`'s, Nearby lists what's near there.
-    private func mapRested(at center: CLLocationCoordinate2D) {
+    /// your hand rather than `frame()`'s (`byHand`, as it was when it came to rest), Nearby lists
+    /// what's near there.
+    private func mapRested(at center: CLLocationCoordinate2D, byHand: Bool) {
         let middle = CLLocation(latitude: center.latitude, longitude: center.longitude)
-        guard let rested = restCenter, Date.now > framingUntil else {
-            restCenter = middle
+        guard let rested = motion.restCenter, byHand else {
+            motion.restCenter = middle
             return
         }
         guard middle.distance(from: rested) > Self.followMeters else { return }
-        restCenter = middle
+        motion.restCenter = middle
         revealed = []
         mapCenter = middle
+        // Its lines with it, not in a drawing after (`onChange(of: here)`)
+        nearbyBusLines = Self.nearestBusLines(near: middle)
     }
 
-    /// A mark tapped on the map: its place opened (docks have no times to open) at the top of
-    /// the card, and once the map's moved, its distance from you on its row.
+    /// A mark tapped on the map: its place's tiles outlined, a station's or stop's lines shown
+    /// at it, scrolled to; and once the map's moved, its distance from you.
     private func tapped(_ id: String) {
         withAnimation(.smooth) {
             openedStop = nil
-            if !id.hasPrefix("d") { openedPlace = id }
+            openedPlace = id
         }
         focus(id)
         if mapCenter != nil { revealed.insert(id) }
-    }
-
-    /// A place's row tapped: opened, closing any other, at the top of the card; or, open,
-    /// closed. A stop opened from its dot is listed only while open, so either way it goes,
-    /// its lines no longer drawn.
-    private func toggle(_ id: String) {
-        withAnimation(.smooth) {
-            openedStop = nil
-            if openedPlace == id {
-                openedPlace = nil
-                openedHeight = 0
-            } else {
-                openedPlace = id
-            }
-        }
-        if openedPlace == id { focus(id) }
     }
 
     /// Scrolls the card to `id`'s place once it's laid out open, for its top as it is then.
@@ -272,14 +297,14 @@ struct LiveView: View {
             openedPlace = stop.id
         }
         focus(stop.id)
-        if nyNorth, let mapDistance {
+        if MapNorth.isOff(framedHeading, from: 0), let mapDistance = motion.mapDistance {
             // As far up as it was, turned: a turned map's span is the rect round it
             framingUntil = .now.addingTimeInterval(1.5)
             withAnimation(.smooth) {
                 camera = .camera(MapCamera(centerCoordinate: stop.coordinate, distance: mapDistance,
-                                           heading: MapNorth.heading(ny: true)))
+                                           heading: framedHeading))
             }
-        } else if let mapSpan {
+        } else if let mapSpan = motion.mapSpan {
             // Where it comes to rest is where this put it, not a move of yours
             framingUntil = .now.addingTimeInterval(1.5)
             withAnimation(.smooth) { camera = .region(MKCoordinateRegion(center: stop.coordinate, span: mapSpan)) }
@@ -296,9 +321,7 @@ struct LiveView: View {
     private func loadOpened() async {
         guard let opened = openedStop else { return }
         let at = CLLocation(latitude: opened.coordinate.latitude, longitude: opened.coordinate.longitude)
-        let place = await NearbyBuses.places(near: at)?.first { place in
-            place.ways.contains { CLLocation(latitude: $0.stop.latitude, longitude: $0.stop.longitude).distance(from: at) < Self.openedReach }
-        }
+        let place = await NearbyBuses.places(near: at)?.first { Self.place($0, isAt: at) }
         guard openedStop?.id == opened.id else { return }
         if let place {
             openedStop?.place = place
@@ -308,10 +331,26 @@ struct LiveView: View {
         }
     }
 
+    /// The opened stop's buses from `places`, Nearby's just found, if it's one of them; whether
+    /// it was, or there's no stop opened, so it needn't be asked for on its own.
+    private func takeOpened(from places: [NearbyBusPlace]) -> Bool {
+        guard let opened = openedStop else { return true }
+        let at = CLLocation(latitude: opened.coordinate.latitude, longitude: opened.coordinate.longitude)
+        guard let place = places.first(where: { Self.place($0, isAt: at) }) else { return false }
+        openedStop?.place = place
+        openedStop?.failed = false
+        return true
+    }
+
+    /// Whether `place` is the stop at `at` (`openedReach`).
+    private static func place(_ place: NearbyBusPlace, isAt at: CLLocation) -> Bool {
+        place.ways.contains { CLLocation(latitude: $0.stop.latitude, longitude: $0.stop.longitude).distance(from: at) < openedReach }
+    }
+
     /// Degrees across round a stop opened before the map's first come to rest.
     private static let openedSpan: CLLocationDegrees = 0.008
 
-    /// Meters off Bus Time's stop may be from bus_stops.json's to be taken as it.
+    /// Meters off Bus Time's stop may be from the network's (`TrackShapes.busStops`) to be taken as it.
     private static let openedReach: Double = 80
 
     /// A merged bubble tapped: zoomed in round the places it stands for, till they come apart.
@@ -326,7 +365,7 @@ struct LiveView: View {
         // Where it comes to rest is where the bubble was, not a move of yours to list round;
         // but zoomed in by your tap, so not framed back out on the next load
         framingUntil = .now.addingTimeInterval(1.5)
-        cameraMovedByHand = true
+        motion.cameraMovedByHand = true
         withAnimation(.smooth) { camera = framing(region) }
     }
 
@@ -361,7 +400,8 @@ struct LiveView: View {
     private var bikes: BikeKinds? { showsCitiBike ? bikeKinds : nil }
     private var showsBikes: Bool { bikes != nil }
 
-    /// Restarts loading when any of it changes.
+    /// Restarts loading when any of it changes. Not the bikes counted: the docks are fetched
+    /// with either, so changing them only redraws.
     private var loadKey: LoadKey {
         LoadKey(trains: everyTrain.map(\.trainID), subway: showsSubway, buses: showsBuses, bikes: showsBikes,
                 lat: here?.coordinate.latitude, lon: here?.coordinate.longitude)
@@ -389,12 +429,10 @@ struct LiveView: View {
                 .overlay(alignment: .top) { movedNote }
                 .overlay(alignment: sideways ? .bottomLeading : .bottom) {
                     card
-                    // As it is closed: grown round a place opened, it's over the map's foot
-                    // rather than shifting the map up and back. Upright only: on its side the card
-                    // runs down the left, and kept, turned back upright with a place open, it
-                    // padded the map's foot far too tall. Till it's measured upright, though open
+                    // Upright only: on its side the card runs down the left, and kept, turned back
+                    // upright, it padded the map's foot far too tall
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
-                        guard !sideways, !openedListed || cardsHeight == 0 else { return }
+                        guard !sideways else { return }
                         cardsHeight = height
                     }
                     .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { cardTop = $0 }
@@ -406,6 +444,14 @@ struct LiveView: View {
                 .overlay(alignment: sideways ? .bottomLeading : .bottom) {
                     modesRow
                     .modifier(CardPlace(sideways: sideways))
+                }
+                .navigationDestination(for: LineWays.self) { line in
+                    LineDetail(line: line)
+                        .toolbar(.visible, for: .navigationBar)
+                }
+                .navigationDestination(for: BusLineWays.self) { line in
+                    BusLineDetail(line: line)
+                        .toolbar(.visible, for: .navigationBar)
                 }
                 .navigationDestination(for: Selection.self) { selection in
                     TrainDetail(selection: selection)
@@ -419,15 +465,32 @@ struct LiveView: View {
                 .onChange(of: framedIDs, initial: true) { frame() }
                 // You've moved on: framed round where you are now, however the map was left
                 .onChange(of: here) {
-                    cameraMovedByHand = false
+                    motion.cameraMovedByHand = false
                     frame()
                 }
                 .onChange(of: showsBuses) {
                     if showsBuses { buses = .finding; busesStale = false } else { openedStop = nil }
                 }
                 .onChange(of: showsBikes) { if showsBikes { docks = nil; docksFailed = false } }
-                .onAppear { location.start() }
+                // Settings' way up, over the way you'd turned it
+                .onChange(of: nyNorth) { keptHeading = nil }
+                .onAppear {
+                    location.start()
+                    shown = true
+                    if findsOnShow {
+                        findsOnShow = false
+                        if location.isAllowed && mapCenter == nil { location.find() }
+                    }
+                }
+                .onDisappear { shown = false }
                 .onChange(of: recenterRequests) { recenter() }
+                // Turned on or off its side, the map's resized round the card, which moves its
+                // middle: not a move of yours, which listed what's near somewhere else and loaded
+                // it at every turn. Framed on you again, unless you'd moved it
+                .onChange(of: sideways) {
+                    framingUntil = .now.addingTimeInterval(1.5)
+                    frame()
+                }
                 .onChange(of: allowingLocation, initial: true) { _, allowing in
                     guard allowing else { return }
                     allowingLocation = false
@@ -447,9 +510,25 @@ struct LiveView: View {
                     setupHome.location = nil
                 }
                 .onChange(of: here, initial: true) { _, here in
+                    // The lines first, drawn once laid out (`findLines`)
+                    // (Moved by the map, `mapRested` has them already)
+                    if here != motion.restCenter {
+                        let lines = Self.nearestBusLines(near: here)
+                        if lines != nearbyBusLines { nearbyBusLines = lines }
+                    }
+                    // Moved on by the map, the stations listed with everything else, once it's all
+                    // loaded (`load`), not each on its own; at first, and round you, straight away
+                    guard nearby.isEmpty || mapCenter == nil else { return }
                     nearby = here.map { Nearby.stations(near: $0, limit: 3) } ?? []
                 }
-                .onChange(of: linesKey, initial: true) { findLines() }
+                // The stops along the lines and their ways at every re-listing; the lines themselves,
+                // slow, off the main thread, only when what's drawn changes (`drawnLinesKey`)
+                .onChange(of: linesKey, initial: true) {
+                    // Not while the lines they're along are being laid out again: once, with them
+                    guard motion.linesFoundFor == drawnLinesKey else { return }
+                    findStopsAlong()
+                }
+                .task(id: drawnLinesKey) { await findLines() }
                 // The bus home stop from Spotlight: buses shown, and it opened
                 .onChange(of: opening.busStop, initial: true) { _, bus in
                     guard let bus else { return }
@@ -464,15 +543,17 @@ struct LiveView: View {
                     let at = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
                     revealed = []
                     mapCenter = at
-                    restCenter = at
+                    motion.restCenter = at
                     open(AlongStop(id: "e\(coordinate.latitude),\(coordinate.longitude)", coordinate: coordinate,
                                    lines: bus.allLines))
                 }
                 // Reload every minute and when the train list changes; pull-to-refresh (in the
-                // card) and returning to the app also re-locate (unless the map's been moved)
+                // card) and returning to the app also re-locate (unless the map's been moved);
+                // returning on another tab, once Nearby shows
                 .updatingTrains(live, id: loadKey, refreshing: {
-                    if location.isAllowed && mapCenter == nil { location.find() }
-                }, load: load)
+                    guard location.isAllowed && mapCenter == nil else { return }
+                    if shown { location.find() } else { findsOnShow = true }
+                }, load: { await load(pulled: $0) })
         }
     }
 
@@ -483,8 +564,9 @@ struct LiveView: View {
         MapReader { proxy in
             Map(position: $camera, bounds: Self.cityBounds) {
                 // Under everything else
-                NearbyLinesLayer(lines: lines, version: linesVersion, mapPointsPerPoint: linesScale,
-                                 cache: linesCache, zoom: busZoom)
+                NearbyLinesLayer(lines: lines, version: linesVersion, mapPointsPerPoint: mapPointsPerPoint,
+                                 cache: linesCache)
+                DebugOverlays(on: .nearby)
                 // Wide, the other stations round about, as icons, under the listed ones' signs
                 if showsStations && showsSubway && mapDetail == .wide {
                     ForEach(otherStations) { station in
@@ -494,28 +576,28 @@ struct LiveView: View {
                         .annotationTitles(.hidden)
                     }
                 }
-                // Bus stops' stems out to their marks, under every mark, not over the next one's
-                ForEach(busStems) { stem in
-                    MapPolyline(coordinates: stem.coordinates)
-                        .stroke(BusBadge.blue.opacity(stem.faded ? Self.fadedOpacity : 1),
-                                style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
-                }
-                // Your dot, the app's own, to shrink as the grey dot splits off it
-                UserAnnotation {
-                    MapYouMark(tracker: middle)
+                // Your dot, the app's own, to shrink as the grey dot splits off it. At Nearby's own
+                // fix, not MapKit's user location, which keeps best-accuracy GPS on while it shows
+                if let you = location.location {
+                    Annotation("My Location", coordinate: you.coordinate) {
+                        // Tapped, back to you, zoomed as Nearby starts
+                        MapYouMark(tracker: middle, tap: recenter)
+                    }
+                    .annotationTitles(.hidden)
                 }
                 if showsStations && showsSubway {
                     ForEach(nearby) { result in
                         Annotation(result.station.name, coordinate: CLLocationCoordinate2D(latitude: result.station.lat,
                                                                                          longitude: result.station.lon)) {
-                            mark("s" + result.id) {
+                            mark("s" + result.id, spoken: result.station.name, kinds: "stations",
+                                 detail: result.station.routes.map(Lines.spokenName(of:)).joined(separator: ", "),
+                                 hint: "Shows its trains", key: result.station.routes.joined(separator: " ")) {
                                 MapSign(name: result.station.name, fill: .black) {
                                     ForEach(result.station.routes, id: \.self) { LineBullet(route: $0, size: 15) }
                                 }
                             } bubble: { count in
                                 MapBubble(fill: .black, symbol: "tram.fill", count: count)
                             }
-                            .accessibilityHint("Shows its trains")
                         }
                         // The signs carry their names
                         .annotationTitles(.hidden)
@@ -523,40 +605,59 @@ struct LiveView: View {
                 }
                 if showsStations {
                     let names = busNames
-                    ForEach(busPlaces, id: \.self) { place in
+                    // By its stop, not the whole place, whose times change with each load: a new
+                    // mark each time, taken off the map and added again, flickering
+                    ForEach(busPlaces, id: \.ways.first?.stop.id) { place in
                         if let stop = place.ways.first?.stop {
                             let id = "b" + stop.id
                             Annotation(place.name, coordinate: busWays[id]?.onLine
                                        ?? CLLocationCoordinate2D(latitude: stop.latitude, longitude: stop.longitude)) {
-                                mark(id) {
-                                    BusStopMark(name: place.name, lines: names[id], placement: placement(of: id, named: names[id] != nil))
+                                let lines = shownLines(id, names: names)
+                                let placed = placement(of: id, named: lines != nil)
+                                let nudge = markLayout.nudges[id] ?? .zero
+                                mark(id, spoken: place.name, kinds: "bus stops",
+                                     // A dot names none, but its lines are said
+                                     detail: BusStopMark.spoken(lines: lines ?? NearbyBusBadges.lines(of: place),
+                                                                placement: placed),
+                                     hint: "Shows its buses",
+                                     key: "\(lines ?? [])|\(String(describing: placed))|\(nudge.width),\(nudge.height)") {
+                                    BusStopMark(name: place.name, lines: lines, placement: placed, nudge: nudge)
                                 } bubble: { count in
                                     MapBubble(fill: BusBadge.blue, symbol: "bus.fill", count: count)
                                 }
                                 .opacity(isFaded(place.lines(at: live.mapNow).map(\.line)) ? Self.fadedOpacity : 1)
-                                .accessibilityHint("Shows its buses")
                             }
                             .annotationTitles(.hidden)
                         }
                     }
-                    ForEach(alongStops) { stop in
+                    // With those just gone, shrinking away
+                    ForEach(alongStops + leavingStops.filter { stop in !alongStops.contains { $0.id == stop.id } }) { stop in
                         Annotation("Bus stop", coordinate: busWays[stop.id]?.onLine ?? stop.coordinate) {
-                            mark(stop.id) {
-                                BusStopMark(name: "Bus stop", lines: names[stop.id], opened: stop.id == openedStop?.id,
-                                            placement: placement(of: stop.id, named: names[stop.id] != nil))
+                            let lines = shownLines(stop.id, names: names)
+                            let placed = placement(of: stop.id, named: lines != nil)
+                            let opened = stop.id == openedStop?.id
+                            let nudge = markLayout.nudges[stop.id] ?? .zero
+                            mark(stop.id, spoken: "Bus stop", kinds: "bus stops",
+                                 detail: BusStopMark.spoken(lines: lines ?? NearbyBusBadges.sorted(stop.lines),
+                                                            placement: placed),
+                                 hint: "Shows its buses",
+                                 key: "\(lines ?? [])|\(opened)|\(String(describing: placed))|\(nudge.width),\(nudge.height)",
+                                 popsIn: true) {
+                                BusStopMark(name: "Bus stop", lines: lines, opened: opened, placement: placed, nudge: nudge)
                             } bubble: { _ in
                                 // Never shown: it hides where its lines don't fit
                                 MapBubble(fill: BusBadge.blue, symbol: "bus.fill")
                             }
                             .opacity(isFaded(stop.lines) ? Self.fadedOpacity : 1)
-                            .accessibilityHint("Shows its buses")
                         }
                         .annotationTitles(.hidden)
                     }
                     if let bikes {
                         ForEach(shownDocks) { near in
                             Annotation(near.dock.name, coordinate: near.dock.coordinate) {
-                                mark("d" + near.id) {
+                                let counts = bikes.kinds.map { $0.count(near.dock.available($0)) }.joined(separator: ", ")
+                                mark("d" + near.id, spoken: near.dock.name, kinds: "docks", detail: counts,
+                                     hint: "Shows its bikes", key: "\(counts)|\(bikes.symbol)|\(bikes.count(at: near.dock))") {
                                     DockMark(dock: near.dock, bikes: bikes)
                                         // Redrawn when its counts change, which the map's marks
                                         // otherwise can miss
@@ -571,7 +672,6 @@ struct LiveView: View {
                                         .padding(6)
                                         .contentShape(Rectangle())
                                 }
-                                .accessibilityHint("Shows its bikes")
                             }
                             .annotationTitles(.hidden)
                         }
@@ -582,17 +682,24 @@ struct LiveView: View {
             // standard map's yellow main roads read as N/Q/R/W lines
             .mapStyle(.standard(emphasis: .muted, pointsOfInterest: .excludingAll))
             .measuresRoom($room)
-            .turnsNorth($camera)
+            // Its own compass, always there, not MapKit's, there only once turned
+            .mapControls {}
+            // For the UI tests (LeewayUITests)
+            .accessibilityIdentifier("nearbyMap")
+            .feedsOverlays(.nearby)
+            .turnsNorth($camera, unless: keptHeading != nil)
             // A few times a second while it moves, then once more where it stops
             // Every frame, the grey dot kept at the map's middle
             .onMapCameraChange(frequency: .continuous) { context in
                 trackMiddle(proxy, center: context.region.center)
+                // Moving again: what's near listed once it's still
+                motion.restWait?.cancel()
+                motion.moving = true
             }
             .onMapCameraChange(frequency: .continuous) { context in
                 let now = Date.now
-                guard now.timeIntervalSince(laidOut) >= Self.layoutEvery else { return }
-                laidOut = now
-                followLinesScale(context)
+                guard now.timeIntervalSince(motion.laidOut) >= Self.layoutEvery else { return }
+                motion.laidOut = now
                 // Stems and arrows kept the way they go as you turn the map, not for every degree
                 if abs((context.camera.heading - mapHeading + 540).truncatingRemainder(dividingBy: 360) - 180) > 5 {
                     mapHeading = context.camera.heading
@@ -600,9 +707,15 @@ struct LiveView: View {
                 layOutMarks(proxy)
             }
             .onMapCameraChange(frequency: .onEnd) { context in
+                motion.moving = false
                 layOutMarks(proxy)
-                if mapHeight > 0 { mapPointsPerPoint = MapNorth.mapPointsPerPoint(context, height: mapHeight) }
-                followLinesScale(context)
+                // Not for the hair it's off after a pan, measured again: each change drew Nearby
+                // again, and its bus lines' outs (`onChange(of: mapPointsPerPoint)`), twice for
+                // every release of quick moves one after another
+                if let scale = measuredScale(proxy, context),
+                   mapPointsPerPoint == 0 || abs(scale / mapPointsPerPoint - 1) > Self.scaleChange {
+                    mapPointsPerPoint = scale
+                }
                 mapHeading = context.camera.heading
                 let zoom = BusZoom(metersPerPoint: mapPointsPerPoint / MKMapPointsPerMeterAtLatitude(context.region.center.latitude),
                                    from: busZoom)
@@ -614,16 +727,25 @@ struct LiveView: View {
                 if zoom != busZoom {
                     withAnimation(.smooth) { busZoom = zoom }
                     // Past zoomed out, each way's stops; zoomed out, one each side of the street
-                    alongStops = findAlongStops()
-                    busWays = findBusWays()
+                    findStopsAlong()
                 }
-                mapSpan = context.region.span
-                mapDistance = context.camera.distance
-                mapRested(at: context.region.center)
+                motion.mapSpan = context.region.span
+                motion.mapDistance = context.camera.distance
+                // Listing what's near holds the map up a moment: not till it's been still a
+                // little while, so moving it again straight away isn't held up
+                motion.restWait?.cancel()
+                let center = context.region.center, byHand = Date.now > framingUntil
+                motion.restWait = Task {
+                    try? await Task.sleep(for: .seconds(Self.restDelay))
+                    guard !Task.isCancelled else { return }
+                    mapRested(at: center, byHand: byHand)
+                }
                 trackMiddle(proxy, center: context.region.center)
                 // A pinch or turn of yours, not `frame()` settling: only a gesture leaves the
                 // camera positioned by the user
-                if camera.positionedByUser, Date.now > framingUntil { cameraMovedByHand = true }
+                if camera.positionedByUser, Date.now > framingUntil { motion.cameraMovedByHand = true }
+                keepHeading(context.camera.heading)
+                motion.shownCamera = context.camera
             }
             .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: {
                 mapHeight = $0.height
@@ -635,31 +757,33 @@ struct LiveView: View {
                 MapMiddleOverlay(tracker: middle)
                     .allowsHitTesting(false)
             }
+            // The grey dot tapped: zoomed in on it, as Nearby starts
+            .overlay {
+                MapMiddleTap(tracker: middle, tap: zoomToMiddle)
+            }
+            .overlay(alignment: .topTrailing) {
+                NorthButton(heading: mapHeading, turn: turnMap)
+                    .padding(.trailing, 12)
+            }
             .onChange(of: markSizes) { layOutMarks(proxy) }
             .onChange(of: bubbleSizes) { layOutMarks(proxy) }
             .onChange(of: framedIDs) { layOutMarks(proxy) }
-            // Bus stops' marks move out to their kerbs, or back, with their lines
-            .onChange(of: busZoom) {
-                busLineOuts = findBusLineOuts()
-                layOutMarks(proxy)
-            }
+            // Bus stops' arrows, past zoomed out
+            .onChange(of: busZoom) { layOutMarks(proxy) }
             .onChange(of: mapDetail) { layOutMarks(proxy) }
-            .onChange(of: busWays) {
-                busLineOuts = findBusLineOuts()
-                layOutMarks(proxy)
-            }
-            .onChange(of: mapPointsPerPoint) {
-                busLineOuts = findBusLineOuts()
-                layOutMarks(proxy)
-            }
+            // Stems faded, or bright again, with the stop opened or closed
+            .onChange(of: openedStop?.id) { layOutMarks(proxy) }
+            .onChange(of: busWays) { layOutMarks(proxy) }
+            .onChange(of: mapPointsPerPoint) { layOutMarks(proxy) }
         }
     }
 
-    /// The lines' zoom moved on to the map's, once it's a step past (`LineScale`).
-    private func followLinesScale(_ context: MapCameraUpdateContext) {
-        guard mapHeight > 0 else { return }
-        let scale = LineScale.step(MapNorth.mapPointsPerPoint(context, height: mapHeight), from: linesScale)
-        if scale != linesScale { linesScale = scale }
+    /// Map points per screen point where the map's come to rest, measured off the map, not from
+    /// the camera's distance, which turned was about twice it.
+    private func measuredScale(_ proxy: MapProxy, _ context: MapCameraUpdateContext) -> Double? {
+        guard mapHeight > 0 else { return nil }
+        return MapNorth.mapPointsPerPoint(proxy, middle: CGPoint(x: mapWidth / 2, y: mapHeight / 2))
+            ?? MapNorth.mapPointsPerPoint(context, height: mapHeight)
     }
 
     /// Where you and the map's middle are as it moves, for the grey dot: split off you once
@@ -668,9 +792,9 @@ struct LiveView: View {
     /// the map that shows; merged back once neither is. A little either way of each, so it
     /// doesn't flicker on and off at the line.
     private func trackMiddle(_ proxy: MapProxy, center: CLLocationCoordinate2D) {
-        if !userMovedMap, Date.now > framingUntil { userMovedMap = true }
+        if !motion.userMovedMap, Date.now > framingUntil { motion.userMovedMap = true }
         let middlePoint = proxy.convert(center, to: .local) ?? CGPoint(x: mapWidth / 2, y: mapHeight / 2)
-        guard let you = location.location, userMovedMap else {
+        guard let you = location.location, motion.userMovedMap else {
             middle.update(you: nil, middle: middlePoint, shows: false)
             return
         }
@@ -711,18 +835,42 @@ struct LiveView: View {
         return Set(opened.lines.map(TrackShapes.busKey)).isDisjoint(with: lines.map(TrackShapes.busKey))
     }
 
-    /// The lines drawn on the map, as `TrackShapes.busKey` has them: the listed stops', and the
+    /// The lines drawn on the map, as `TrackShapes.busKey` has them: the nearest stops' (known at
+    /// once, `nearbyBusLines`), the listed stops' (any a listed stop has past those), and the
     /// opened stop's.
     private var drawnBusLines: Set<String> {
-        Set(busPlaces.flatMap { $0.lines(at: live.mapNow).map { TrackShapes.busKey($0.line) } }
-            + (openedStop?.lines.map(TrackShapes.busKey) ?? []))
+        let listed = showsBuses ? busPlaces.flatMap { Self.lines(of: $0, at: live.mapNow) } : []
+        return (showsBuses ? nearbyBusLines : []).union(listed).union(openedStop?.lines.map(TrackShapes.busKey) ?? [])
+    }
+
+    /// The lines a listed stop has, as `TrackShapes.busKey` has them: those with buses due, or
+    /// with none due, any it's had buses for, so it's still placed on its own line.
+    private static func lines(of place: NearbyBusPlace, at date: Date) -> [String] {
+        let due = place.lines(at: date).map(\.line)
+        let any = due.isEmpty ? place.ways.flatMap { $0.arrivals.map(\.line) } : due
+        var seen: Set<String> = []
+        return any.map(TrackShapes.busKey).filter { seen.insert($0).inserted }
+    }
+
+    /// The lines stopping at the bus stops nearest `place` (`NearbyLines.nearestStopsLines`): those
+    /// the listed stops have, about, known at once without asking Bus Time, so the lines are drawn
+    /// first as Nearby moves on, not after its buses load.
+    private static func nearestBusLines(near place: CLLocation?) -> Set<String> {
+        NearbyLines.nearestStopsLines(near: place)
+    }
+
+    /// The lines a bus stop's tag shows, from `names` (`busNames`): its own and those put in it
+    /// from stops by it (`MarkLayout.extraLines`); nil, a dot, as is a stop whose lines went in another's.
+    private func shownLines(_ id: String, names: [String: [String]]) -> [String]? {
+        guard let own = names[id], !markLayout.joined.contains(id) else { return nil }
+        return own + (markLayout.extraLines[id] ?? [])
     }
 
     /// Each bus stop on the map named with lines, by its mark's id; the rest are dots. Each line
     /// drawn named once, at its stop nearest where Nearby is (you, or the moved map's middle);
     /// close in, once each way, the way of the stop nearest and its other; the opened stop first,
     /// with all its lines.
-    private var busNames: [String: [String]] {
+    private func findBusNames() -> [String: [String]] {
         guard let here else { return [:] }
         let drawn = drawnBusLines
         let listed = busPlaces.compactMap { place in
@@ -771,10 +919,15 @@ struct LiveView: View {
 
     /// A place on the map as `markLayout` has it: its sign, or a bubble standing for it (and
     /// how many it stands for, merged); a tap on a merged one zooms in to part them.
-    private func mark(_ id: String, @ViewBuilder sign: () -> some View,
+    private func mark(_ id: String, spoken name: String, kinds: String, detail: String = "", hint: String, key: String,
+                      popsIn: Bool = false,
+                      @ViewBuilder sign: () -> some View,
                       @ViewBuilder bubble: @escaping (Int?) -> some View) -> some View {
-        MapMark(id: id, layout: markLayout, signSizes: $markSizes, bubbleSizes: $bubbleSizes,
-                sign: sign(), bubble: bubble) { merged in
+        // A stop along the lines no longer marked shrinks away
+        let leaving = leavingStops.contains { $0.id == id } && !alongStops.contains { $0.id == id }
+        return MapMark(id: id, look: markLayout.tooCrowded || leaving ? .hidden : markLayout.looks[id] ?? .sign, key: key,
+                signSizes: $markSizes, bubbleSizes: $bubbleSizes,
+                spoken: name, kinds: kinds, detail: detail, hint: hint, popsIn: popsIn, sign: sign(), bubble: bubble) { merged in
             if let merged {
                 zoom(into: merged)
             } else if id.hasPrefix("e") {
@@ -784,6 +937,7 @@ struct LiveView: View {
                 tapped(id)
             }
         }
+        .equatable()
     }
 
     /// Every mark on the map, most important first: the nearest station, bus stop and dock, then
@@ -824,27 +978,42 @@ struct LiveView: View {
         let names = busNames
         // A bus stop naming no lines is a dot
         let isDot = { (id: String) in (id.hasPrefix("b") || id.hasPrefix("e")) && names[id] == nil }
-        let marks = mapMarks.compactMap { mark -> (id: String, kind: Character, point: CGPoint, sign: CGSize, bubble: CGSize,
-                                                   anchor: CGPoint, stemmed: Bool)? in
-            guard let kind = mark.id.first, var point = proxy.convert(mark.coordinate, to: .local) else { return nil }
-            // Where a bus stop's stem starts, on its street
-            let anchor = point
+        let marks = mapMarks.compactMap { mark -> (id: String, kind: Character, point: CGPoint, stop: CGPoint, sign: CGSize,
+                                                   bubble: CGSize)? in
+            guard let kind = mark.id.first, let stop = proxy.convert(mark.coordinate, to: .local) else { return nil }
+            var point = stop
             // A bus stop's mark not measured yet (the map doesn't always say, for its marks
             // added as it zooms) as big as it's drawn, not left out, covering others unseen
             let isBus = kind == "b" || kind == "e"
             // A station's too, or it'd show its sign over the others
-            let estimate = isBus ? Self.busMarkSize(lines: names[mark.id], arrow: busZoom != .far)
+            let estimate = isBus ? BusTagLayout.size(lines: names[mark.id], arrow: busZoom != .far)
                 : kind == "s" ? nearby.first { "s" + $0.id == mark.id }.map { Self.stationSignSize($0.station) } : nil
-            guard let sign = markSizes[mark.id] ?? estimate,
+            // A stop's tag as its own lines draw it: not as measured with another's lines put in
+            // it, or as a dot, its lines in another's
+            let measured = isBus && (markLayout.extraLines[mark.id] != nil || markLayout.joined.contains(mark.id))
+                ? nil : markSizes[mark.id]
+            guard let sign = measured ?? estimate,
                   let bubble = bubbleSizes[mark.id] ?? (isBus || kind == "s" ? Self.busBubbleSize : nil) else { return nil }
-            // A bus stop's where it's drawn, out to its kerb, and whether on a stem
-            let placed = isBus ? placement(of: mark.id, named: names[mark.id] != nil, pushed: false) : nil
-            if let offset = placed?.offset {
+            // A bus stop's where it's drawn, on its way's line, its lines just past it
+            if isBus, let offset = placement(of: mark.id, named: names[mark.id] != nil, size: sign)?.offset {
                 point.x += offset.width
                 point.y += offset.height
             }
-            return (mark.id, kind, point, sign, bubble, anchor, placed?.stemFrom != nil)
+            return (mark.id, kind, point, stop, sign, bubble)
         }
+        // The lines stopping at each bus stop, for its lines to go in another stop's tag only
+        // where they stop there too
+        var serves: [String: Set<String>] = [:]
+        for place in busPlaces {
+            if let stop = place.ways.first?.stop {
+                serves["b" + stop.id] = Set(Self.lines(of: place, at: live.mapNow)).union(BusNetwork.stopByID[stop.id]?.lines ?? [])
+            }
+        }
+        for stop in alongStops { serves[stop.id] = Set(stop.lines.map(TrackShapes.busKey)) }
+        let close = busZoom == .close
+        var tags: [BusTagLayout.Shown] = []
+        // Close in, nothing over a bus stop's tag
+        let coversTag = { (rect: CGRect) in close && tags.contains { $0.rect.intersects(rect) } }
         // With a little room round it
         func rect(_ point: CGPoint, _ size: CGSize) -> CGRect {
             CGRect(x: point.x - size.width / 2, y: point.y - size.height / 2, width: size.width, height: size.height)
@@ -855,7 +1024,6 @@ struct LiveView: View {
         // a stop's lines keep clear of all of one
         var bubbles: [CGRect] = []
         var layout = MarkLayout()
-        var pushes: [String: CGSize] = [:]
         var groups: [(leader: String, kind: Character, point: CGPoint, members: [String])] = []
         var hiddenAlone = false
         // The stations' signs placed, nearest first, for farther ones under them to hide
@@ -863,120 +1031,51 @@ struct LiveView: View {
         // Each mark's place, once, not again for every mark it's checked against. Stops along
         // the lines don't keep others' signs off their places
         let places = marks.map { $0.kind == "e" || isDot($0.id) ? nil : rect($0.point, $0.bubble) }
-        // The stems of the bus stops placed, from their streets out to their marks, for none to
-        // cross another
-        var stems: [(id: String, from: CGPoint, to: CGPoint)] = []
-        // Whether a stem from `from` to `to` crosses any of `others`; not one from its own stop,
-        // or from the same place on the street
-        func crossesStem(from: CGPoint, to: CGPoint, others: [(id: String, from: CGPoint, to: CGPoint)]) -> Bool {
-            guard hypot(to.x - from.x, to.y - from.y) > 6 else { return false }
-            func side(_ a: CGPoint, _ b: CGPoint, _ c: CGPoint) -> CGFloat { (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x) }
-            return others.contains { other in
-                guard hypot(other.from.x - from.x, other.from.y - from.y) > 3 else { return false }
-                return side(from, to, other.from) * side(from, to, other.to) < 0
-                    && side(other.from, other.to, from) * side(other.from, other.to, to) < 0
-            }
-        }
-        // How badly a bus stop's lines at `start` moved `push` cover `others`: how much of them,
-        // and its stem back to its stop across them, as bad as covering much of one; and its
-        // stem from `anchor` across another's, worse
-        func covered(start: CGPoint, size: CGSize, push: CGSize, others: [CGRect], anchor: CGPoint? = nil,
-                     otherStems: [(id: String, from: CGPoint, to: CGPoint)] = []) -> CGFloat {
-            let moved = rect(CGPoint(x: start.x + push.width, y: start.y + push.height), size)
-            let overlaps = others.reduce(0) { total, other in
-                let overlap = other.intersection(moved)
-                return overlap.isNull ? total : total + overlap.width * overlap.height
-            }
-            let length = hypot(push.width, push.height)
-            // Not where it starts from: that's what it's moving off
-            let from = rect(start, size)
-            let crossings = stride(from: CGFloat(6), to: length, by: 4).filter { along in
-                let point = CGPoint(x: start.x + push.width * along / length, y: start.y + push.height * along / length)
-                return !moved.contains(point) && !from.contains(point) && others.contains { $0.contains(point) }
-            }.count
-            let middle = CGPoint(x: start.x + push.width, y: start.y + push.height)
-            // Its stem, if it has one, or once pushed
-            let stemCrosses = anchor.map { crossesStem(from: $0, to: middle, others: otherStems) } ?? false
-            return overlaps + CGFloat(crossings) * 150 + (stemCrosses ? 2000 : 0)
-        }
-        // Where a bus stop's lines may go: out along its kerb, or its side unknown, up, down,
-        // then across; nearest first
-        func tries(along ways: [CGVector]) -> [CGSize] {
-            [.zero] + Self.tagPushes.flatMap { push in ways.map { CGSize(width: $0.dx * push, height: $0.dy * push) } }
-        }
-        // The bus stops' lines laid out, to look at again once all are: where each started, and
-        // where it may go
-        var tags: [(id: String, start: CGPoint, size: CGSize, tries: [CGSize], anchor: CGPoint, stemmed: Bool)] = []
-        for (index, var mark) in marks.enumerated() {
+        for (index, mark) in marks.enumerated() {
             // Farthest out, only the stations, as icons; wide, no bus stops' dots yet
             if mapDetail == .overview && mark.kind != "s" || mapDetail == .wide && isDot(mark.id) {
                 layout.looks[mark.id] = .hidden
                 continue
             }
-            // A bus stop's lines covering another mark: further out on a stem back to its stop,
-            // as near as clears them, or where none does, as little covered as can be
-            if (mark.kind == "b" || mark.kind == "e"), names[mark.id] != nil {
-                // Straight out to its kerb, then a little either way of it
-                let turned = { (way: CGVector, degrees: Double) -> CGVector in
-                    let angle = degrees * .pi / 180
-                    return CGVector(dx: way.dx * cos(angle) - way.dy * sin(angle), dy: way.dx * sin(angle) + way.dy * cos(angle))
-                }
-                let ways = busSide(of: mark.id).map { [$0, turned($0, 40), turned($0, -40)] }
-                    ?? [CGVector(dx: 0, dy: -1), CGVector(dx: 0, dy: 1), CGVector(dx: 1, dy: 0), CGVector(dx: -1, dy: 0)]
-                let start = mark.point
-                let options = tries(along: ways)
-                tags.append((mark.id, start, mark.sign, options, mark.anchor, mark.stemmed))
-                let size = mark.sign, anchor = mark.anchor, placedStems = stems, stemmed = mark.stemmed
-                let scored: [(push: CGSize, covered: CGFloat)] = options.map { push in
-                    (push, covered(start: start, size: size, push: push, others: placed + bubbles,
-                                   anchor: stemmed || push != .zero ? anchor : nil, otherStems: placedStems))
-                }
-                let clear = scored.first { $0.covered == 0 }
-                let least = scored.min { $0.covered < $1.covered }
-                if let here = scored.first?.covered, here > 0, let best = clear ?? least, best.covered < here {
-                    pushes[mark.id] = best.push
-                    mark.point = CGPoint(x: start.x + best.push.width, y: start.y + best.push.height)
-                }
-            }
             let sign = rect(mark.point, mark.sign)
-            let isBus = mark.kind == "b" || mark.kind == "e"
-            // A bus stop's stem across another's: a dot or a stop along the lines not shown at all
-            let hasStem = isBus && (mark.stemmed || pushes[mark.id] != nil)
-            let stemCrosses = hasStem && crossesStem(from: mark.anchor, to: mark.point, others: stems)
-            if stemCrosses && (mark.kind == "e" || isDot(mark.id)) {
-                layout.looks[mark.id] = .hidden
-                continue
-            }
-            // Shown, its stem for those after it to keep clear of
-            func keepStem() {
-                if hasStem { stems.append((mark.id, mark.anchor, mark.point)) }
-            }
             let coversOther = places.indices.contains { $0 != index && places[$0]?.intersects(sign) == true }
-            // A bus stop's lines, generously: still shown where they're crowded, if most of them
-            // can be seen, and whatever places they cover
-            let busFits = (mark.kind == "b" || mark.kind == "e") && placed.allSatisfy { placedRect in
-                let overlap = placedRect.intersection(sign)
-                return overlap.isNull || overlap.width * overlap.height <= sign.width * sign.height * Self.busOverlap
-            }
             // A dot shows where it's clear of everything, and otherwise not at all, as there are
             // so many
             if isDot(mark.id) {
                 let clear = !placed.contains { $0.intersects(sign) }
-                if clear {
-                    placed.append(sign)
-                    keepStem()
-                }
+                if clear { placed.append(sign) }
                 layout.looks[mark.id] = clear ? .sign : .hidden
                 continue
             }
-            // A stop along the lines naming some shows them generously, as a listed stop does,
-            // and otherwise not at all: never a bubble
-            if mark.kind == "e" {
-                if busFits {
-                    placed.append(sign)
-                    keepStem()
+            // A bus stop's lines clear of the marks before them, where they can be: else in
+            // the tag of a stop by it, or moved along their street, or (past close in) over
+            // others as long as most shows (`BusTagLayout`)
+            var tagHidden = false
+            if mark.kind == "b" || mark.kind == "e", let lines = names[mark.id] {
+                let angle = busWays[mark.id].map { $0.angle - mapHeading * .pi / 180 } ?? 0
+                let tag = BusTagLayout.Tag(id: mark.id, rect: sign, stop: mark.stop, angle: angle, lines: lines,
+                                           serves: serves[mark.id] ?? [])
+                switch BusTagLayout.place(tag, placed: &placed, shown: &tags, extra: &layout.extraLines, close: close,
+                                          width: { BusTagLayout.badgesWidth($0) + CGFloat($0.count) * 2 }) {
+                case .shown(let nudge):
+                    if nudge != .zero { layout.nudges[mark.id] = nudge }
+                    layout.looks[mark.id] = .sign
+                    continue
+                case .joined:
+                    // Its lines in the other's tag: itself a dot, on its line, where that's clear
+                    layout.joined.insert(mark.id)
+                    let dot = rect(mark.stop, BusTagLayout.size(lines: nil, arrow: busZoom != .far))
+                    let clear = !placed.contains { $0.intersects(dot) }
+                    if clear { placed.append(dot) }
+                    layout.looks[mark.id] = clear ? .sign : .hidden
+                    continue
+                case .hidden:
+                    tagHidden = true
                 }
-                layout.looks[mark.id] = busFits ? .sign : .hidden
+            }
+            // A stop along the lines naming some, where they don't fit: never a bubble
+            if mark.kind == "e" {
+                layout.looks[mark.id] = .hidden
                 continue
             }
             // Farthest out, a station's an icon, not its sign
@@ -991,16 +1090,16 @@ struct LiveView: View {
             }
             let stationFits = isStation && placed.allSatisfy { Self.overlapShare(sign, $0) <= Self.stationOverlap }
                 && !places.indices.contains { $0 != index && marks[$0].kind != "s" && places[$0]?.intersects(sign) == true }
-            if signs && (busFits || stationFits || (!placed.contains(where: { $0.intersects(sign) }) && !coversOther)) {
+            if signs && !tagHidden && !coversTag(sign)
+                && (stationFits || (!placed.contains(where: { $0.intersects(sign) }) && !coversOther)) {
                 placed.append(sign)
                 if isStation { stationSigns.append(sign) }
-                keepStem()
                 layout.looks[mark.id] = .sign
                 continue
             }
             // Bubbles may touch: only a few points' overlap counts
             let bubble = rect(mark.point, mark.bubble).insetBy(dx: 6, dy: 6)
-            if !placed.contains(where: { $0.intersects(bubble) }) {
+            if !placed.contains(where: { $0.intersects(bubble) }) && !coversTag(rect(mark.point, mark.bubble)) {
                 placed.append(bubble)
                 bubbles.append(rect(mark.point, mark.bubble))
                 layout.looks[mark.id] = .bubble
@@ -1019,29 +1118,6 @@ struct LiveView: View {
             }
             layout.looks[mark.id] = .hidden
         }
-        // Once all are placed, a stop's lines whose stem crosses, or which cover, marks placed
-        // after them: moved again where they're clearer of everything
-        for tag in tags where layout.looks[tag.id] == .sign {
-            let push = pushes[tag.id] ?? .zero
-            let shown = rect(CGPoint(x: tag.start.x + push.width, y: tag.start.y + push.height), tag.size)
-            guard let own = placed.firstIndex(of: shown) else { continue }
-            let others = placed.indices.filter { $0 != own }.map { placed[$0] } + bubbles
-            let otherStems = stems.filter { $0.id != tag.id }
-            let anchor = { (push: CGSize) in tag.stemmed || push != .zero ? tag.anchor : nil }
-            let now = covered(start: tag.start, size: tag.size, push: push, others: others, anchor: anchor(push), otherStems: otherStems)
-            let scored: [(push: CGSize, covered: CGFloat)] = tag.tries.map { push in
-                (push, covered(start: tag.start, size: tag.size, push: push, others: others, anchor: anchor(push), otherStems: otherStems))
-            }
-            guard now > 0, let best = scored.min(by: { $0.covered < $1.covered }), best.covered < now else { continue }
-            pushes[tag.id] = best.push == .zero ? nil : best.push
-            let middle = CGPoint(x: tag.start.x + best.push.width, y: tag.start.y + best.push.height)
-            placed[own] = rect(middle, tag.size)
-            if let stem = stems.firstIndex(where: { $0.id == tag.id }) {
-                stems[stem].to = middle
-            } else if best.push != .zero {
-                stems.append((tag.id, tag.anchor, middle))
-            }
-        }
         let merged = groups.filter { $0.members.count > 1 }
         if hiddenAlone && !merged.isEmpty {
             layout = MarkLayout(tooCrowded: true)
@@ -1050,25 +1126,12 @@ struct LiveView: View {
                 layout.looks[group.leader] = .merged(group.members)
             }
         }
-        if pushes != tagPushes {
-            withAnimation(.easeOut(duration: 0.2)) { tagPushes = pushes }
-        }
         if layout != markLayout {
             withAnimation(.easeOut(duration: 0.2)) { markLayout = layout }
         }
     }
 
-    /// About the size `BusStopMark` draws at, for one not yet measured: its lines' pill, or its
-    /// dot with room round it to tap; and its bubble's.
-    private static func busMarkSize(lines: [String]?, arrow: Bool) -> CGSize {
-        guard let lines else { return CGSize(width: arrow ? 24 : 20, height: arrow ? 24 : 20) }
-        let badges = lines.reduce(CGFloat(0)) { width, line in
-            width + CGFloat(BusBadge.label(line).count) * 6.5 + 8 + (BusBadge.isSBS(line) ? 16 : 0)
-        }
-        let spacing = CGFloat(max(0, lines.count - 1 + (arrow ? 1 : 0))) * 2
-        return CGSize(width: badges + spacing + (arrow ? 11 : 0) + 6, height: 21)
-    }
-
+    /// A bus stop's bubble's size, for one not yet measured.
     private static let busBubbleSize = CGSize(width: 30, height: 24)
 
     /// How much of a station's sign, or of the one it's over, whichever's more covered, may be
@@ -1090,23 +1153,9 @@ struct LiveView: View {
         return CGSize(width: max(CGFloat(station.name.count) * 6.3, bullets) + 14, height: 41)
     }
 
-    /// Points further out a bus stop's lines may go to clear marks they'd cover, nearest first.
-    private static let tagPushes: [CGFloat] = [14, 28, 42, 56]
-
-    /// The way out toward a bus stop's kerb on the screen, as the map's turned; nil where its
-    /// side can't be told.
-    private func busSide(of id: String) -> CGVector? {
-        guard let way = busWays[id] else { return nil }
-        let angle = way.angle - mapHeading * .pi / 180
-        return CGVector(dx: -sin(angle), dy: cos(angle))
-    }
-
     /// Seconds at least between laying the marks out while the map moves: each time is every
     /// mark against every other, on the main thread, and the map moves every frame.
     private static let layoutEvery: TimeInterval = 0.1
-
-    /// How much of a bus stop's lines may be covered by any one mark and still show.
-    private static let busOverlap: CGFloat = 0.35
 
     /// How far off a bubble may be from one of its kind to merge into it, in points.
     private static let mergeReach: CGFloat = 60
@@ -1115,27 +1164,93 @@ struct LiveView: View {
     /// from: the map's middle to about 100 m and the listed stops, which the lines' box and the
     /// stops along them go by.
     private var linesKey: [String] {
-        let middle = here.map { String(format: "%.3f,%.3f", $0.coordinate.latitude, $0.coordinate.longitude) } ?? ""
-        let routes: [String] = showsSubway ? nearby.flatMap(\.station.routes) : []
+        // Roughly where (`drawnLinesKey`'s): Nearby moved on, its stops are found along its new
+        // places' lines once those load, not first along the last places' too
+        let middle = Self.roughly(here)
+        let routes: [String] = showsSubway ? ["subway"] : []
         let busLines: [String] = busPlaces.flatMap { $0.lines(at: live.mapNow).map(\.line) }
         let stops: [String] = busPlaces.flatMap { $0.ways.map { "\($0.stop.latitude),\($0.stop.longitude)" } }
         return routes + ["|"] + busLines + ["|", middle] + stops + ["|", openedStop?.id ?? ""]
     }
 
-    /// The listed stations' lines, each its own colour, and the listed bus stops' lines, pale.
-    private func findLines() {
+    /// What the lines drawn depend on: the subway, the bus lines and the stop opened, not where
+    /// (each drawn its whole length), nor each re-listing as the map's moved a few blocks. Each
+    /// change lays them all out again, so not for less.
+    private var drawnLinesKey: [String] {
+        let routes: [String] = showsSubway ? ["subway"] : []
+        let busLines = Array(drawnBusLines).sorted()
+        return routes + ["|"] + busLines + ["|", openedStop?.id ?? ""]
+    }
+
+    /// About where `place` is, to a couple of kilometres, for the stops along the lines round it.
+    private static func roughly(_ place: CLLocation?) -> String {
+        guard let place else { return "" }
+        let step = 0.02
+        return "\((place.coordinate.latitude / step).rounded()),\((place.coordinate.longitude / step).rounded())"
+    }
+
+    /// Every subway line, each its own colour, and the listed bus stops' lines, pale: laid out
+    /// off the main thread, where they took a tenth of a second or more on it each time the map
+    /// came to rest; not shown if what's drawn has moved on meanwhile.
+    private func findLines() async {
+        let key = drawnLinesKey
         let points = nearby.map { $0.station.coordinate }
             + busPlaces.compactMap { $0.ways.first.map { CLLocationCoordinate2D(latitude: $0.stop.latitude, longitude: $0.stop.longitude) } }
             + [here?.coordinate, openedStop?.coordinate].compactMap { $0 }
         // With a stop opened, its lines too, and the others faded
         let openedLines = openedStop?.lines ?? []
-        lines = NearbyLines(routes: showsSubway ? nearby.flatMap(\.station.routes) : [],
-                            busLines: busPlaces.flatMap { $0.lines(at: live.mapNow).map(\.line) } + openedLines,
-                            brightBusLines: openedStop.map { _ in Set(openedLines.map(TrackShapes.busKey)) },
-                            around: points)
+        let busLines = Array(drawnBusLines)
+        let bright = openedStop.map { _ in Set(openedLines.map(TrackShapes.busKey)) }
+        let subway = showsSubway
+        // Every subway line, the whole system, however far out; the stations' marks keep to the
+        // zoom. Laid out at launch, off the main thread: waited on here, off it too
+        let found = await Task.detached(priority: .userInitiated) {
+            NearbyLines(routes: subway ? NearbyLines.allRoutes : [], busLines: busLines,
+                        brightBusLines: bright, around: points)
+        }.value
+        guard await stillMap() else { return }
+        lines = found
         linesVersion += 1
-        alongStops = findAlongStops()
-        busWays = findBusWays()
+        motion.linesFoundFor = key
+        // Its stops along, unless the buses where it's moved on to are still loading: found with
+        // them then (`load`), not first round the last place's listed stops and again after
+        if !showsBuses || busesAreHere { findStopsAlong() }
+    }
+
+    /// Whether the bus stops listed are those round where Nearby is, not still the last place's.
+    private var busesAreHere: Bool {
+        guard let busesFrom, let here else { return false }
+        return busesFrom.distance(from: here) <= Self.followMeters
+    }
+
+    /// The stops along the lines drawn, and which way each stop marked's buses go.
+    private func findStopsAlong() {
+        // Only what's changed: each change draws Nearby again
+        let along = findAlongStops()
+        if along.map(\.id) != alongStops.map(\.id) {
+            // Those no longer marked kept a moment, where they were, to shrink away
+            let gone = reduceMotion ? [] : alongStops.filter { old in !along.contains { $0.id == old.id } }
+            if !gone.isEmpty || !leavingStops.isEmpty {
+                leavingStops = gone + leavingStops.filter { old in !gone.contains { $0.id == old.id } && !along.contains { $0.id == old.id } }
+            }
+            alongStops = along
+            if !gone.isEmpty {
+                let ids = Set(gone.map(\.id))
+                Task {
+                    try? await Task.sleep(for: .seconds(MarkBubble.shrinkTime + 0.15))
+                    leavingStops.removeAll { ids.contains($0.id) }
+                }
+            }
+        }
+        var ways = findBusWays()
+        var names = findBusNames()
+        // Those going, as they were
+        for stop in leavingStops {
+            ways[stop.id] = ways[stop.id] ?? busWays[stop.id]
+            names[stop.id] = names[stop.id] ?? busNames[stop.id]
+        }
+        if ways != busWays { busWays = ways }
+        if names != busNames { busNames = names }
     }
 
     /// Which way each bus stop marked's buses go, from which side of its street it's on.
@@ -1143,12 +1258,22 @@ struct LiveView: View {
         var ways: [String: BusSides.Way] = [:]
         for place in busPlaces {
             guard let stop = place.ways.first?.stop else { continue }
-            let keys = place.lines(at: live.mapNow).map { TrackShapes.busKey($0.line) }
+            // Where the network has the stop, on its line already, the way its buses go there;
+            // else the nearest of its lines'
+            if let known = BusNetwork.stopByID[stop.id] {
+                ways["b" + stop.id] = BusSides.Way(angle: known.angle, onLine: known.coordinate)
+                continue
+            }
+            let keys = Self.lines(of: place, at: live.mapNow)
             ways["b" + stop.id] = lines.sides.way(at: CLLocationCoordinate2D(latitude: stop.latitude, longitude: stop.longitude),
                                                   lines: keys)
         }
         for stop in alongStops {
-            ways[stop.id] = lines.sides.way(at: stop.coordinate, lines: stop.lines.map(TrackShapes.busKey))
+            if let angle = stop.angle {
+                ways[stop.id] = BusSides.Way(angle: angle, onLine: stop.coordinate)
+            } else {
+                ways[stop.id] = lines.sides.way(at: stop.coordinate, lines: stop.lines.map(TrackShapes.busKey))
+            }
         }
         return ways
     }
@@ -1172,7 +1297,7 @@ struct LiveView: View {
             .filter { $0.meters < Self.otherStationsReach }
             .sorted { $0.meters < $1.meters }
             .filter { seen.insert($0.station.complex).inserted }
-            .prefix(Self.otherStationsMost)
+            .prefix(min(Self.otherStationsMost, max(0, Self.mostMarks - listedMarks)))
             .map(\.station)
     }
 
@@ -1182,108 +1307,18 @@ struct LiveView: View {
         withAnimation(.smooth) { camera = framing(region) }
     }
 
-    /// A bus stop's stem on the map, from its line out to its mark's middle.
-    private struct BusStem: Identifiable {
-        let id: String
-        let coordinates: [CLLocationCoordinate2D]
-        let faded: Bool
-    }
-
-    /// The stems of the bus stops' marks showing, from where each mark's placed (`placement`):
-    /// drawn on the map, under all the marks, as lines a mark's own view drew crossed the next
-    /// mark over. Points turned into map points at the zoom the map last came to rest at.
-    private var busStems: [BusStem] {
-        guard showsStations, mapPointsPerPoint > 0, !markLayout.tooCrowded else { return [] }
-        let names = busNames
-        let listed = busPlaces.compactMap { place in
-            place.ways.first.map { way in
-                ("b" + way.stop.id, CLLocationCoordinate2D(latitude: way.stop.latitude, longitude: way.stop.longitude),
-                 place.lines(at: live.mapNow).map(\.line))
-            }
-        }
-        let along = alongStops.map { ($0.id, $0.coordinate, $0.lines) }
-        let heading = mapHeading * .pi / 180
-        return (listed + along).compactMap { id, coordinate, lines -> BusStem? in
-            guard markLayout.looks[id] ?? .sign == .sign,
-                  let placement = placement(of: id, named: names[id] != nil), let from = placement.stemFrom else { return nil }
-            // Out along the screen's way to its kerb, turned back to the map's
-            let screen = CGVector(dx: -sin(placement.angle), dy: cos(placement.angle))
-            let map = CGVector(dx: screen.dx * cos(heading) - screen.dy * sin(heading),
-                               dy: screen.dx * sin(heading) + screen.dy * cos(heading))
-            // From its line, or its side unknown, its place
-            let base = MKMapPoint(busWays[id]?.onLine ?? coordinate)
-            let at = { (points: CGFloat) in
-                MKMapPoint(x: base.x + map.dx * Double(points) * mapPointsPerPoint,
-                           y: base.y + map.dy * Double(points) * mapPointsPerPoint).coordinate
-            }
-            // To its middle, wherever it's pushed: its screen offset turned back to the map's
-            let offset = placement.offset
-            let end = MKMapPoint(x: base.x + Double(offset.width * cos(heading) - offset.height * sin(heading)) * mapPointsPerPoint,
-                                 y: base.y + Double(offset.width * sin(heading) + offset.height * cos(heading)) * mapPointsPerPoint)
-            let ends = [at(from), end.coordinate]
-            // New for each shape, as MapKit keeps a line's last shape while its id stays
-            let key = ends.map { String(format: "%.6f,%.6f", $0.latitude, $0.longitude) }.joined(separator: ";")
-            return BusStem(id: id + key, coordinates: ends, faded: isFaded(lines))
-        }
-    }
-
-    /// Points out toward its kerb each bus stop marked's line is drawn, as `NearbyLinesLayer`
-    /// draws it: right of its run, by which side of it the stop is. Each run worked out once.
-    private func findBusLineOuts() -> [String: CGFloat] {
-        guard mapPointsPerPoint > 0, let latitude = busWays.values.first?.onLine.latitude else { return [:] }
-        let metersPerPoint = mapPointsPerPoint / MKMapPointsPerMeterAtLatitude(latitude)
-        var drawings: [Int: (both: [Bool], middles: [CGFloat], lefts: [CGFloat])] = [:]
-        var outs: [String: CGFloat] = [:]
-        for (id, way) in busWays {
-            let drawing = drawings[way.run] ?? lines.busDrawing(run: way.run, zoom: busZoom, metersPerPoint: metersPerPoint)
-            drawings[way.run] = drawing
-            guard drawing.both.indices.contains(way.point) else { continue }
-            let right = drawing.both[way.point] && way.side < 0 ? drawing.lefts[way.point] : drawing.middles[way.point]
-            outs[id] = right * CGFloat(way.side)
-        }
-        return outs
-    }
-
-    /// Where a bus stop's mark sits off its place, at the map's zoom (`busZoom`): on its street's
-    /// line zoomed out; on a stem out to its kerb in between; close in, on its own way's line where
-    /// buses run both ways, its lines (`named`) just past it. Its line moved out from under any
-    /// subway lines over it (`NearbyLines.busOut`). With an arrow the way its buses go, past
-    /// zoomed out. Nil on its place, where its side can't be told or zoomed out on its line.
-    private func placement(of id: String, named: Bool, pushed: Bool = true) -> BusMarkPlacement? {
-        // Pushed further out to clear other marks, on a stem from its line
-        let pushOffset = pushed && named ? tagPushes[id] : nil
-        let push = pushOffset.map { hypot($0.width, $0.height) } ?? 0
-        guard let way = busWays[id] else {
-            // Its side unknown: whichever way it was pushed, on a stem from its place
-            guard let pushOffset, push > 0 else { return nil }
-            return BusMarkPlacement(angle: atan2(-pushOffset.width, pushOffset.height), out: push, stemFrom: 1.5,
-                                    arrow: false, mapAngle: 0)
-        }
+    /// Where a bus stop's mark sits off its place on its way's line (`busWays`), at the map's
+    /// zoom (`busZoom`): zoomed out, on it; closer, on it with an arrow the way its buses go,
+    /// its lines (`named`) just past it on the kerb side. Nil on its place.
+    private func placement(of id: String, named: Bool, size: CGSize? = nil) -> BusMarkPlacement? {
+        guard let way = busWays[id], busZoom != .far else { return nil }
         // On the screen, turned as the map is
         let angle = way.angle - mapHeading * .pi / 180
-        let side = CGVector(dx: -sin(angle), dy: cos(angle))
-        let line = busLineOuts[id] ?? 0
-        // A sign's middle out far enough for its edge to clear the line
-        // Not measured yet: about one line's pill
-        let size = markSizes[id] ?? (named ? CGSize(width: 44, height: 21) : .zero)
-        let half = abs(side.dx) * size.width / 2 + abs(side.dy) * size.height / 2
-        // Pushed straight out or a little either way of it
-        let extra = pushOffset ?? .zero
-        switch busZoom {
-        case .far:
-            guard line != 0 || push > 0 else { return nil }
-            return BusMarkPlacement(angle: angle, out: line, extra: extra, stemFrom: push > 0 ? line + 1.5 : nil, arrow: false,
-                                    mapAngle: way.angle)
-        case .between:
-            return BusMarkPlacement(angle: angle, out: line + (named ? half + 4 : 14), extra: extra, stemFrom: line + 1.5,
-                                    arrow: true, mapAngle: way.angle)
-        case .close:
-            // On a line moved out beside the subway, a little further out, clear of its edge
-            let clear: CGFloat = abs(line) > NearbyLinesLayer.laneOut + 0.5 ? 4 : 1
-            // Its lines on a short stem from its own line, not floating beside it
-            return BusMarkPlacement(angle: angle, out: line + (named ? half + clear : clear), extra: extra,
-                                    stemFrom: named || push > 0 ? line + 1.5 : nil, arrow: true, mapAngle: way.angle)
-        }
+        // A sign's middle out far enough for its edge to clear the line. Not measured yet: about
+        // one line's pill
+        let size = size ?? markSizes[id] ?? (named ? CGSize(width: 44, height: 21) : .zero)
+        return BusMarkPlacement(angle: angle, out: named ? BusTagLayout.kerbOffset(angle: angle, size: size) : 0,
+                                arrow: true, mapAngle: way.angle)
     }
 
     /// A stop along a listed bus stop's lines, marked with its lines but not listed.
@@ -1291,6 +1326,8 @@ struct LiveView: View {
         let id: String
         let coordinate: CLLocationCoordinate2D
         let lines: [String]
+        /// The way its buses go (`TrackShapes.BusStop.angle`), where it's one of the network's.
+        var angle: Double?
     }
 
     /// Meters from the map's middle stops along the lines are marked, how far apart those of the
@@ -1303,6 +1340,16 @@ struct LiveView: View {
     private static let listedApart: Double = 60
     private static let sameStop: Double = 15
     private static let alongMost = 40
+    /// Marks on Nearby's map at most, those nearest its middle (11/9): each is a view MapKit
+    /// moves and lays out, and more held the map up.
+    private static let mostMarks = 20
+
+    /// The marks the listed places have: stations, bus stops, docks.
+    private var listedMarks: Int {
+        (showsSubway ? nearby.count : 0) + busPlaces.count + shownDocks.count
+    }
+    /// Each line's stops kept each way it goes, nearest first, the listed ones among them (11/9).
+    private static let alongEachWay = 5
 
     /// The stops along the listed bus stops' lines round the map's middle, but not those listed,
     /// nor zoomed out, the other side of the street from one marked; past zoomed out, each way's.
@@ -1312,7 +1359,7 @@ struct LiveView: View {
         let eachWay = busZoom != .far
         // The way a stop's buses go, past zoomed out
         let angle = { (stop: TrackShapes.BusStop) -> Double? in
-            eachWay ? lines.sides.way(at: stop.coordinate, lines: stop.lines)?.angle : nil
+            eachWay ? stop.angle ?? lines.sides.way(at: stop.coordinate, lines: stop.lines)?.angle : nil
         }
         // Going the same way, or either's way unknown
         let sameWay = { (a: Double?, b: Double?) -> Bool in
@@ -1345,11 +1392,37 @@ struct LiveView: View {
         // The opened stop kept, wherever it is
         if let opened = openedStop {
             let place = CLLocation(latitude: opened.coordinate.latitude, longitude: opened.coordinate.longitude)
-            let stop = TrackShapes.BusStop(coordinate: opened.coordinate, lines: opened.lines)
+            let stop = TrackShapes.BusStop(coordinate: opened.coordinate, lines: opened.lines.map(TrackShapes.busKey))
             kept.append((stop, place, angle(stop)))
         }
-        for (stop, place, _) in candidates where kept.count < Self.alongMost {
+        // How many of each line's stops are kept each way it goes (`alongEachWay`): the way
+        // each line's first goes, and how many its way and the other
+        var firstWay: [String: Double] = [:]
+        var counts: [String: Int] = [:]
+        // The way a stop's buses go on `line`, as counted: its own, or the other
+        func wayKey(_ line: String, _ stop: TrackShapes.BusStop) -> String {
+            guard let angle = stop.angle ?? lines.sides.way(at: stop.coordinate, lines: [line])?.angle else { return line }
+            guard let first = firstWay[line] else {
+                firstWay[line] = angle
+                return line
+            }
+            return cos(angle - first) > 0 ? line : line + " other"
+        }
+        // The listed stops count among each line's nearest
+        for place in busPlaces {
+            for way in place.ways {
+                let stop = TrackShapes.BusStop(coordinate: CLLocationCoordinate2D(latitude: way.stop.latitude, longitude: way.stop.longitude),
+                                               lines: place.lines(at: live.mapNow).map { TrackShapes.busKey($0.line) })
+                for line in stop.lines where drawn.contains(line) { counts[wayKey(line, stop), default: 0] += 1 }
+            }
+        }
+        // Room left of `mostMarks` once the listed places have theirs, nearest the middle first
+        let room = max(0, min(Self.alongMost, Self.mostMarks - listedMarks))
+        for (stop, place, _) in candidates where kept.count < room {
             let way = angle(stop)
+            // Only while one of its lines, the way it goes, has fewer than its nearest few
+            let keys = stop.lines.filter(drawn.contains).map { wayKey($0, stop) }
+            guard keys.contains(where: { counts[$0, default: 0] < Self.alongEachWay }) else { continue }
             guard !listed.contains(where: { listed in
                       let meters = listed.place.distance(from: place)
                       return meters < Self.sameStop || (meters < Self.listedApart && sameWay(listed.angle, way))
@@ -1358,34 +1431,75 @@ struct LiveView: View {
                   !kept.contains(where: { $0.stop.lines == stop.lines && $0.place.distance(from: place) < Self.alongApart
                       && sameWay($0.angle, way) }) else { continue }
             kept.append((stop, place, way))
+            for key in keys { counts[key, default: 0] += 1 }
         }
         return kept.map { stop, _, _ in
-            AlongStop(id: "e\(stop.coordinate.latitude),\(stop.coordinate.longitude)", coordinate: stop.coordinate, lines: stop.lines)
+            AlongStop(id: "e\(stop.coordinate.latitude),\(stop.coordinate.longitude)", coordinate: stop.coordinate, lines: stop.lines,
+                      angle: stop.angle)
         }
     }
 
     /// Everything on the map, to frame it again when they change.
     private var framedIDs: [String] { mapMarks.map(\.id).filter { !$0.hasPrefix("e") } }
 
-    /// How far across Nearby's map starts, round you: about a dozen blocks.
-    private static let framedMeters: CLLocationDistance = 1_000
+    /// How far across Nearby's map starts, round you: about a dozen blocks. Navigate's starts
+    /// the same (`NewTripView.frameStart`).
+    static let framedMeters: CLLocationDistance = 1_000
 
     /// Frames you, `framedMeters` across, whatever's near. Not once you've moved, zoomed or
     /// turned the map, which stays where you put it.
     private func frame() {
         // Everything toggled off: leave the map where it is
-        guard mapCenter == nil, !cameraMovedByHand, let here, showsSubway || showsBuses || showsBikes else { return }
+        guard mapCenter == nil, !motion.cameraMovedByHand, let here, showsSubway || showsBuses || showsBikes else { return }
         let region = MKCoordinateRegion(center: here.coordinate,
                                         latitudinalMeters: Self.framedMeters, longitudinalMeters: Self.framedMeters)
         // Where it comes to rest is where this put it, not a move of yours
         framingUntil = .now.addingTimeInterval(1.5)
-        userMovedMap = false
+        motion.userMovedMap = false
         withAnimation(.smooth) { camera = framing(region) }
     }
 
-    /// `region` framed on the map, turned NY North if Settings says.
+    /// The grey dot tapped: the map zoomed in on its middle, `framedMeters` across, as Nearby
+    /// starts round you, still listing what's there.
+    private func zoomToMiddle() {
+        guard let center = motion.shownCamera?.centerCoordinate else { return }
+        let region = MKCoordinateRegion(center: center,
+                                        latitudinalMeters: Self.framedMeters, longitudinalMeters: Self.framedMeters)
+        // Where it comes to rest is where this put it; but zoomed by your tap, so not framed
+        // back on you by the next load
+        framingUntil = .now.addingTimeInterval(1.5)
+        motion.cameraMovedByHand = true
+        withAnimation(.smooth) { camera = framing(region) }
+    }
+
+    /// `region` framed on the map, turned as you left it, or Grid North if Settings says.
     private func framing(_ region: MKCoordinateRegion) -> MapCameraPosition {
-        MapNorth.position(fitting: MKMapRect(region), heading: MapNorth.heading(ny: nyNorth), in: room) ?? .region(region)
+        MapNorth.position(fitting: MKMapRect(region), heading: framedHeading, in: room,
+                          northUp: keptHeading != nil) ?? .region(region)
+    }
+
+    /// The compass tapped: the map turned `heading` where it is, and framed that way after.
+    private func turnMap(to heading: Double) {
+        guard let shownCamera = motion.shownCamera else { return }
+        keptHeading = MapNorth.isOff(heading, from: MapNorth.heading(ny: nyNorth)) ? heading : nil
+        // Where it comes to rest is where this put it
+        framingUntil = .now.addingTimeInterval(1.5)
+        withAnimation(.smooth) {
+            camera = .camera(MapCamera(centerCoordinate: shownCamera.centerCoordinate, distance: shownCamera.distance,
+                                       heading: heading, pitch: shownCamera.pitch))
+        }
+    }
+
+    /// Which way the map's framed: as you turned it, or Settings' way.
+    private var framedHeading: Double { keptHeading ?? MapNorth.heading(ny: nyNorth) }
+
+    /// The map come to rest turned `heading`: turned off where it last rested, not by this
+    /// page framing it, it's you, by hand or the compass (which doesn't leave the camera
+    /// positioned by the user), so kept; back to Settings' way, nothing's kept.
+    private func keepHeading(_ heading: Double) {
+        defer { motion.restHeading = heading }
+        guard let restHeading = motion.restHeading, Date.now > framingUntil, MapNorth.isOff(heading, from: restHeading) else { return }
+        keptHeading = MapNorth.isOff(heading, from: MapNorth.heading(ny: nyNorth)) ? heading : nil
     }
 
     /// Once the map's been moved off you, how far its middle is from you, over the map's top;
@@ -1402,6 +1516,8 @@ struct LiveView: View {
             }
             .buttonStyle(.plain)
             .glassEffect(.regular.interactive(), in: Capsule())
+            .accessibilityLabel("\(Self.miles(you.distance(from: mapCenter))) from you")
+            .accessibilityHint("Recenters the map on you")
             .padding(.top, 8)
             .transition(.opacity)
         }
@@ -1469,6 +1585,7 @@ struct LiveView: View {
             showOnly(on)
         })
         .accessibilityAddTraits(on.wrappedValue ? .isSelected : [])
+        .accessibilityValue(eBike ? "E-bikes only" : "")
         .accessibilityHint(hint)
         .accessibilityAction(named: "Only \(name)") { showOnly(on) }
     }
@@ -1502,25 +1619,11 @@ struct LiveView: View {
         .animation(.smooth, value: listMax)
     }
 
-    /// How tall the list may be before it scrolls: the card's `cardHeight` with every place
-    /// closed; with one open, tall enough for it, up to `openedCardHeight`, and over no more
-    /// than 60% of the map showing above the closed card, for a short screen.
+    /// How tall the list may be before it scrolls: the card's `cardHeight` over its modes row;
+    /// on its side, the card's whole height.
     private var listMax: CGFloat {
-        // On its side, the card's whole height
         if sideways, sideListHeight > 0 { return sideListHeight }
-        let closed = Self.cardHeight - Self.modesRowHeight
-        guard openedListed, openedHeight > 0 else { return closed }
-        let most = min(Self.openedCardHeight, Self.cardHeight + mapHeight * 0.6)
-        return min(max(closed, openedHeight + Self.tilesMargin), most - Self.modesRowHeight)
-    }
-
-    /// Whether the place open is in the list: not once the map's moved on from it or its kind's
-    /// switched off (then, coming back, it's open again). It stays open under Train Detail.
-    private var openedListed: Bool {
-        guard let openedPlace else { return false }
-        if openedStop?.id == openedPlace { return showsBuses }
-        if showsSubway && nearby.contains(where: { $0.markID == openedPlace }) { return true }
-        return busPlaces.contains { "b" + ($0.ways.first?.stop.id ?? "") == openedPlace }
+        return Self.cardHeight - Self.modesRowHeight
     }
 
     /// What the card shows over the modes row, if anything.
@@ -1552,30 +1655,27 @@ struct LiveView: View {
                 Divider()
             } else if listing {
                 ScrollView {
-                    VStack(spacing: 0) {
-                        trains
-                            .coordinateSpace(.named(Self.tilesSpace))
-                            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { trainsHeight = $0 }
-                        Color.clear.frame(height: focusRoom)
-                    }
+                    trains
+                        .coordinateSpace(.named(Self.tilesSpace))
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { trainsHeight = $0 }
                 }
                 .scrollPosition($cardScroll)
-                // A place opened, in the list or by a tap on its map mark, comes to the top of
-                // the card, right at its edge (its row's own room over its name), not a sliver
-                // of the heading over it showing; with room under the list for one near its end
+                // A kind switched on or off starts the card at its top again, not part way down
+                .onChange(of: [showsSubway, showsBuses, showsCitiBike]) {
+                    withAnimation(.smooth) { cardScroll.scrollTo(edge: .top) }
+                }
+                // A place tapped on its map mark: its first tile at the top of the card, or, near
+                // the list's end, as far up as it goes, with no blank room under it
                 .onChange(of: focusedMark) { _, mark in
                     guard let mark else { return }
                     focusedMark = nil
                     let shown = listMax
                     guard trainsHeight > shown, let top = tileTops[mark] else { return }
-                    let target = max(0, top)
-                    focusRoom = max(0, shown - (trainsHeight - target))
+                    let target = min(max(0, top - Self.tilesMargin), trainsHeight - shown)
                     withAnimation(.smooth) { cardScroll.scrollTo(y: target) }
                 }
-                .onScrollGeometryChange(for: Bool.self) { $0.visibleRect.maxY > trainsHeight + 0.5 } action: { roomShown, shows in
-                    if roomShown && !shows { focusRoom = 0 }
-                }
                 .scrollBounceBehavior(.basedOnSize)
+                .accessibilityIdentifier("nearbyCard")
                 // Its blur at the edges drew a place scrolled off the top over the card's edge
                 .scrollEdgeEffectHidden()
                 .clipped()
@@ -1596,8 +1696,8 @@ struct LiveView: View {
         }
     }
 
-    /// Any failure note, then the stations, bus stops and docks, each kind under its heading,
-    /// each place a row of its name, lines and walk; its times only once it's opened.
+    /// Any failure note, then the lines near you as tiles, two to a row, each with its next
+    /// train or bus each way; then the docks, each a row, its counts once it's opened.
     private var trains: some View {
         VStack(alignment: .leading, spacing: 0) {
             if live.anyFailed(everyTrain) {
@@ -1614,33 +1714,13 @@ struct LiveView: View {
                     .padding(.horizontal, 6)
                     .padding(.vertical, 8)
             }
-            if showsSubway && !nearby.isEmpty {
-                NearbyHeading(title: "Stations")
-                // Identified as their map marks are, for a tap on one to scroll here
-                ForEach(nearby, id: \.markID) { result in
-                    NearbyRow(kind: "Station", name: result.station.name,
-                              distance: distance(of: result.markID, walkMinutes: result.walkMinutes,
-                                                 at: result.station.location),
-                              spokenMarks: result.station.routes.map(Lines.spokenName(of:)).joined(separator: ", "),
-                              isOpen: openedPlace == result.markID, toggle: { toggle(result.markID) }) {
-                        NearbyBullets(routes: result.station.routes)
-                    } content: {
-                        ForEach(result.station.routes, id: \.self) { route in
-                            NearbyLineRow(station: result.station, route: route, live: live, marks: marks) { path.append($0) }
-                        }
-                    }
-                    .notingPlace(result.markID, tops: $tileTops, opened: $openedPlace, openedHeight: $openedHeight)
-                }
-            }
-            if showsBuses {
-                NearbyHeading(title: "Bus Stops")
-                if let openedStop { openedRow(openedStop) }
-                busRows
-            }
-            if showsBikes {
-                NearbyHeading(title: "Citi Bike")
-                dockRows
-            }
+            // Each line once, at its nearest station or stop, two to a row; a place tapped on
+            // the map has its own lines, outlined
+            NearbyLineGrid(stations: gridStations, stops: gridStops, docks: gridDocks, picked: openedPlace,
+                           live: live, marks: marks, tops: $tileTops,
+                           openTrains: { path.append($0) }, openBus: { path.append($0) })
+            if showsBuses { busNote }
+            if showsBikes { dockNote }
             if !SharedStore.isAvailable {
                 Label("The widget can't see your choice on this install, so it keeps showing 14 St-Union Sq (N Q R W) uptown. Make sure the app and widget both have the App Group in Xcode, then reinstall.",
                       systemImage: "exclamationmark.triangle")
@@ -1653,8 +1733,8 @@ struct LiveView: View {
         .padding(Self.tilesMargin)
     }
 
-    /// Each nearby bus place, opened to its lines' next buses each way; or, with none, why.
-    @ViewBuilder private var busRows: some View {
+    /// Why there's no bus stop to put lines from, or that they're being found.
+    @ViewBuilder private var busNote: some View {
         switch buses {
         case .finding:
             NearbyNoteRow(text: "Finding bus stops…", finding: true)
@@ -1663,74 +1743,61 @@ struct LiveView: View {
         case .places(let places) where places.isEmpty:
             NearbyNoteRow(text: "No bus stops within ¼ mile.")
         case .places:
-            ForEach(busPlaces, id: \.self) { place in
-                let stop = place.ways.first?.stop
-                let id = "b" + (stop?.id ?? "")
-                NearbyRow(kind: "Bus stop", name: place.name,
-                          distance: distance(of: id, walkMinutes: place.walkMinutes,
-                                             at: CLLocation(latitude: stop?.latitude ?? 0, longitude: stop?.longitude ?? 0)),
-                          spokenMarks: NearbyBusBadges.lines(of: place).map(BusBadge.spokenName).joined(separator: ", "),
-                          isOpen: openedPlace == id, toggle: { toggle(id) }) {
-                    NearbyBusBadges(lines: NearbyBusBadges.lines(of: place))
-                } content: {
-                    NearbyBusLines(place: place, live: live, marks: marks, stale: busesStale)
-                }
-                .notingPlace(id, tops: $tileTops, opened: $openedPlace, openedHeight: $openedHeight)
-            }
+            if busesStale { NearbyNoteRow(text: "Bus times couldn't be updated.") }
         }
     }
 
-    /// The stop opened from its dot, first under Bus Stops: its buses, as a listed stop's; it
-    /// goes once closed.
-    private func openedRow(_ opened: OpenedStop) -> some View {
+    /// The stations whose lines the grid shows, nearest first; none with Subway off.
+    private var gridStations: [NearbyGridPlace] {
+        guard showsSubway else { return [] }
+        return nearby.map { result in
+            NearbyGridPlace(id: result.markID, name: result.station.name,
+                            distance: distance(of: result.markID, walkMinutes: result.walkMinutes, at: result.station.location),
+                            kind: .station(result.station))
+        }
+    }
+
+    /// The bus stops whose lines the grid shows, nearest first: the stop opened from its dot
+    /// too, while it's open, its lines waiting on its buses till they come.
+    private var gridStops: [NearbyGridPlace] {
+        guard showsBuses else { return [] }
+        let listed = busPlaces.map { place in
+            let stop = place.ways.first?.stop
+            let id = "b" + (stop?.id ?? "")
+            return NearbyGridPlace(id: id, name: place.name,
+                                   distance: distance(of: id, walkMinutes: place.walkMinutes,
+                                                      at: CLLocation(latitude: stop?.latitude ?? 0, longitude: stop?.longitude ?? 0)),
+                                   kind: .stop(place, lines: [], stale: busesStale))
+        }
+        guard let opened = openedStop else { return listed }
         let at = CLLocation(latitude: opened.coordinate.latitude, longitude: opened.coordinate.longitude)
         let distance: NearbyDistance? = location.location.map { you in
             mapCenter == nil ? .walk(TripPlanner.walkMinutes(you.distance(from: at))) : .fromYou(Self.miles(you.distance(from: at)))
         }
-        return NearbyRow(kind: "Bus stop", name: opened.place?.name ?? "Bus Stop", distance: distance,
-                         spokenMarks: opened.lines.map(BusBadge.spokenName).joined(separator: ", "),
-                         isOpen: openedPlace == opened.id, toggle: { toggle(opened.id) }) {
-            NearbyBusBadges(lines: opened.lines)
-        } content: {
-            if let place = opened.place {
-                NearbyBusLines(place: place, live: live, marks: marks)
-            } else if opened.failed {
-                Text("Bus times aren't available right now.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 6)
-            } else {
-                ProgressView()
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 6)
-            }
-        }
-        .notingPlace(opened.id, tops: $tileTops, opened: $openedPlace, openedHeight: $openedHeight)
+        let place = NearbyGridPlace(id: opened.id, name: opened.place?.name ?? "Bus Stop", distance: distance,
+                                    kind: .stop(opened.place, lines: opened.lines, stale: opened.failed))
+        return [place] + listed
     }
 
-    /// The nearest docks with the bikes toggled on, and how many on the row: nothing more to
-    /// open. Or, with none, why.
-    @ViewBuilder private var dockRows: some View {
+    /// Why there's no dock to show, or that they're being found.
+    @ViewBuilder private var dockNote: some View {
         if docksFailed {
             NearbyNoteRow(text: "Citi Bike isn't available right now.")
         } else if docks != nil, let bikes {
             if shownDocks.isEmpty {
                 NearbyNoteRow(text: "No docks with \(bikes == .eBike ? "e-bikes" : "bikes") within ½ mile.")
             }
-            ForEach(shownDocks, id: \.markID) { near in
-                NearbyRow(kind: "Citi Bike dock", name: near.dock.name,
-                          distance: distance(of: near.markID, walkMinutes: near.walkMinutes, at: near.dock.location),
-                          spokenMarks: bikes.kinds.map { $0.count(near.dock.available($0)) }.joined(separator: ", "),
-                          isOpen: false, toggle: nil) {
-                    NearbyDockBadge(dock: near.dock, bikes: bikes)
-                } content: {
-                    EmptyView()
-                }
-                .notingTop(of: near.markID, in: $tileTops)
-            }
         } else {
             NearbyNoteRow(text: "Finding Citi Bike docks…", finding: true)
+        }
+    }
+
+    /// The nearest docks with the bikes Settings counts, each a tile after the lines'.
+    private var gridDocks: [NearbyGridPlace] {
+        shownDocks.map { near in
+            NearbyGridPlace(id: near.markID, name: near.dock.name,
+                            distance: distance(of: near.markID, walkMinutes: near.walkMinutes, at: near.dock.location),
+                            kind: .dock(near.dock))
         }
     }
 
@@ -1789,22 +1856,44 @@ struct LiveView: View {
         }
     }
 
-    /// Loads what's switched on together. Rows show a dash until their first load.
-    private func load() async {
-        let trains = everyTrain
-        let wantsBuses = showsBuses, wantsBikes = showsBikes
+    /// Loads what's switched on together. Rows show a dash until their first load. What hasn't
+    /// changed since it was last fetched, lately, isn't fetched again (`refetchAfter`,
+    /// `docksLife`), as a toggle restarts the load for its own; `pulled` to refresh, all of it.
+    private func load(pulled: Bool = false) async {
         let here = here
+        // The stations where Nearby is now, listed with what else loads (below)
+        let stations = here.map { Nearby.stations(near: $0, limit: 3) } ?? []
+        let trains = showsSubway ? stations.flatMap(\.station.lineSelections) : []
+        let wantsBuses = showsBuses, wantsBikes = showsBikes
+        let now = Date.now
         // Where you are, kept while you're near it (`here`)
         if mapCenter == nil, setupHome.location == nil, location.location != nil { loadedYou = here }
+        let trainIDs = trains.map(\.trainID)
+        let trainsFresh = !pulled && !live.anyFailed(trains)
+            && trainsLoaded.map { $0.ids == trainIDs && now.timeIntervalSince($0.at) < Self.refetchAfter } == true
+        let busesFresh: Bool = if !pulled, !busesStale, case .places = buses, let busesLoaded, let busesFrom, let here {
+            now.timeIntervalSince(busesLoaded) < Self.refetchAfter && busesFrom.distance(from: here) < 1
+        } else { false }
+        // The five nearest with the bikes counted to take, so each of them can show
+        let has = bikes.map { CitiBike.Has(taking: $0.shared) } ?? .either
+        let docksFresh: Bool = if !pulled, docks != nil, !docksFailed, let docksLoaded, let here {
+            now.timeIntervalSince(docksLoaded.at) < Self.docksLife && docksLoaded.near.distance(from: here) <= Self.followMeters
+                && docksLoaded.has == has
+        } else { false }
         // Longer than the widget's wait: a place newly moved to has the server ask Bus Time for
         // its stops before their buses, which often took past 3 seconds and left none shown
-        async let busPlaces: [NearbyBusPlace]? = if wantsBuses, let here {
+        async let busPlaces: [NearbyBusPlace]? = if wantsBuses, !busesFresh, let here {
             await NearbyBuses.places(near: here, wait: NearbyBuses.appWait)
         } else { nil }
-        async let allDocks: [CitiBike.Dock]? = wantsBikes && here != nil ? await CitiBike.docks() : nil
+        // Only the few nearest, not the whole city's
+        async let nearDocks: [CitiBike.Dock]? = if wantsBikes, !docksFresh, let here {
+            await CitiBike.docks(near: here, limit: Self.docksAsked, has: has)
+        } else { nil }
         // Nearby rows show only the line's own trains, which are all in its own feeds
-        async let opened: Void = loadOpened()
-        await live.load(trains, includingOtherLines: false)
+        if !trainsFresh {
+            await live.load(trains, includingOtherLines: false)
+            if !Task.isCancelled, !trains.isEmpty { trainsLoaded = (trainIDs, .now) }
+        }
         // Loads not cancelled by a move (recentering, coming back to the app) may finish after
         // the one for where Nearby is now: not stops and docks near where it was
         let stillHere = {
@@ -1812,21 +1901,26 @@ struct LiveView: View {
             guard let now = self.here, let here else { return true }
             return now.distance(from: here) <= Self.followMeters
         }
-        // Docks as soon as they're had, not held back by slower buses
-        let found = await allDocks
-        if wantsBikes, let here, stillHere() {
-            docksFailed = found == nil
-            // All within range: the toggles pick which three show
-            docks = found.map { NearbyDock.nearest(to: here, among: $0, limit: 40) }
-        }
+        let found = await nearDocks
         let places = await busPlaces
-        await opened
-        guard stillHere() else { return }
-        if wantsBuses, let here {
+        // All of it at once, once the map's still: each on its own drew Nearby and its marks
+        // again, a dozen times as it moved on, taking the map's moving after up with it
+        guard await stillMap(), stillHere() else { return }
+        if nearby.map(\.id) != stations.map(\.id) { nearby = stations }
+        if wantsBikes, !docksFresh, let here {
+            docksFailed = found == nil
+            docks = found.map { NearbyDock.nearest(to: here, among: $0, limit: Self.docksAsked) }
+            docksLoaded = found == nil ? nil : (.now, here, has)
+        }
+        // The opened stop's buses from those found round here, if it's among them; else asked
+        // for on their own
+        let openedFound = takeOpened(from: places ?? (busesFresh ? buses.places : []))
+        if wantsBuses, !busesFresh, let here {
             if let places {
                 buses = .places(places)
                 busesFrom = here
                 busesStale = false
+                busesLoaded = .now
             } else {
                 // A failed refresh keeps the stops last found, rather than dropping them; not
                 // once the map's moved on, where they'd be listed as near somewhere they aren't
@@ -1836,8 +1930,29 @@ struct LiveView: View {
                 busesStale = keeps
             }
         }
-        updated = .now
+        if !(trainsFresh && busesFresh && docksFresh) { updated = AppClock.now }
+        // With them, not a drawing after: the stops along the lines, if those are laid out
+        if motion.linesFoundFor == drawnLinesKey { findStopsAlong() }
+        if !openedFound { await loadOpened() }
     }
+
+    /// Waits for the map to be still, for what's found to be shown then rather than as it's
+    /// moving; false if what it was for is no longer wanted.
+    private func stillMap() async -> Bool {
+        // A couple of seconds at most: were the map's coming to rest ever missed, nothing would
+        // be shown again, nor a pull to refresh end, till it was touched
+        var waited = 0
+        while motion.moving, waited < Self.stillWaitMost {
+            try? await Task.sleep(for: .milliseconds(100))
+            if Task.isCancelled { return false }
+            waited += 1
+        }
+        motion.moving = false
+        return !Task.isCancelled
+    }
+
+    /// Tenths of a second at most `stillMap` waits.
+    private static let stillWaitMost = 20
 }
 
 extension Nearby.Result {
@@ -1855,15 +1970,6 @@ extension View {
         onGeometryChange(for: CGFloat.self) { $0.frame(in: .named("nearbyTiles")).minY } action: {
             tops.wrappedValue[id] = $0
         }
-    }
-
-    /// As `notingTop`, and, while it's the place open, its height, for the card to grow to fit it.
-    fileprivate func notingPlace(_ id: String, tops: Binding<[String: CGFloat]>, opened: Binding<String?>,
-                                 openedHeight: Binding<CGFloat>) -> some View {
-        notingTop(of: id, in: tops)
-            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
-                if opened.wrappedValue == id { openedHeight.wrappedValue = height }
-            }
     }
 }
 
@@ -1899,127 +2005,426 @@ struct NearbyDock: Identifiable, Hashable {
 }
 
 /// How far a place in Nearby's card is.
-private enum NearbyDistance {
+enum NearbyDistance: Hashable {
     /// Minutes' walk from you
     case walk(Int)
     /// "1.2 miles"
     case fromYou(String)
 }
 
-/// A kind's heading in Nearby's card: "Stations", "Bus Stops", "Citi Bike".
-private struct NearbyHeading: View {
-    let title: String
-
-    var body: some View {
-        Text(title)
-            .font(.footnote.weight(.semibold))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 6)
-            .padding(.top, 8)
-            .accessibilityAddTraits(.isHeader)
+/// A station or bus stop whose lines Nearby's grid shows, with how far it is.
+struct NearbyGridPlace: Hashable {
+    enum Kind: Hashable {
+        case station(Station)
+        /// Its buses, once found; till then, the lines it's known to have (a stop opened from
+        /// its dot). `stale`: kept from before a failed refresh, or, not found, couldn't be.
+        case stop(NearbyBusPlace?, lines: [String], stale: Bool)
+        case dock(CitiBike.Dock)
     }
+
+    /// Its map mark's id.
+    let id: String
+    let name: String
+    let distance: NearbyDistance?
+    let kind: Kind
 }
 
-/// One station, bus stop or dock in Nearby's card: its name, its lines (or bikes) and its walk
-/// on one line, or where they don't fit, its lines under its name; tapped, its times beneath, a tap on them opening each as before. Docks have
-/// nothing to open.
-private struct NearbyRow<Marks: View, Content: View>: View {
-    /// "Station", "Bus stop": said by VoiceOver.
-    let kind: String
-    let name: String
-    /// Its walk, or how far it is from you; nil, neither.
-    let distance: NearbyDistance?
-    /// Its lines or bikes, said by VoiceOver after its name.
-    let spokenMarks: String
-    let isOpen: Bool
-    /// Opens or closes it; nil, it doesn't open.
-    let toggle: (() -> Void)?
-    @ViewBuilder let marks: Marks
-    @ViewBuilder let content: Content
+/// Every line near you as a tile, two to a row: each once, at the nearest station or stop it
+/// stops at, with its next train or bus each way; trains before buses. A place tapped on the
+/// map (`picked`) has its own lines, outlined, first. Its own view, so the ticks that count
+/// the times down redraw it alone, not the whole page and its map.
+struct NearbyLineGrid: View {
+    let stations: [NearbyGridPlace]
+    let stops: [NearbyGridPlace]
+    let docks: [NearbyGridPlace]
+    let picked: String?
+    let live: LiveTrains
+    let marks: TimeMarks
+    /// Where each place's first tile starts, for a tap on its map mark to scroll there.
+    @Binding var tops: [String: CGFloat]
+    /// Opens a train tile's line page, and a bus tile's.
+    let openTrains: (LineWays) -> Void
+    let openBus: (BusLineWays) -> Void
 
-    private var spokenDistance: String {
-        switch distance {
-        case .walk(let minutes): ", \(minutes) minute walk"
-        case .fromYou(let miles): ", \(miles) from you"
-        case nil: ""
+    /// One line at one place, and its ways.
+    struct Tile: Identifiable {
+        enum Ways {
+            case trains([LineWay])
+            /// Nil while the stop's buses are being found.
+            case buses([NearbyBusPick.Way]?, stale: Bool)
+            /// A Citi Bike dock's bikes, both kinds, and its open docks.
+            case dock(CitiBike.Dock)
         }
-    }
 
-    private var title: some View {
-        Text(name).font(.body.weight(.semibold))
-    }
+        let line: String
+        let place: NearbyGridPlace
+        let ways: Ways
+        /// Whether it's its place's first, which notes where the place starts.
+        var first = false
 
-    @ViewBuilder private var walk: some View {
-        Group {
-            switch distance {
-            case .walk(let minutes): Label("\(minutes) min", systemImage: "figure.walk")
-            case .fromYou(let miles): Label(miles, systemImage: "location.fill")
-            case nil: EmptyView()
+        var id: String {
+            switch ways {
+            case .trains: "s" + line
+            case .buses: "b" + line
+            case .dock: place.id
             }
         }
-        .font(.subheadline.weight(.medium))
-        .monospacedDigit()
-        .foregroundStyle(.secondary)
-        .fixedSize()
+        var isBus: Bool { if case .buses = ways { true } else { false } }
     }
 
-    var body: some View {
-        VStack(spacing: 0) {
-            Button {
-                toggle?()
-            } label: {
-                // All on one line if it fits; else its name, and its lines under it
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 8) {
-                        // Whole, never shortened: if it doesn't fit, the next way does
-                        title.lineLimit(1).fixedSize()
-                        marks.fixedSize()
-                        Spacer(minLength: 8)
-                        walk
+    /// The tiles as last worked out, and what for: the body's run again for every change to the
+    /// page round it (each move of the map, the card's height), when they're the same, and
+    /// working out each station's ways took a good part of the main thread's time.
+    @State private var memo = TilesMemo()
+
+    /// Every tile: the stations', then the stops', then the docks'.
+    private var all: [Tile] {
+        memo.tiles(for: TilesMemo.Key(stations: stations, stops: stops, docks: docks, picked: picked,
+                                      trains: live.trains, now: live.now)) {
+            Self.tiles(stations: stations, stops: stops, docks: docks, picked: picked, trains: live.trains, now: live.now)
+        }
+    }
+
+    /// The tiles kept for the inputs they were worked out from.
+    final class TilesMemo {
+        struct Key: Equatable {
+            let stations: [NearbyGridPlace]
+            let stops: [NearbyGridPlace]
+            let docks: [NearbyGridPlace]
+            let picked: String?
+            let trains: [String: [Arrival]]
+            let now: Date
+        }
+
+        private var key: Key?
+        private var kept: [Tile] = []
+
+        /// `make`'s tiles, or those kept if `key`'s the same as theirs.
+        func tiles(for key: Key, make: () -> [Tile]) -> [Tile] {
+            if key == self.key { return kept }
+            kept = make()
+            self.key = key
+            return kept
+        }
+    }
+
+    /// Every tile: the stations', then the stops', then the docks', each `tiles(_:)`.
+    static func tiles(stations: [NearbyGridPlace], stops: [NearbyGridPlace], docks: [NearbyGridPlace], picked: String?,
+                      trains: [String: [Arrival]], now: Date) -> [Tile] {
+        tiles(stations, picked: picked, trains: trains, now: now) + tiles(stops, picked: picked, trains: trains, now: now)
+            + tiles(docks, picked: picked, trains: trains, now: now)
+    }
+
+    /// `places`' lines, each line once: at `picked`, if it has it, else the nearest. In `places`'
+    /// order whatever's picked, so a tile tapped on the map stays where the card scrolls to.
+    static func tiles(_ places: [NearbyGridPlace], picked: String?, trains: [String: [Arrival]], now: Date) -> [Tile] {
+        let ordered = places.filter { $0.id == picked } + places.filter { $0.id != picked }
+        var seen: Set<String> = []
+        var byPlace: [String: [Tile]] = [:]
+        for place in ordered {
+            var found: [Tile] = []
+            switch place.kind {
+            case .station(let station):
+                for route in station.routes where !seen.contains(route) {
+                    let ways = station.ways(of: route, trains: trains, now: now).compactMap { $0 }
+                    guard !ways.isEmpty else { continue }
+                    seen.insert(route)
+                    found.append(Tile(line: route, place: place, ways: .trains(ways)))
+                }
+            case .stop(let bus, let lines, let stale):
+                if let bus {
+                    let picks = bus.lines(at: now)
+                        .sorted { $0.line.localizedStandardCompare($1.line) == .orderedAscending }
+                    for pick in picks where seen.insert(BusBadge.label(pick.line).uppercased()).inserted {
+                        found.append(Tile(line: pick.line, place: place, ways: .buses(pick.ways, stale: stale)))
                     }
-                    // Its name whole on one line, its lines under it; only a name too long for
-                    // a line of its own wraps
-                    ForEach([1, 2], id: \.self) { lines in
-                        HStack(spacing: 8) {
-                            VStack(alignment: .leading, spacing: 4) {
-                                if lines == 1 {
-                                    title.lineLimit(1).fixedSize()
-                                } else {
-                                    title.lineLimit(lines)
-                                }
-                                marks.fixedSize()
-                            }
-                            .padding(.vertical, 6)
-                            Spacer(minLength: 8)
-                            walk
-                        }
+                } else {
+                    for line in lines where seen.insert(BusBadge.label(line).uppercased()).inserted {
+                        found.append(Tile(line: line, place: place, ways: .buses(nil, stale: stale)))
                     }
                 }
-                .frame(minHeight: 44)
-                .contentShape(Rectangle())
+            case .dock(let dock):
+                found.append(Tile(line: "", place: place, ways: .dock(dock)))
             }
-            .buttonStyle(.plain)
-            .allowsHitTesting(toggle != nil)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("\(kind), \(name)\(spokenMarks.isEmpty ? "" : ", \(spokenMarks)")\(spokenDistance)")
-            .accessibilityHint(toggle == nil ? "" : isOpen ? "Hides its times" : "Shows its times")
-            .accessibilityAddTraits(toggle == nil ? [] : .isButton)
-            if isOpen {
-                content
-                    .transition(.opacity)
+            if !found.isEmpty { found[0].first = true }
+            byPlace[place.id] = found
+        }
+        return places.flatMap { byPlace[$0.id] ?? [] }
+    }
+
+    var body: some View {
+        let all = all
+        PairedRows(items: all, spacing: 8) { tile($0) }
+        .padding(.top, all.isEmpty ? 0 : 4)
+        .padding(.bottom, all.isEmpty ? 0 : 4)
+        .animation(.smooth, value: picked)
+    }
+
+    /// The whole tile one button, opening its line both ways; a dock's, and a stop's still being
+    /// found, just the tile.
+    @ViewBuilder private func tile(_ tile: Tile) -> some View {
+        let isPicked = tile.place.id == picked
+        let content = NearbyLineTile(tile: tile, now: live.now, failed: live.failed, marks: marks)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        Group {
+            if opens(tile) {
+                Button {
+                    open(tile)
+                } label: {
+                    content
+                }
+                .buttonStyle(TileButtonStyle(shape: Self.shape))
+            } else {
+                content.background(.fill.quaternary, in: Self.shape)
             }
         }
-        .padding(.horizontal, 6)
+        .overlay {
+            if isPicked { Self.shape.strokeBorder(.tint, lineWidth: 2) }
+        }
+        // One element saying all it shows, standing in for the button: not also its bullet,
+        // place, walk and each way's name and time, eight more for the tree to hold each tile
+        .accessibilityRepresentation {
+            let label = NearbyLineTile.spokenLabel(tile)
+            Group {
+                if opens(tile) {
+                    Button(label) { open(tile) }
+                        .accessibilityHint(tile.isBus ? "Shows its buses both ways" : "Shows its trains both ways")
+                } else {
+                    Text(label)
+                }
+            }
+            .accessibilityValue(NearbyLineTile.spokenTimes(tile, now: live.now, failed: live.failed))
+            .accessibilityAddTraits(isPicked ? [.isSelected, .updatesFrequently] : .updatesFrequently)
+        }
+        .modifier(NotingFirst(id: tile.first ? tile.place.id : nil, tops: $tops))
+    }
+
+    /// Your walk to the tile's place, while the map's on you.
+    private func walkMinutes(_ tile: Tile) -> Int? {
+        if case .walk(let minutes) = tile.place.distance { minutes } else { nil }
+    }
+
+    private func opens(_ tile: Tile) -> Bool {
+        switch tile.ways {
+        case .trains: true
+        case .buses(let ways, _): ways != nil
+        case .dock: false
+        }
+    }
+
+    private func open(_ tile: Tile) {
+        switch tile.ways {
+        case .trains(let ways):
+            openTrains(LineWays(ways: ways.map { way in
+                var selection = way.selection
+                selection.walkMinutes = walkMinutes(tile) ?? 0
+                return LineWays.Way(selection: selection, label: way.label)
+            }))
+        case .buses(let ways, _):
+            guard let ways else { return }
+            openBus(BusLineWays(line: tile.line, stopName: tile.place.name, ways: ways, walkMinutes: walkMinutes(tile)))
+        case .dock:
+            break
+        }
+    }
+
+    private static let shape = RoundedRectangle(cornerRadius: 16, style: .continuous)
+}
+
+/// Notes where a place's first tile starts, under its map mark's id.
+private struct NotingFirst: ViewModifier {
+    let id: String?
+    @Binding var tops: [String: CGFloat]
+
+    func body(content: Content) -> some View {
+        if let id {
+            content.notingTop(of: id, in: $tops)
+        } else {
+            content
+        }
     }
 }
 
-/// A station's lines on its row, small, side by side.
-private struct NearbyBullets: View {
-    let routes: [String]
+/// A tile's fill, darker while pressed.
+private struct TileButtonStyle<S: Shape>: ButtonStyle {
+    let shape: S
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(configuration.isPressed ? AnyShapeStyle(.fill.secondary) : AnyShapeStyle(.fill.quaternary), in: shape)
+            .contentShape(shape)
+            .scaleEffect(configuration.isPressed ? 0.97 : 1)
+            .animation(.smooth(duration: 0.15), value: configuration.isPressed)
+    }
+}
+
+/// Citi Bike's blue square with a bike, where a line's bullet is on a dock's tile.
+private struct DockTileBadge: View {
+    let size: CGFloat
 
     var body: some View {
-        HStack(spacing: 3) {
-            ForEach(routes, id: \.self) { LineBullet(route: $0, size: 20) }
+        Image(systemName: "bicycle")
+            .font(.system(size: size * 0.5, weight: .bold))
+            .foregroundStyle(.white)
+            .frame(width: size, height: size)
+            .background(Color.citiBike, in: RoundedRectangle(cornerRadius: size * 0.28, style: .continuous))
+            .accessibilityHidden(true)
+    }
+}
+
+/// One line's tile: its bullet or badge, where it's nearest and how far, then its next train
+/// or bus each way; one button, said as one.
+struct NearbyLineTile: View {
+    let tile: NearbyLineGrid.Tile
+    let now: Date
+    let failed: Set<String>
+    let marks: TimeMarks
+
+    private var distance: String? { Self.distance(tile) }
+
+    /// How far its place is, as shown: "3 min walk", or miles while the map's off you.
+    private static func distance(_ tile: NearbyLineGrid.Tile) -> String? {
+        switch tile.place.distance {
+        case .walk(let minutes): "\(minutes) min walk"
+        case .fromYou(let miles): miles
+        case nil: nil
+        }
+    }
+
+    /// For VoiceOver, the line, where and how far: "R train at 4 Av-9 St, 1 min walk".
+    static func spokenLabel(_ tile: NearbyLineGrid.Tile) -> String {
+        let line = switch tile.ways {
+        case .trains: Lines.spokenName(of: tile.line)
+        case .buses: BusBadge.spokenName(tile.line)
+        case .dock: "Citi Bike dock"
+        }
+        return "\(line) at \(tile.place.name)" + (distance(tile).map { ", \($0)" } ?? "")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                switch tile.ways {
+                case .trains: LineBullet(route: tile.line, size: 28)
+                case .buses: BusBadge(line: tile.line, size: 28)
+                case .dock: DockTileBadge(size: 28)
+                }
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(tile.place.name).font(.caption.weight(.semibold)).lineLimit(1)
+                    if let distance {
+                        Text(distance).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                }
+            }
+            switch tile.ways {
+            case .trains(let ways):
+                ForEach(ways, id: \.direction) { way in
+                    row(way.label, next: way.trains?.first, loaded: way.trains != nil,
+                        failed: failed.contains(way.selection.trainID))
+                }
+            case .buses(let ways, let stale):
+                if let ways {
+                    ForEach(ways, id: \.stop.id) { way in
+                        row(way.name, next: next(way, stale: stale), loaded: true, failed: false, fitted: true)
+                    }
+                } else if stale {
+                    Text("Bus times aren't available").font(.caption).foregroundStyle(.secondary)
+                } else {
+                    ProgressView().controlSize(.small)
+                }
+            case .dock(let dock):
+                countsRow(dock.renting ? "Bikes" : "Not renting",
+                          [(dock.available(.bike), "bicycle"), (dock.available(.eBike), "bolt.fill")])
+                countsRow(dock.returning ? "Open Docks" : "Not taking bikes", [(dock.free, "parkingsign")])
+            }
+        }
+        .padding(10)
+        // Said as one by the tile round it (`NearbyLineGrid.tile(_:)`)
+    }
+
+    /// A bus way's next bus, as an arrival.
+    private func next(_ way: NearbyBusPick.Way, stale: Bool) -> Arrival? {
+        Self.next(way, line: tile.line, stale: stale, now: now)
+    }
+
+    private static func next(_ way: NearbyBusPick.Way, line: String, stale: Bool, now: Date) -> Arrival? {
+        way.arrivals.first { ($0.time ?? .distantPast) > now }
+            .flatMap { bus in
+                bus.time.map { Arrival(route: line, time: $0, stop: way.stop.id,
+                                       lastStop: bus.destination ?? "", isLive: bus.isLive && !stale) }
+            }
+    }
+
+    /// For VoiceOver, each way's next as shown: "Manhattan, 4 minutes; Brooklyn, now".
+    static func spokenTimes(_ tile: NearbyLineGrid.Tile, now: Date, failed: Set<String>) -> String {
+        switch tile.ways {
+        case .trains(let ways):
+            return ways.map { "\($0.label), \(Minutes.spoken($0.trains, failed: failed.contains($0.selection.trainID), now: now, count: 1))" }
+                .joined(separator: "; ")
+        case .buses(let ways, let stale):
+            guard let ways else { return stale ? "Bus times aren't available" : "Loading" }
+            return ways.map { way in
+                let next = next(way, line: tile.line, stale: stale, now: now)
+                // "None", as shown, not Minutes' "No trains"
+                return "\(way.name), \(next.map { Minutes.spoken([$0], now: now, count: 1) } ?? "None")"
+            }
+            .joined(separator: "; ")
+        case .dock(let dock):
+            return [dock.renting ? nil : "Not renting",
+                    "\(dock.available(.bike)) \(dock.available(.bike) == 1 ? "bike" : "bikes")",
+                    "\(dock.available(.eBike)) \(dock.available(.eBike) == 1 ? "e-bike" : "e-bikes")",
+                    dock.returning ? "\(dock.free) open \(dock.free == 1 ? "dock" : "docks")" : "Not taking bikes back"]
+                .compactMap { $0 }
+                .joined(separator: ", ")
+        }
+    }
+
+    /// A dock's row, as a line's way: what it's for, and its counts at the end in Citi Bike blue,
+    /// grey at none.
+    private func countsRow(_ name: String, _ counts: [(count: Int, symbol: String)]) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
+            Text(name).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            Spacer(minLength: 4)
+            ForEach(Array(counts.enumerated()), id: \.offset) { _, item in
+                HStack(spacing: 2) {
+                    Image(systemName: item.symbol).font(.caption2.weight(.bold))
+                    Text("\(item.count)").font(.subheadline.weight(.bold)).monospacedDigit()
+                }
+                .foregroundStyle(item.count == 0 ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.citiBike))
+                .fixedSize()
+            }
+        }
+    }
+
+    /// A way's name, and its next time at the end: "Manhattan … 2 min".
+    private func row(_ name: String, next: Arrival?, loaded: Bool, failed: Bool, fitted: Bool = false) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
+            Group {
+                if fitted { FittedBusName(name: name) } else { Text(name).lineLimit(1) }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            Spacer(minLength: 4)
+            time(next, loaded: loaded, failed: failed)
+        }
+        .contentShape(Rectangle())
+    }
+
+    @ViewBuilder private func time(_ next: Arrival?, loaded: Bool, failed: Bool) -> some View {
+        if failed || !loaded {
+            Text("—").font(.subheadline.weight(.bold)).foregroundStyle(.secondary)
+        } else if let next {
+            let minutes = MinutesToGo(until: next.time, from: now)
+            HStack(spacing: 2) {
+                StatusMark(isLive: next.isLive, marks: marks, size: 9)
+                Text(minutes.isNow ? minutes.number : "\(minutes.number) min")
+            }
+            .font(.subheadline.weight(.bold))
+            .monospacedDigit()
+            .foregroundStyle(next.statusColor(scheduled: .primary))
+            .fixedSize()
+        } else {
+            Text("None").font(.caption).foregroundStyle(.secondary)
         }
     }
 }
@@ -2037,7 +2442,7 @@ private struct NearbyBusBadges: View {
     /// The lines with buses due at `place`, in a steady order, not soonest first, so the row
     /// doesn't shuffle as they come.
     static func lines(of place: NearbyBusPlace) -> [String] {
-        sorted(Array(Set(place.lines(at: .now).map(\.line))))
+        sorted(Array(Set(place.lines(at: AppClock.now).map(\.line))))
     }
 
     /// Lines in a row's order, "B61" before "B67", which the stop's open lines and its map sign
@@ -2047,14 +2452,126 @@ private struct NearbyBusBadges: View {
     }
 }
 
+/// Views two to a row, a row as tall as its tallest, `spacing` apart, where the two-column `Grid`
+/// put them (`PairedRowsLayout`). Not a `Grid`, which measured every tile again for each of its
+/// passes, turning the phone most.
+struct PairedRows<Item, Cell: View>: View {
+    let items: [Item]
+    let spacing: CGFloat
+    @ViewBuilder let cell: (Item) -> Cell
+
+    var body: some View {
+        PairedRowsLayout(spacing: spacing) {
+            ForEach(items.indices, id: \.self) { cell(items[$0]) }
+        }
+    }
+}
+
+/// `PairedRows`' layout, the columns' widths as the `Grid` had them: each row shares the width
+/// offered as an `HStack` would, half each unless one can't be that narrow (a time is never cut),
+/// the other then taking what's left; a column is then as wide as its widest that way, the one
+/// alone at the end given half. So at the largest text sizes wider than offered, the card with
+/// them.
+struct PairedRowsLayout: Layout {
+    let spacing: CGFloat
+
+    struct Cache {
+        /// The narrowest each view can be.
+        var least: [CGFloat]
+        /// The columns' widths last worked out, and for what width offered, as each pass asks
+        /// for the same twice.
+        var columns: (width: CGFloat?, widths: (CGFloat, CGFloat))?
+    }
+
+    func makeCache(subviews: Subviews) -> Cache {
+        Cache(least: subviews.map { $0.sizeThatFits(ProposedViewSize(width: 0, height: nil)).width })
+    }
+
+    /// The columns' widths for `width` offered (`Cache.columns`). Offered none, as wide as the
+    /// widest view would like.
+    private func columns(_ width: CGFloat?, _ subviews: Subviews, _ cache: inout Cache) -> (CGFloat, CGFloat) {
+        if let kept = cache.columns, kept.width == width { return kept.widths }
+        let widths = Self.columns(width, spacing: spacing, least: cache.least) { index, proposed in
+            subviews[index].sizeThatFits(ProposedViewSize(width: proposed, height: nil)).width
+        }
+        cache.columns = (width, widths)
+        return widths
+    }
+
+    /// The columns' widths for `width` offered, each view `least` wide at the narrowest and
+    /// `measure`d at the width it's offered in its row.
+    static func columns(_ width: CGFloat?, spacing: CGFloat, least: [CGFloat],
+                        measure: (Int, CGFloat?) -> CGFloat) -> (CGFloat, CGFloat) {
+        guard let width, width.isFinite else {
+            let widest = least.indices.map { measure($0, nil) }.max() ?? 0
+            return (widest, least.count > 1 ? widest : 0)
+        }
+        let room = max(0, width - spacing)
+        var columns: (CGFloat, CGFloat) = (0, 0)
+        for index in stride(from: 0, to: least.count, by: 2) {
+            guard index + 1 < least.count else {
+                // Alone, half, the other half sizing nothing
+                columns.0 = max(columns.0, measure(index, room / 2))
+                break
+            }
+            let shares = shares(room, least[index], least[index + 1])
+            columns.0 = max(columns.0, measure(index, shares.0))
+            columns.1 = max(columns.1, measure(index + 1, shares.1))
+        }
+        return columns
+    }
+
+    /// Two views' shares of `room`, as an `HStack` gives them: half each, but neither narrower
+    /// than it can be.
+    static func shares(_ room: CGFloat, _ least0: CGFloat, _ least1: CGFloat) -> (CGFloat, CGFloat) {
+        if least0 + least1 >= room { return (least0, least1) }
+        if least0 > room / 2 { return (least0, room - least0) }
+        if least1 > room / 2 { return (room - least1, least1) }
+        return (room / 2, room / 2)
+    }
+
+    /// Each row's height: its tallest view's, at its column's width.
+    private func rows(_ subviews: Subviews, _ columns: (CGFloat, CGFloat)) -> [CGFloat] {
+        stride(from: 0, to: subviews.count, by: 2).map { index in
+            (index..<min(index + 2, subviews.count))
+                .map { subviews[$0].sizeThatFits(ProposedViewSize(width: $0 % 2 == 0 ? columns.0 : columns.1,
+                                                                   height: nil)).height }
+                .max() ?? 0
+        }
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) -> CGSize {
+        guard !subviews.isEmpty else { return .zero }
+        let columns = columns(proposal.width, subviews, &cache)
+        let rows = rows(subviews, columns)
+        // One alone: its column and the space after it, as the Grid's empty second column had
+        return CGSize(width: columns.0 + spacing + columns.1,
+                      height: rows.reduce(0, +) + spacing * CGFloat(rows.count - 1))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) {
+        let columns = columns(proposal.width, subviews, &cache)
+        var y = bounds.minY
+        for (row, height) in rows(subviews, columns).enumerated() {
+            for side in 0..<2 where row * 2 + side < subviews.count {
+                subviews[row * 2 + side].place(at: CGPoint(x: bounds.minX + (side == 0 ? 0 : columns.0 + spacing), y: y),
+                                               anchor: .topLeading,
+                                               proposal: ProposedViewSize(width: side == 0 ? columns.0 : columns.1,
+                                                                          height: height))
+            }
+            y += height + spacing
+        }
+    }
+}
+
 /// A bus's destination, shortened, not cut off, to fit: "Wlmsbrg Wythe Av via Flushing Av",
 /// then without its "via", then without the street it ends on ("Wlmsbrg"). The place itself is
 /// kept whole ("Red Hook", not "Red"), cut off only if even it can't fit.
-private struct FittedBusName: View {
+struct FittedBusName: View {
     let name: String
 
     var body: some View {
-        ViewThatFits(in: .horizontal) {
+        FirstThatFits {
             ForEach(Self.shortenings(of: name), id: \.self) { Text($0).lineLimit(1) }
         }
     }
@@ -2081,24 +2598,36 @@ private struct FittedBusName: View {
     }
 }
 
-/// A dock's bikes on its row, as its map mark has them: Citi Bike blue, however few.
-private struct NearbyDockBadge: View {
-    let dock: CitiBike.Dock
-    let bikes: BikeKinds
+/// The first of its views as wide as it'd like within the width offered, or else its last, cut
+/// to fit: as `ViewThatFits(in: .horizontal)`, but each view's width measured once, not again
+/// for every view at each of the layout's passes. The others are given no room, at its start.
+struct FirstThatFits: Layout {
+    struct Cache {
+        /// Each view's width as it'd like.
+        var widths: [CGFloat]
+    }
 
-    var body: some View {
-        HStack(spacing: 6) {
-            ForEach(bikes.kinds, id: \.self) { kind in
-                HStack(spacing: 2) {
-                    Image(systemName: kind == .eBike ? "bolt.fill" : "bicycle").font(.caption2.weight(.bold))
-                    Text("\(dock.available(kind))").font(.subheadline.weight(.semibold)).monospacedDigit()
-                }
-            }
+    func makeCache(subviews: Subviews) -> Cache {
+        Cache(widths: subviews.map { $0.sizeThatFits(.unspecified).width })
+    }
+
+    /// Which is shown for `width` offered: the first that fits, else the last.
+    static func chosen(for width: CGFloat?, widths: [CGFloat]) -> Int {
+        guard let width else { return 0 }
+        return widths.firstIndex { $0 <= width } ?? max(0, widths.count - 1)
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) -> CGSize {
+        guard !subviews.isEmpty else { return .zero }
+        return subviews[Self.chosen(for: proposal.width, widths: cache.widths)].sizeThatFits(proposal)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) {
+        let shown = Self.chosen(for: proposal.width, widths: cache.widths)
+        for index in subviews.indices {
+            subviews[index].place(at: bounds.origin, anchor: .topLeading,
+                                  proposal: index == shown ? ProposedViewSize(bounds.size) : .zero)
         }
-        .foregroundStyle(.white)
-        .padding(.horizontal, 7)
-        .frame(height: 20)
-        .background(Capsule().fill(Color.citiBike))
     }
 }
 
@@ -2116,76 +2645,6 @@ private struct NearbyNoteRow: View {
         .foregroundStyle(.secondary)
         .frame(minHeight: 44)
         .padding(.horizontal, 6)
-    }
-}
-
-/// One bus line at a stop with its next buses each way, as `NearbyLineRow` has a train's.
-/// A bus stop tile's lines, by the buses still due: its own view, so the ticks that count them
-/// down redraw it alone, not the whole page and its map.
-private struct NearbyBusLines: View {
-    let place: NearbyBusPlace
-    let live: LiveTrains
-    let marks: TimeMarks
-    /// Kept from before a failed refresh (`busesStale`).
-    var stale = false
-
-    var body: some View {
-        // In its row's order, not soonest first
-        let lines = place.lines(at: live.now)
-            .sorted { $0.line.localizedStandardCompare($1.line) == .orderedAscending }
-        if lines.isEmpty {
-            Text(stale ? "Bus times couldn't be updated" : "No buses due").font(.subheadline).foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.vertical, 6)
-        }
-        ForEach(lines, id: \.line) { pick in
-            NearbyBusRow(pick: pick, now: live.now, marks: marks, stale: stale)
-        }
-    }
-}
-
-private struct NearbyBusRow: View {
-    let pick: NearbyBusPick
-    let now: Date
-    let marks: TimeMarks
-    /// Kept from before a failed refresh: none shown as live.
-    var stale = false
-
-    var body: some View {
-        HStack(spacing: 22) {
-            BusBadge(line: pick.line, size: 30)
-                .frame(width: 44)
-            VStack(spacing: 0) {
-                ForEach(Array(pick.ways.enumerated()), id: \.element.stop.id) { index, way in
-                    if index > 0 {
-                        Divider().padding(.vertical, 8)
-                    }
-                    let coming = way.arrivals.filter { ($0.time ?? .distantPast) > now }
-                    let buses = coming.compactMap { bus in
-                        bus.time.map { Arrival(route: pick.line, time: $0, stop: way.stop.id,
-                                               lastStop: bus.destination ?? "", isLive: bus.isLive && !stale) }
-                    }
-                    HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        VStack(alignment: .leading, spacing: 1) {
-                            FittedBusName(name: way.name)
-                            // The next bus's, not one that's gone since the last fetch
-                            if let stops = coming.first?.stopsAway {
-                                Text(stops == 1 ? "1 stop away" : "\(stops) stops away")
-                                    .font(.footnote)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        Spacer(minLength: 12)
-                        // The next two only: "3 min, then 11 min"
-                        Minutes(trains: buses, failed: false, now: now, marks: marks, none: "No buses", laterCount: 1)
-                    }
-                    .accessibilityElement(children: .combine)
-                    .accessibilityLabel("\(BusBadge.spokenName(pick.line)) to \(way.name)")
-                    .accessibilityValue(Minutes.spoken(buses, now: now, count: 2))
-                }
-            }
-        }
-        .padding(.vertical, 6)
     }
 }
 
@@ -2280,10 +2739,10 @@ private struct MapSign<Marks: View>: View {
     }
 }
 
-/// How near Nearby's map is for its bus stops: zoomed out, each on its street's line, one of each
-/// street's two sides; in between, each way's, out on stems to its kerb; close in, each on its
-/// own way's line (`NearbyLinesLayer.lanes`), each way's nearest named. By meters a point is, a
-/// little either way of each cut-off as the map comes back, so it doesn't flicker between them.
+/// How near Nearby's map is for its bus stops: zoomed out, each stop's place, one each side of
+/// its street; closer in, each way's on its own way's line with an arrow, each way's nearest
+/// named, close in too. By meters a point is, a little either way of each cut-off as the map
+/// comes back, so it doesn't flicker between them.
 enum BusZoom {
     case far
     case between
@@ -2354,25 +2813,47 @@ enum MapDetail {
     }
 }
 
-/// Where a bus stop's mark sits off its place on Nearby's map (`busZoom`): `out` points to its
-/// kerb, on a stem back to its street or not, an arrow on it the way its buses go, `angle` on
-/// the screen (radians from east, y down).
+/// Nearby's map's bookkeeping as it moves (`LiveView.motion`): a plain object, not observed,
+/// so changing it draws nothing again.
+private final class MapMotion {
+    /// When the marks were last laid out as the map moved (`layoutEvery`).
+    var laidOut = Date.distantPast
+    /// Whether you've moved the map since it was framed on you, for the grey dot.
+    var userMovedMap = false
+    /// Whether you've moved, zoomed or turned it yourself, for it not to be framed again.
+    var cameraMovedByHand = false
+    /// The `drawnLinesKey` the lines drawn were laid out for: while it's not the one now, they're
+    /// being laid out again, and the stops along them are found once they are.
+    var linesFoundFor: [String]?
+    /// Whether the map's moving: what loads waits till it's still to be shown.
+    var moving = false
+    /// Where the map last came to rest, to tell a move of more than `followMeters` from it.
+    var restCenter: CLLocation?
+    /// Waiting for the map to stay still `restDelay` before listing what's near where it rested.
+    var restWait: Task<Void, Never>?
+    /// How far off and how much of the map shows, as it last came to rest, for centring on a
+    /// stop opened.
+    var mapDistance: Double?
+    var mapSpan: MKCoordinateSpan?
+    /// Which way it was turned as it last came to rest, to see you turn it; and where it was, for
+    /// the compass to turn it there.
+    var restHeading: Double?
+    var shownCamera: MapCamera?
+}
+
+/// Where a bus stop's mark sits off its place on its way's line on Nearby's map (`busZoom`):
+/// `out` points to its kerb side, an arrow on it the way its buses go, `angle` on the screen
+/// (radians from east, y down).
 struct BusMarkPlacement: Equatable {
     let angle: Double
     let out: CGFloat
-    /// Points it's moved further, in any way, to clear other marks.
-    let extra: CGSize
-    /// Points out its stem starts, at its line; nil, no stem.
-    let stemFrom: CGFloat?
     let arrow: Bool
     /// The way its buses go, said: "east".
     let compass: String
 
-    init(angle: Double, out: CGFloat, extra: CGSize = .zero, stemFrom: CGFloat?, arrow: Bool, mapAngle: Double) {
+    init(angle: Double, out: CGFloat, arrow: Bool, mapAngle: Double) {
         self.angle = angle
         self.out = out
-        self.extra = extra
-        self.stemFrom = stemFrom
         self.arrow = arrow
         // Clockwise from north, from radians from east with y south
         let degrees = (mapAngle * 180 / .pi + 90 + 720).truncatingRemainder(dividingBy: 360)
@@ -2380,9 +2861,8 @@ struct BusMarkPlacement: Equatable {
         compass = names[Int((degrees / 45).rounded()) % 8]
     }
 
-    /// Out to the right of the way its buses go, as they keep right.
-    /// And `extra`, pushed clear of other marks.
-    var offset: CGSize { CGSize(width: -sin(angle) * out + extra.width, height: cos(angle) * out + extra.height) }
+    /// Out to the right of the way its buses go: its kerb side.
+    var offset: CGSize { CGSize(width: -sin(angle) * out, height: cos(angle) * out) }
 }
 
 /// A bus stop on Nearby's map: the lines it's named with (`busNames`) in a bus blue pill, small
@@ -2395,10 +2875,37 @@ private struct BusStopMark: View {
     let lines: [String]?
     var opened = false
     var placement: BusMarkPlacement?
+    /// Moved along its street, clear of another stop's lines (`BusTagLayout`).
+    var nudge: CGSize = .zero
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
+        // Its dot and its lines' tag, one shrinking into its stop and the other springing out of
+        // it (`MarkBubble`), each moved from the stop as it's drawn so it scales to and from there
+        ZStack {
+            if lines != nil {
+                look.offset(offset).transition(MarkBubble.transition(reduceMotion: reduceMotion))
+            } else {
+                look.offset(offset).transition(MarkBubble.transition(reduceMotion: reduceMotion))
+            }
+        }
+        .animation(reduceMotion ? nil : .default, value: lines != nil)
+        .animation(reduceMotion ? nil : .smooth(duration: 0.2), value: nudge)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(name)
+        .accessibilityValue(spoken)
+    }
+
+    /// Where it's drawn from its stop: out to its kerb, and along its street.
+    private var offset: CGSize {
+        let out = placement?.offset ?? .zero
+        return CGSize(width: out.width + nudge.width, height: out.height + nudge.height)
+    }
+
+    /// Its lines' tag, or its dot.
+    private var look: some View {
         let arrow = placement.flatMap { $0.arrow ? Angle.radians($0.angle) : nil }
-        Group {
+        return Group {
             if let lines {
                 HStack(spacing: 2) {
                     ForEach(lines, id: \.self) { MapSignBusBadge(line: $0) }
@@ -2438,14 +2945,13 @@ private struct BusStopMark: View {
             }
         }
         .fixedSize()
-        .offset(placement?.offset ?? .zero)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(name)
-        .accessibilityValue(spoken)
     }
 
     /// Its lines, and the way its buses go: "B67 bus, heading east".
-    private var spoken: String {
+    private var spoken: String { Self.spoken(lines: lines, placement: placement) }
+
+    /// As `spoken`, for its map mark's own (`MapMark`).
+    static func spoken(lines: [String]?, placement: BusMarkPlacement?) -> String {
         let lines = (lines ?? []).map(BusBadge.spokenName).joined(separator: ", ")
         guard let placement, placement.arrow else { return lines }
         return [lines, "heading " + placement.compass].filter { !$0.isEmpty }.joined(separator: ", ")
@@ -2468,7 +2974,7 @@ private struct OpenedStop: Equatable {
     /// Its map mark's id.
     let id: String
     let coordinate: CLLocationCoordinate2D
-    /// The lines stopping there, as bus_stops.json has them.
+    /// The lines stopping there, as `TrackShapes.busStops` has them.
     let lines: [String]
     var place: NearbyBusPlace?
     var failed = false
@@ -2537,16 +3043,45 @@ private struct MapMiddleDot: View {
 /// dot grows, so it reads as the smaller once they're apart.
 private struct MapYouMark: View {
     let tracker: MapMiddleTracker
+    let tap: () -> Void
 
     var body: some View {
         let angle = tracker.you.map { you in
             Angle(radians: atan2(tracker.middle.y - you.y, tracker.middle.x - you.x))
         } ?? .zero
         MapYouDot(progress: tracker.progress, angle: angle)
+            // Room round the small dot to tap
+            .padding(8)
+            .contentShape(Circle())
+            .onTapGesture(perform: tap)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityHint("Goes back to you")
     }
 }
 
-private struct MapYouDot: View, Animatable {
+/// Room to tap the grey dot, at the map's middle, once it's split off; nothing elsewhere, for
+/// the map to pan and pinch under it.
+private struct MapMiddleTap: View {
+    let tracker: MapMiddleTracker
+    let tap: () -> Void
+
+    var body: some View {
+        if tracker.shows {
+            Color.clear
+                .frame(width: 44, height: 44)
+                .contentShape(Circle())
+                .onTapGesture(perform: tap)
+                .accessibilityElement()
+                .accessibilityLabel("Map's middle")
+                .accessibilityAddTraits(.isButton)
+                .accessibilityHint("Zooms in here")
+                .position(tracker.middle)
+        }
+    }
+}
+
+/// Your dot, Nearby's and New Trip's before it's planned.
+struct MapYouDot: View, Animatable {
     var progress: Double
     let angle: Angle
 
@@ -2731,47 +3266,94 @@ private struct MarkLayout: Equatable {
 
     var looks: [String: Look] = [:]
     var tooCrowded = false
+    /// Bus stops' tags: those moved along their streets, clear of others (`BusTagLayout`); the
+    /// lines put in each from stops just by it; and those stops, dots now.
+    var nudges: [String: CGSize] = [:]
+    var extraLines: [String: [String]] = [:]
+    var joined: Set<String> = []
 }
 
 /// A place on Nearby's map as `layout` has it: its sign, or its bubble, each measured for
 /// laying them out. `tap` gets the ids a merged bubble stands for, or nil for one place.
-private struct MapMark<Sign: View, Bubble: View>: View {
+private struct MapMark<Sign: View, Bubble: View>: View, Equatable {
     let id: String
-    let layout: MarkLayout
+    let look: MarkLayout.Look
+    /// What its sign and bubble show, for it to be drawn again only when that or its look
+    /// changes (`==`), not with every change to Nearby: each of its forty or so marks was drawn
+    /// again a dozen times each time Nearby re-listed.
+    let key: String
     @Binding var signSizes: [String: CGSize]
     @Binding var bubbleSizes: [String: CGSize]
+    /// For VoiceOver, as a bubble shows only its kind's symbol: the place's name, what a merged
+    /// one stands for ("3 docks"), and what's there: a station's lines, a stop's buses and the
+    /// way they go, a dock's bikes.
+    let spoken: String
+    let kinds: String
+    let detail: String
+    let hint: String
+    /// Springing out of its place once it's on the map (`MarkBubble`), as a stop along the
+    /// lines does as the map's zoomed past where they're marked.
+    var popsIn = false
     let sign: Sign
     let bubble: (Int?) -> Bubble
     let tap: ([String]?) -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var appeared = false
 
-    private var look: MarkLayout.Look { layout.tooCrowded ? .hidden : layout.looks[id] ?? .sign }
+    /// The same mark, showing the same: its sign, bubble and tap, which can't be compared,
+    /// worked out from what `key` says.
+    static func == (a: Self, b: Self) -> Bool {
+        a.id == b.id && a.look == b.look && a.key == b.key && a.spoken == b.spoken && a.kinds == b.kinds
+            && a.detail == b.detail && a.hint == b.hint
+    }
 
     var body: some View {
         let showsBubble = look == .bubble || look.merged != nil
         Button {
             tap(look.merged)
         } label: {
+            // Each look shrinking into its place, the mark's middle, as it goes, and springing out
+            // of it as it comes (`MarkBubble`): by its own animation, as the map's marks may not
+            // be given one from outside it
             ZStack {
                 sign
-                    .onGeometryChange(for: CGSize.self) { $0.size } action: { signSizes[id] = $0 }
-                    .opacity(look == .sign ? 1 : 0)
+                    .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
+                        if signSizes[id] != size { signSizes[id] = size }
+                    }
+                    .scaleEffect(look == .sign ? 1 : MarkBubble.gone)
+                    .animation(MarkBubble.animation(showing: look == .sign, reduceMotion: reduceMotion), value: look)
+                    .modifier(MarkBubble.Gone(gone: look != .sign, look: look))
                     .allowsHitTesting(look == .sign)
                 bubble(look.merged?.count)
                     // Measured on its own, as a count would widen it
                     .background {
                         bubble(nil).hidden()
-                            .onGeometryChange(for: CGSize.self) { $0.size } action: { bubbleSizes[id] = $0 }
+                            .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
+                                if bubbleSizes[id] != size { bubbleSizes[id] = size }
+                            }
                     }
-                    .opacity(showsBubble ? 1 : 0)
-                    .scaleEffect(showsBubble ? 1 : 0.6)
+                    .scaleEffect(showsBubble ? 1 : MarkBubble.gone)
+                    .animation(MarkBubble.animation(showing: showsBubble, reduceMotion: reduceMotion), value: look)
+                    .modifier(MarkBubble.Gone(gone: !showsBubble, look: look))
                     .allowsHitTesting(showsBubble)
             }
+            .scaleEffect(popsIn && !appeared ? MarkBubble.gone : 1)
         }
         .buttonStyle(.plain)
-        .opacity(look == .hidden ? 0 : 1)
+        // One element, sign or bubble, standing in for the button: not the sign's name and lines
+        // and the bubble's name again, each its own ("9 St & 4 Av, 9 St & 4 Av"), nor a dozen for
+        // VoiceOver to step through and the accessibility tree to hold for each mark
+        .accessibilityRepresentation {
+            Button(look.merged.map { "\($0.count) \(kinds)" } ?? spoken) { tap(look.merged) }
+                .accessibilityValue(look.merged == nil ? detail : "")
+                .accessibilityHint(hint)
+        }
         .allowsHitTesting(look != .hidden)
         .accessibilityHidden(look == .hidden)
-        .accessibilityValue(look.merged.map { "\($0.count) here" } ?? "")
+        .onAppear {
+            guard popsIn, !appeared else { return }
+            withAnimation(MarkBubble.animation(showing: true, reduceMotion: reduceMotion)) { appeared = true }
+        }
     }
 }
 
@@ -2829,14 +3411,14 @@ final class LiveTrains {
     /// When the last load finished; nil before the first.
     private(set) var updated: Date?
     /// Ticks every few seconds so the minutes count down.
-    var now = Date.now {
+    var now = AppClock.now {
         didSet {
             if now.timeIntervalSince(mapNow) >= Self.mapTick || now < mapNow { mapNow = now }
         }
     }
     /// `now` a minute at a time, for the map: its bus stops' lines and the lines drawn, by the
     /// buses still due. Not the whole map redrawn every tick for a bus gone a few seconds sooner.
-    private(set) var mapNow = Date.now
+    private(set) var mapNow = AppClock.now
     private static let mapTick: TimeInterval = 60
 
     /// Fetches via `TrainService.trains(for:)`. Trains missing from the result lose their
@@ -2870,7 +3452,7 @@ final class LiveTrains {
         failed.formUnion(missing)
         fromTimetable.subtract(asked)
         fromTimetable.formUnion(timed.keys)
-        now = .now
+        now = AppClock.now
         updated = now
     }
 
@@ -2893,9 +3475,10 @@ extension View {
     }
 
     /// Runs `load` now and every minute (restarting when `id` changes), and after
-    /// `refreshing` on pull-to-refresh or app foregrounding. Ticks `live.now` in between.
+    /// `refreshing` on pull-to-refresh (`load`'s true) or app foregrounding. Ticks `live.now` in
+    /// between.
     fileprivate func updatingTrains<ID: Equatable>(_ live: LiveTrains, id: ID, refreshing: @escaping () -> Void = {},
-                                                   load: @escaping () async -> Void) -> some View {
+                                                   load: @escaping (_ pulled: Bool) async -> Void) -> some View {
         modifier(UpdatingTrains(live: live, id: id, refreshing: refreshing, load: load))
     }
 }
@@ -2915,11 +3498,11 @@ private struct Ticking: ViewModifier {
     func body(content: Content) -> some View {
         content.task(id: scenePhase != .background) {
             guard scenePhase != .background else { return }
-            now.wrappedValue = .now
+            now.wrappedValue = AppClock.now
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(10))
                 guard !Task.isCancelled else { return }
-                now.wrappedValue = .now
+                now.wrappedValue = AppClock.now
             }
         }
     }
@@ -2929,20 +3512,30 @@ private struct UpdatingTrains<ID: Equatable>: ViewModifier {
     let live: LiveTrains
     let id: ID
     let refreshing: () -> Void
-    let load: () async -> Void
+    let load: (_ pulled: Bool) async -> Void
     @Environment(\.scenePhase) private var scenePhase
+    /// When it last loaded, and for which `id`: restarted for the same within `soonAgain` (the
+    /// page back from a train's or another tab, or the app back), it waits out the minute first.
+    @State private var loaded: (at: Date, id: ID)?
+    private static var soonAgain: TimeInterval { 30 }
 
     func body(content: Content) -> some View {
         content
             .refreshable {
                 refreshing()
-                await load()
+                await load(true)
+                loaded = (.now, id)
             }
-            // Restarted as the app comes back, loading then
+            // Restarted as the app comes back, loading then, unless it just has
             .task(id: Polling(id: id, inForeground: scenePhase != .background)) {
                 guard scenePhase != .background else { return }
+                if let loaded, loaded.id == id, live.failed.isEmpty {
+                    let since = Date.now.timeIntervalSince(loaded.at)
+                    if since < Self.soonAgain { await Connectivity.shared.pause(for: .seconds(60 - since)) }
+                }
                 while !Task.isCancelled {
-                    await load()
+                    await load(false)
+                    if !Task.isCancelled { loaded = (.now, id) }
                     // After a failure, sooner; and as soon as the network's back (a station
                     // after a tunnel)
                     await Connectivity.shared.pause(for: .seconds(live.failed.isEmpty ? 60 : 15))
@@ -2965,66 +3558,6 @@ private struct UnreachableNote: View {
         Label(timetable ? "Couldn't reach the MTA, so some times are the timetable's. Pull down to try again."
                   : "Couldn't reach the MTA. Pull down to try again.", systemImage: "wifi.exclamationmark")
             .foregroundStyle(.secondary)
-    }
-}
-
-/// One line at a station with its next trains each way, matching the Nearby widget
-/// (`Station.ways(of:trains:now:)`): toward Manhattan first. Directions with no name (end of
-/// the line) are omitted, as is a direction where the line terminates at a shared platform,
-/// unless some of its trains continue.
-private struct NearbyLineRow: View {
-    let station: Station
-    let route: String
-    let live: LiveTrains
-    let marks: TimeMarks
-    let open: (Selection) -> Void
-
-    private var ways: [LineWay] {
-        station.ways(of: route, trains: live.trains, now: live.now).compactMap { $0 }
-    }
-
-    var body: some View {
-        // The bullet is centred between the directions
-        HStack(spacing: 22) {
-            LineBullet(route: route, size: 40)
-                .frame(width: 44)
-            VStack(spacing: 0) {
-                ForEach(Array(ways.enumerated()), id: \.element.direction) { index, way in
-                    let failed = live.failed.contains(way.selection.trainID)
-                    if index > 0 {
-                        Divider().padding(.vertical, 8)
-                    }
-                    Button {
-                        open(way.selection)
-                    } label: {
-                        // The direction sits on the next train's baseline
-                        HStack(alignment: .firstTextBaseline, spacing: 10) {
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(way.label)
-                                    .lineLimit(1)
-                                // The next train's destination
-                                if let terminal = way.trains?.first?.terminal {
-                                    Text(terminal)
-                                        .font(.footnote)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(1)
-                                }
-                            }
-                            Spacer(minLength: 12)
-                            // No chevron: the whole row's the tap, as New Trip's trips
-                            Minutes(trains: way.trains, failed: failed, now: live.now, marks: marks)
-                        }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("\(Lines.name(of: route)) \(way.label)"
-                                        + (way.trains?.first?.terminal.map { ", to \($0)" } ?? ""))
-                    // The label covers the whole row, so times go in the value
-                    .accessibilityValue(Minutes.spoken(way.trains, failed: failed, now: live.now))
-                }
-            }
-        }
-        .padding(.vertical, 6)
     }
 }
 
@@ -3060,6 +3593,7 @@ private struct Minutes: View {
                 .monospacedDigit()
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(Self.spoken(trains, now: now, count: laterCount + 1))
+                .accessibilityAddTraits(.updatesFrequently)
             }
         } else {
             Text("—").foregroundStyle(.secondary)
@@ -3118,7 +3652,7 @@ private struct Minutes: View {
 }
 
 #Preview {
-    LiveView(allowingLocation: .constant(false), recenterRequests: 0)
+    LiveView(allowingLocation: .constant(false), keptHeading: .constant(nil), recenterRequests: 0)
         .environment(WidgetStore())
         .environment(SettingsStore())
 }

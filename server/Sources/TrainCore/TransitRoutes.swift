@@ -1,191 +1,82 @@
 import Foundation
 
-/// A subway route from Google's Routes API: just its train rides, and with `bus` its bus rides,
-/// in order, for the app to match to its stations. For trips shared from Apple Maps or Google
-/// Maps, whose links say only where they start and end.
-struct TransitRoute: Codable, Equatable, Sendable {
-    var legs: [Leg]
-
-    /// One train or bus ride.
-    struct Leg: Codable, Equatable, Sendable {
-        /// Google's short name for the line: "R", "6", "S", "B63".
-        var line: String
-        var from: Stop
-        var to: Stop
-        /// Where the train's going, e.g. "Forest Hills - 71 Av".
-        var headsign: String?
-        /// Stops ridden, counting the last.
-        var stops: Int?
-        var mode: Mode = .subway
-        /// Seconds from boarding to getting off, by Google's timetable: for timing what comes
-        /// after a bus, as Bus Time only says when it's due where you board.
-        var seconds: Int? = nil
-        /// When it leaves where it's boarded by Google's timetable, in seconds since 1970: for
-        /// timing a trip with a bus, which the app's timetable doesn't have.
-        var leaves: Int? = nil
-    }
-
-    enum Mode: String, Codable, Sendable {
-        case subway, bus
-    }
-
-    struct Stop: Codable, Equatable, Sendable {
-        var name: String
-        var latitude: Double
-        var longitude: Double
-    }
-}
-
-/// Asks Google's Routes API for subway routes (`GET /routes`), keeping to daily limits so its
-/// free allowance isn't used up: each client's, and everyone's together. The key stays here, as
-/// the app can't keep one secret.
+/// Trips between two places in the city (`GET /routes`), planned on the subway's and the
+/// buses' timetables (`TransitPlanner`), keeping to daily limits so no one client can keep the
+/// server busy: each client's, and everyone's together.
 actor TransitRoutes {
-    typealias Fetch = Web.Fetch
+    /// The network to plan on; nil while there's no timetable yet.
+    typealias Network = @Sendable () async -> TransitNetwork?
 
     enum Outcome: Equatable, Sendable {
         case routes([TransitRoute])
         /// Over a daily limit, until the counts start again.
         case limited(retryAfter: Int)
-        /// Google refused or couldn't be reached.
+        /// No timetable to plan on yet, or none for what's asked: buses, before the buses' is made.
         case unavailable
     }
 
-    static let endpoint = URL(string: "https://routes.googleapis.com/directions/v2:computeRoutes")!
+    /// How long the routes for a trip are kept, for the same asked again (the Share extension
+    /// and the app asking together, or asking again): timetables don't move in that time.
+    static let keptFor: TimeInterval = 2 * 60
+    /// Kept routes before the ones gone stale are cleared.
+    static let maxKept = 1000
 
-    private let key: String
     private let perClient: DailyLimiter
     private let everyone: DailyLimiter
-    private let fetch: Fetch
+    private let network: Network
+    /// Routes found, by `trip(from:to:departure:bus:subway:)`.
+    private var kept: [String: (routes: [TransitRoute], until: Date)] = [:]
 
-    init(key: String, perClientPerDay: Int, perDay: Int, fetch: Fetch? = nil) {
-        self.key = key
+    init(perClientPerDay: Int, perDay: Int, network: @escaping Network) {
         perClient = DailyLimiter(limit: perClientPerDay, byAddress: true)
         everyone = DailyLimiter(limit: perDay)
-        self.fetch = fetch ?? Web.fetch
+        self.network = network
     }
 
-    /// Google's routes from `from` to `to` leaving at `departure`, best first, for `client`; by
-    /// bus too with `bus`, or by bus alone without `subway`. A request counts toward the limits
-    /// whether or not Google finds a route.
+    /// Planning on the timetables the server serves (`TransitNetworks`).
+    init(perClientPerDay: Int, perDay: Int, subway: TimetableCopy, buses: TimetableCopy) {
+        let networks = TransitNetworks(subway: subway, buses: buses)
+        self.init(perClientPerDay: perClientPerDay, perDay: perDay) { await networks.current() }
+    }
+
+    /// Routes from `from` to `to` leaving at `departure`, best first, for `client`; by bus too
+    /// with `bus`, or by bus alone without `subway`. Each counts toward the limits whether or not
+    /// it finds a route, but one for the same trip (`trip`) as one kept (`keptFor`) counts toward
+    /// nothing.
     func routes(from: (Double, Double), to: (Double, Double), departure: Date, client: String,
                 bus: Bool = false, subway: Bool = true, now: Date = .now) async -> Outcome {
+        let trip = Self.trip(from: from, to: to, departure: departure, bus: bus, subway: subway)
+        if let found = kept[trip], found.until > now { return .routes(found.routes) }
         guard await perClient.take(client, now: now), await everyone.take("everyone", now: now) else {
             return .limited(retryAfter: DailyLimiter.secondsUntilReset(now: now))
         }
-        let request = Self.request(from: from, to: to, departure: departure, key: key, bus: bus, subway: subway)
-        guard let (data, status) = try? await fetch(request) else {
-            Log.error("routes: Google unreachable")
-            return .unavailable
-        }
-        guard status == 200, let routes = Self.routes(in: data, bus: bus) else {
-            Log.error("routes: Google answered \(status)")
-            return .unavailable
-        }
+        var asked: Set<TransitRoute.Mode> = subway || !bus ? [.subway] : []
+        if bus { asked.insert(.bus) }
+        // By the modes it has timetables for: trains alone, if the buses' isn't made yet
+        guard let network = await network() else { return .unavailable }
+        var have: Set<TransitRoute.Mode> = []
+        if network.subwayMade != nil { have.insert(.subway) }
+        if network.busMade != nil { have.insert(.bus) }
+        let modes = asked.intersection(have)
+        guard !modes.isEmpty else { return .unavailable }
+        // Off the actor: planning takes a moment, and others' asks shouldn't wait on it
+        let routes = await Task.detached(priority: .userInitiated) {
+            TransitPlanner.routes(on: network, from: from, to: to, departure: departure, modes: modes)
+        }.value
+        if kept.count >= Self.maxKept { kept = kept.filter { $0.value.until > now } }
+        if kept.count >= Self.maxKept { kept.removeAll() }
+        kept[trip] = (routes, now.addingTimeInterval(Self.keptFor))
         return .routes(routes)
     }
 
-    /// A transit request by subway alone, or with `bus` by subway and bus (by bus alone without
-    /// `subway`; `subway` alone counts without `bus`), with Google's
-    /// alternatives, asking only for the rides' details (the field mask), which keeps it Google's
-    /// cheapest kind of request.
-    static func request(from: (Double, Double), to: (Double, Double), departure: Date, key: String,
-                        bus: Bool = false, subway: Bool = true) -> URLRequest {
-        var request = URLRequest(url: endpoint)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 10
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(key, forHTTPHeaderField: "X-Goog-Api-Key")
-        request.setValue("routes.legs.steps.transitDetails", forHTTPHeaderField: "X-Goog-FieldMask")
-        let place = { (point: (Double, Double)) -> [String: Any] in
-            ["location": ["latLng": ["latitude": point.0, "longitude": point.1]]]
-        }
-        let body: [String: Any] = [
-            "origin": place(from),
-            "destination": place(to),
-            "travelMode": "TRANSIT",
-            "departureTime": ISO8601DateFormatter().string(from: departure),
-            "computeAlternativeRoutes": true,
-            "transitPreferences": ["allowedTravelModes": bus ? (subway ? ["SUBWAY", "BUS"] : ["BUS"]) : ["SUBWAY"]],
-        ]
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body, options: .sortedKeys)
-        return request
+    /// What makes two asks the same trip: their places to 4 decimals (about 10 m), leaving in
+    /// the same minute, by the same modes.
+    static func trip(from: (Double, Double), to: (Double, Double), departure: Date, bus: Bool, subway: Bool) -> String {
+        String(format: "%.4f,%.4f %.4f,%.4f ", from.0, from.1, to.0, to.1)
+            + "\(Int((departure.timeIntervalSince1970 / 60).rounded(.down))) \(bus ? "bus" : "")\(subway ? "subway" : "")"
     }
 
-    /// Each route's subway rides from Google's response, and with `bus` its bus rides; routes
-    /// with none are left out, and so are those with a ride the app can't show (the LIRR, a
-    /// ferry, a bus without `bus`), which would leave a gap in the trip. The Staten Island
-    /// Railway, whichever kind of train Google calls it, is a subway ride. Nil if it isn't
-    /// Google's response at all.
-    static func routes(in data: Data, bus: Bool = false) -> [TransitRoute]? {
-        struct Response: Decodable {
-            var routes: [Route]?
-            struct Route: Decodable { var legs: [Leg]? }
-            struct Leg: Decodable { var steps: [Step]? }
-            struct Step: Decodable { var transitDetails: Details? }
-            struct Details: Decodable {
-                var stopDetails: Stops?
-                var headsign: String?
-                var transitLine: Line?
-                var stopCount: Int?
-            }
-            struct Stops: Decodable {
-                var departureStop: Stop?, arrivalStop: Stop?
-                var departureTime: String?, arrivalTime: String?
-            }
-            struct Stop: Decodable {
-                var name: String?
-                var location: Location?
-            }
-            struct Location: Decodable { var latLng: LatLng? }
-            struct LatLng: Decodable { var latitude: Double, longitude: Double }
-            struct Line: Decodable {
-                var nameShort: String?
-                var name: String?
-                var vehicle: Vehicle?
-            }
-            struct Vehicle: Decodable { var type: String? }
-        }
-        guard let response = try? JSONDecoder().decode(Response.self, from: data) else { return nil }
-        let stop = { (stop: Response.Stop?) -> TransitRoute.Stop? in
-            guard let stop, let point = stop.location?.latLng else { return nil }
-            return TransitRoute.Stop(name: stop.name ?? "", latitude: point.latitude, longitude: point.longitude)
-        }
-        return (response.routes ?? []).compactMap { route in
-            // Walks between the rides have no details
-            let rides = (route.legs ?? []).flatMap { $0.steps ?? [] }.compactMap(\.transitDetails)
-            var legs: [TransitRoute.Leg] = []
-            for details in rides {
-                guard let line = details.transitLine?.nameShort ?? details.transitLine?.name,
-                      let mode = mode(of: details.transitLine?.vehicle?.type, line: line, bus: bus),
-                      let from = stop(details.stopDetails?.departureStop),
-                      let to = stop(details.stopDetails?.arrivalStop) else { return nil }
-                let time = { (text: String?) in text.flatMap(Web.date) }
-                let leaves = time(details.stopDetails?.departureTime)
-                let seconds = leaves.flatMap { leaves in
-                    time(details.stopDetails?.arrivalTime).map { Int($0.timeIntervalSince(leaves)) }
-                }.flatMap { $0 >= 0 ? $0 : nil }
-                legs.append(TransitRoute.Leg(line: line, from: from, to: to, headsign: details.headsign,
-                                             stops: details.stopCount, mode: mode, seconds: seconds,
-                                             leaves: leaves.map { Int($0.timeIntervalSince1970) }))
-            }
-            return legs.isEmpty ? nil : TransitRoute(legs: legs)
-        }
-    }
-
-    /// A ride's mode by Google's kind of vehicle: nil for one the app can't show. The Staten
-    /// Island Railway ("SIR") is the app's SI, a subway line, whatever Google calls its trains.
-    private static func mode(of vehicle: String?, line: String, bus: Bool) -> TransitRoute.Mode? {
-        switch vehicle {
-        case "SUBWAY", "METRO_RAIL": return .subway
-        case "BUS": return bus ? .bus : nil
-        case "RAIL", "HEAVY_RAIL", "COMMUTER_TRAIN":
-            return ["SIR", "STATEN ISLAND RAILWAY"].contains(line.uppercased()) ? .subway : nil
-        default: return nil
-        }
-    }
-
-    /// Whether a point is in New York City, around its subway: trips elsewhere aren't asked of
-    /// Google.
+    /// Whether a point is in New York City, around its subway: trips elsewhere aren't planned.
     static func isInCity(_ point: (Double, Double)) -> Bool {
         (40.45...40.95).contains(point.0) && (-74.30 ... -73.65).contains(point.1)
     }
@@ -196,5 +87,44 @@ actor TransitRoutes {
               let latitude = Double(parts[0]), let longitude = Double(parts[1]),
               latitude.isFinite, longitude.isFinite else { return nil }
         return (latitude, longitude)
+    }
+}
+
+/// The network for the timetables the server serves (`TimetableCopy`), built again once either
+/// is newer. A build takes a few seconds, so a request meanwhile waits for it, and so does one
+/// asking at the same time.
+actor TransitNetworks {
+    private let subway: TimetableCopy
+    private let buses: TimetableCopy
+    private var built: TransitNetwork?
+    private var building: (subway: Date?, buses: Date?, task: Task<TransitNetwork?, Never>)?
+
+    init(subway: TimetableCopy, buses: TimetableCopy) {
+        self.subway = subway
+        self.buses = buses
+    }
+
+    /// The network, nil if neither timetable is made yet.
+    func current() async -> TransitNetwork? {
+        let subwayMade = await subway.made, busMade = await buses.made
+        if let built, built.subwayMade == subwayMade, built.busMade == busMade { return built }
+        guard subwayMade != nil || busMade != nil else { return nil }
+        if let building, building.subway == subwayMade, building.buses == busMade { return await building.task.value }
+        let subwayData = await subway.data, busData = await buses.data
+        let task = Task.detached(priority: .utility) { () -> TransitNetwork? in
+            let started = ContinuousClock.now
+            let subway = subwayData.flatMap { try? Timetable(data: $0) }
+            let buses = busData.flatMap { try? Timetable(data: $0) }
+            guard subway != nil || buses != nil else { return nil }
+            let network = TransitNetwork(subway: subway, buses: buses)
+            Log.info("routes: planning on \(network.stops.count) stops, \(network.patterns.count) patterns, "
+                + "built in \((ContinuousClock.now - started).components.seconds) s")
+            return network
+        }
+        building = (subwayMade, busMade, task)
+        let network = await task.value
+        if building?.task == task { building = nil }
+        if let network { built = network }
+        return network ?? built
     }
 }

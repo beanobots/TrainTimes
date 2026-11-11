@@ -95,7 +95,10 @@ struct WalkStageView: View {
                 Text("Tap for the turns")
                     .font(.caption)
                     .foregroundStyle(Color.boardGray)
+                    .accessibilityHidden(true)
             }
+            .accessibilityElement(children: .combine)
+            .accessibilityHint("Opens the walk for the turns")
         }
     }
 

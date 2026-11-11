@@ -101,7 +101,7 @@ final class RideTracker {
     // MARK: Where it is
 
     /// Where the train is at `now`; nil until its stops are found.
-    func place(at now: Date = .now) -> Place? {
+    func place(at now: Date = AppClock.now) -> Place? {
         let times = times()
         guard let first = stops.first, !times.isEmpty else { return nil }
         // Not yet left, or there
@@ -203,7 +203,7 @@ final class RideTracker {
 
     /// When to take a fix next: as the train should be waiting at the next station not yet
     /// checked and not yet left; nil once all are.
-    func nextCheck(after now: Date = .now) -> (index: Int, time: Date)? {
+    func nextCheck(after now: Date = AppClock.now) -> (index: Int, time: Date)? {
         let times = times()
         let last = times.count - 1
         return times.indices.dropFirst()
@@ -215,7 +215,8 @@ final class RideTracker {
     /// train's put there. Too rough a fix, or one between stations, changes nothing.
     func check(_ location: CLLocation?, for index: Int) {
         checked.insert(index)
-        guard let location, location.horizontalAccuracy >= 0, location.horizontalAccuracy <= Self.worstAccuracy
+        guard let location, Self.isPlace(location), location.horizontalAccuracy >= 0,
+              location.horizontalAccuracy <= Self.worstAccuracy
         else { return }
         let reach = max(Self.atStation, location.horizontalAccuracy)
         let nearest = stops.indices.map { index in
@@ -233,7 +234,7 @@ final class RideTracker {
     /// a matching while ago. Above ground, where a late tap still gets a fix. At your own
     /// station, or off the line, it's left to its times.
     func locate(_ location: CLLocation) {
-        guard location.horizontalAccuracy >= 0, location.horizontalAccuracy <= Self.worstAccuracy,
+        guard Self.isPlace(location), location.horizontalAccuracy >= 0, location.horizontalAccuracy <= Self.worstAccuracy,
               stops.count > 1 else { return }
         let reach = max(Self.atStation, location.horizontalAccuracy)
         let distances = stops.map { location.distance(from: CLLocation(latitude: $0.coordinate.latitude,
@@ -250,6 +251,13 @@ final class RideTracker {
         let hop = max(times[index + 1].arrives.timeIntervalSince(times[index].leaves), 0)
         fix = (index, location.timestamp.addingTimeInterval(-part * hop), true)
         checked.formUnion(0...index)
+    }
+
+    /// Whether `location`'s somewhere: not NaN or infinite, which `CLLocation.distance` can't be
+    /// trusted to rule out.
+    nonisolated private static func isPlace(_ location: CLLocation) -> Bool {
+        let coordinate = location.coordinate
+        return coordinate.latitude.isFinite && coordinate.longitude.isFinite && CLLocationCoordinate2DIsValid(coordinate)
     }
 
     /// One fix, of up to `worstAccuracy`, or nil if none comes within `seconds`. From a location
@@ -403,6 +411,8 @@ private final class OneFix: NSObject, CLLocationManagerDelegate {
 
     static func get(within seconds: TimeInterval,
                     accepting accepts: @escaping @Sendable (CLLocation) -> Bool) async -> CLLocation? {
+        // Prototyping's Pretend Location, while set
+        if let pretend = PretendLocation.current { return accepts(pretend) ? pretend : nil }
         let fix = OneFix(accepts: accepts)
         return await withCheckedContinuation { continuation in
             fix.waiting = continuation
@@ -428,7 +438,10 @@ private final class OneFix: NSObject, CLLocationManagerDelegate {
 
     nonisolated func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         guard let location = locations.last(where: accepts) else { return }
-        Task { @MainActor in self.finish(location) }
+        Task { @MainActor in
+            guard PretendLocation.shared.coordinate == nil else { return }
+            self.finish(location)
+        }
     }
 
     nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {}

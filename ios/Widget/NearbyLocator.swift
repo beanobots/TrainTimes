@@ -133,16 +133,35 @@ final class NearbyLocator: NSObject, CLLocationManagerDelegate {
     }
 
     /// The borough or city name, e.g. "Brooklyn", or nil. Only re-geocoded after you've moved
-    /// 250 m from the saved place, since Apple rate-limits lookups.
+    /// 250 m from the saved place, since Apple rate-limits lookups. A lookup that finds no name
+    /// keeps the last name saved, and isn't tried again within 250 m for `nameRetry`.
     static func placeName(for location: CLLocation) async -> String? {
         if let saved = SharedStore.loadPlace(), saved.name != nil,
            CLLocation(latitude: saved.latitude, longitude: saved.longitude).distance(from: location) < 250 {
             return saved.name
         }
+        let defaults = UserDefaults.standard
+        if let tried = defaults.object(forKey: Self.nameTriedKey) as? Date, Date.now.timeIntervalSince(tried) < nameRetry,
+           CLLocation(latitude: defaults.double(forKey: Self.nameTriedLatitudeKey),
+                      longitude: defaults.double(forKey: Self.nameTriedLongitudeKey)).distance(from: location) < 250 {
+            return nil
+        }
         let item = try? await MKReverseGeocodingRequest(location: location)?.mapItems.first
-        let name = item?.addressRepresentations?.cityName
+        guard let name = item?.addressRepresentations?.cityName else {
+            defaults.set(Date.now, forKey: Self.nameTriedKey)
+            defaults.set(location.coordinate.latitude, forKey: Self.nameTriedLatitudeKey)
+            defaults.set(location.coordinate.longitude, forKey: Self.nameTriedLongitudeKey)
+            return nil
+        }
         SharedStore.savePlace(SharedStore.Place(latitude: location.coordinate.latitude,
                                                 longitude: location.coordinate.longitude, name: name))
         return name
     }
+
+    /// How long after a lookup that found no name the widgets wait to look there again.
+    nonisolated static let nameRetry: TimeInterval = 30 * 60
+    /// When and where that lookup was, in the widgets' own defaults.
+    private static let nameTriedKey = "nearbyNameTried"
+    private static let nameTriedLatitudeKey = "nearbyNameTriedLatitude"
+    private static let nameTriedLongitudeKey = "nearbyNameTriedLongitude"
 }

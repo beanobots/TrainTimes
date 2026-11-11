@@ -305,6 +305,7 @@ private struct ChangeLinesStep: View {
                 VStack(alignment: .leading, spacing: 12) {
                     Label("Buses within a \(Self.busWalk) min walk", systemImage: "bus.fill")
                         .font(.subheadline.weight(.semibold))
+                        .accessibilityAddTraits(.isHeader)
                     let walks = Array(Set(nearbyBuses.map(\.walkMinutes))).sorted()
                     ForEach(walks, id: \.self) { walk in
                         Text("\(walk) min walk from the \(Lines.list(selection.routes))")
@@ -430,6 +431,7 @@ private struct ChangeLinesStep: View {
             Text("GOING")
                 .font(.footnote.weight(.semibold))
                 .foregroundStyle(.secondary)
+                .accessibilityAddTraits(.isHeader)
             ForEach([selection.direction, selection.direction.opposite], id: \.self) { way in
                 Button {
                     direction = way

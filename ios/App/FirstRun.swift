@@ -146,6 +146,7 @@ struct SightseeingList: View {
                     .foregroundStyle(.tint)
                     .frame(width: 32, height: 32)
                     .background(.tint.opacity(0.12), in: Circle())
+                    .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(sight.name).foregroundStyle(.primary)
                     Text(sight.area).font(.caption).foregroundStyle(.secondary)
@@ -229,6 +230,46 @@ final class FirstRunAnswers {
     var citiBikeOff = UserDefaults.standard.bool(forKey: BikeKinds.offKey)
     var ownBike = UserDefaults.standard.string(forKey: OwnBike.key).flatMap(OwnBike.init(rawValue:)) ?? OwnBike.none
     var bikeCarry = UserDefaults.standard.string(forKey: BikeCarry.key).flatMap(BikeCarry.init(rawValue:)) ?? BikeCarry.all
+    /// Work, saved beside Home; not while visiting, Sightseeing taking its chip.
+    private(set) var work: TripPlace?
+    /// Places saved beside Home and Work under names given them, in the order added.
+    private(set) var others: [OtherPlace] = []
+
+    /// A place added on the Home page, under the name it was given.
+    struct OtherPlace: Identifiable {
+        let id: UUID
+        var name: String
+        var place: TripPlace
+    }
+
+    /// Which place the Home page's search is finding.
+    enum Target: Hashable {
+        case home, work
+        /// One of `others`, searched again.
+        case other(UUID)
+        /// A place being added under this name.
+        case new(String)
+    }
+
+    /// Sets Work or another place from setup's search; Home goes by `setHome(_:isHotel:)`.
+    func set(_ target: Target, to place: TripPlace) {
+        switch target {
+        case .home: break
+        case .work: work = place
+        case .other(let id):
+            if let index = others.firstIndex(where: { $0.id == id }) { others[index].place = place }
+        case .new(let name): others.append(OtherPlace(id: UUID(), name: name, place: place))
+        }
+    }
+
+    /// Forgets Work or another place.
+    func remove(_ target: Target) {
+        switch target {
+        case .work: work = nil
+        case .other(let id): others.removeAll { $0.id == id }
+        case .home, .new: break
+        }
+    }
 
     /// Sets Home from setup's search, a hotel making it a visit, and suggests the station
     /// nearest it.
@@ -262,7 +303,7 @@ final class FirstRunAnswers {
 
     /// Picks `place`, every line there, its first way.
     func choose(_ place: NearbyBusPlace) {
-        bus = place.choice(lines: place.lines(at: .now).map(\.line), way: 0, both: false)
+        bus = place.choice(lines: place.lines(at: AppClock.now).map(\.line), way: 0, both: false)
         noStop = false
     }
 
@@ -317,6 +358,12 @@ final class FirstRunAnswers {
             VisitStay.save(until: until, picks: [])
         } else if let home {
             saved.set(.home, to: home)
+        }
+        if !visiting, let work {
+            saved.set(.work, to: work)
+        }
+        for other in others {
+            saved.set(.new(other.name), to: other.place)
         }
         // Once, so the widgets reload once
         var app = settings.settings
@@ -377,6 +424,8 @@ private final class HomeSearch: NSObject, MKLocalSearchCompleterDelegate {
 
     private(set) var results: [MKLocalSearchCompletion] = []
     @ObservationIgnored private let completer = MKLocalSearchCompleter()
+    /// What's typed, waiting for typing to pause before MapKit's asked.
+    @ObservationIgnored private var pending: Task<Void, Never>?
 
     var query = "" {
         didSet {
@@ -384,7 +433,17 @@ private final class HomeSearch: NSObject, MKLocalSearchCompleterDelegate {
             if isBlank { results = [] }
             finding = !isBlank
             failed = false
-            completer.queryFragment = Self.searchable(query)
+            // Asked once typing pauses, as New Trip's search is, not for every letter; cleared at once
+            pending?.cancel()
+            let fragment = Self.searchable(query)
+            guard !isBlank else {
+                completer.queryFragment = fragment
+                return
+            }
+            pending = Task { [weak self] in
+                do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
+                self?.completer.queryFragment = fragment
+            }
         }
     }
 
@@ -557,6 +616,7 @@ struct FirstRunView: View {
     @State private var step = 0
     @State private var location = NearbyLocation()
     @State private var contacts = ContactSearch()
+    @State private var events = TodayEvents()
     @State private var search = HomeSearch()
     @FocusState private var searching: Bool
     /// The suggestion being looked up after a tap.
@@ -570,14 +630,21 @@ struct FirstRunView: View {
     @State private var unreachable: Set<MKLocalSearchCompletion> = []
     /// A visit's last day picked past the three offered.
     @State private var laterDay = false
+    /// Which place the Home page's search is finding: Home, till Work or another's tapped.
+    @State private var target = FirstRunAnswers.Target.home
+    /// Add a Place's name being asked for.
+    @State private var naming = false
+    @State private var newName = ""
     @State private var choosingTrain = false
-    /// The stops map: fitted round Home and its stations, then turned NY North if Settings says.
+    /// The stops map: fitted round Home and its stations, then turned Grid North if Settings says.
     @State private var stopsPosition = MapCameraPosition.automatic
     /// Each way's next trains from the stop shown, once fetched.
     @State private var trains: [Direction: [Arrival]] = [:]
+    /// The Leeway mark drawing itself on, over the privacy page till it fades away.
+    @State private var splashing = true
 
     /// The numbered steps, after the privacy page.
-    private static let steps = 5
+    private static let steps = 6
     private static let card = RoundedRectangle(cornerRadius: 26, style: .continuous)
     private static let faint = Color.primary.opacity(0.05)
 
@@ -593,6 +660,16 @@ struct FirstRunView: View {
         }
         .animation(.smooth, value: step)
         .background(Color(uiColor: .systemBackground))
+        // Not reachable by VoiceOver under the splash
+        .accessibilityHidden(splashing)
+        .overlay {
+            if splashing {
+                LeewaySplashView {
+                    withAnimation(.easeInOut(duration: 0.5)) { splashing = false }
+                }
+                .transition(.opacity)
+            }
+        }
         .onAppear { location.start() }
         .sheet(isPresented: $choosingTrain) {
             HomeStopPicker(train: Binding {
@@ -657,6 +734,7 @@ struct FirstRunView: View {
         case 2: stopPage
         case 3: walkingPage
         case 4: bikingPage
+        case 5: widgetPage
         default: summary
         }
     }
@@ -664,36 +742,20 @@ struct FirstRunView: View {
     // MARK: - Pages
 
     private var privacyPage: some View {
-        Page(title: "Your privacy", subtitle: "No account and no sign-in.", primary: "Get Started", opening: true,
-             next: next) {
+        Page(title: "Your privacy", subtitle: "No account, no sign-in and no tracking.", primary: "Get Started",
+             opening: true, next: next) {
             VStack(spacing: 8) {
-                cardLabel("Kept on this iPhone", symbol: "iphone")
-                VStack(spacing: 0) {
-                    infoRow("house.fill", "Saved places", "Home, Work, and any other saved locations")
-                    Divider().padding(.leading, 52)
-                    infoRow("location.fill", "Your location",
-                            "Leeway looks up the address if it's used as the start or end point, but it doesn't "
-                                + "know it's your current location")
-                    Divider().padding(.leading, 52)
-                    infoRow("person.crop.circle.fill", "Your contacts",
-                            "Leeway looks up the address if it's used as the start or end point, but it doesn't "
-                                + "see your contacts")
-                }
-                .background(Self.faint, in: Self.card)
-                .padding(.bottom, 14)
+                cardLabel("Stays on your iPhone", symbol: "iphone")
+                privacyCard([("location.fill", nil), ("house.fill", nil), ("person.crop.circle.fill", nil)],
+                            "Your location and any information you choose to share with Leeway to help get around "
+                                + "New York.")
+                    .padding(.bottom, 14)
 
-                cardLabel("Sent off your iPhone", symbol: "icloud")
-                VStack(spacing: 0) {
-                    infoRow("server.rack", "Leeway's server",
-                            "A trip's start and end, to find routes, and your countdown's train, to keep it current")
-                    Divider().padding(.leading, 52)
-                    infoRow("map.fill", "Apple Maps", "Addresses you search, and some walking and bike directions")
-                    Divider().padding(.leading, 52)
-                    infoRow("tram.fill", "Train, bus and bike times",
-                            "From the MTA and Citi Bike, some through Leeway's server. Nothing about you")
-                }
-                .background(Self.faint, in: Self.card)
-                footnote("Crash reports are sent only if you turn on Share Diagnostics in Settings.")
+                cardLabel("Leaves only to plan a trip", symbol: "arrow.up.forward.circle")
+                // Not the MTA or Citi Bike: their times come with nothing about you
+                privacyCard([("server.rack", "Leeway"), ("map.fill", "Apple Maps")],
+                            "Just where a trip starts and ends, and the addresses you search. Never who you are.")
+                footnote("Crash reports are sent only if you turn on Share Diagnostics.")
             }
         }
     }
@@ -719,11 +781,35 @@ struct FirstRunView: View {
                     if answers.visiting {
                         visitDays
                     }
+                    otherPlaces
                 }
-                if !answers.visiting {
+                if !answers.visiting, target == .home {
                     footnote("Visiting? Search for your hotel by name.")
                 }
             }
+        }
+        .onChange(of: searching) { _, focused in
+            // Left without picking: the search is Home's again
+            if !focused, search.isBlank, looking == nil, !lookingUp { target = .home }
+        }
+        .alert("Add a Place", isPresented: $naming) {
+            TextField("Name", text: $newName)
+            Button("Cancel", role: .cancel) {}
+            Button("Next") {
+                let name = newName.trimmingCharacters(in: .whitespaces)
+                guard !name.isEmpty else { return }
+                target = .new(name)
+                // Once the alert's gone, which focus waits out; if it still doesn't take, the
+                // search is Home's again, so a later Home search isn't saved as this place
+                Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(0.4))
+                    searching = true
+                    try? await Task.sleep(for: .seconds(0.6))
+                    if !searching, search.isBlank, looking == nil, !lookingUp, target == .new(name) { target = .home }
+                }
+            }
+        } message: {
+            Text("Like Gym, or Mom's.")
         }
         .task {
             // Once the page has slid in
@@ -874,6 +960,63 @@ struct FirstRunView: View {
         }
     }
 
+    /// The Magic Widget as it'll first show, with your stop, each part called out with an arrow.
+    private var widgetPage: some View {
+        Page(title: "Meet the Magic Widget", subtitle: "The most important information, right on your Home Screen.",
+             next: next) {
+            VStack(spacing: 0) {
+                HStack(alignment: .top) {
+                    callout("Your Stop", "Tap for a live countdown to the next train or bus", color: .primary)
+                    Spacer(minLength: 12)
+                    callout("Nearby", "The nearest trains\nand buses", color: HomeTint.nearby, trailing: true)
+                }
+                MagicWidgetPicture(answers: answers, style: settings.settings.favoriteCard)
+                    .padding(.vertical, 40)
+                    .overlay {
+                        // From the callouts above and below to what each is about
+                        GeometryReader { proxy in
+                            let width = proxy.size.width, height = proxy.size.height
+                            let circle = width - MagicWidgetPicture.circleInset
+                            ForEach(Array([
+                                // Your Stop: as Nearby's, to just above the station name's first letter
+                                CalloutArrow(from: CGPoint(x: 23, y: 4), to: CGPoint(x: 35, y: 64), bend: 10),
+                                CalloutArrow(from: CGPoint(x: circle - 12, y: 4), to: CGPoint(x: circle, y: 54), bend: 10),
+                                CalloutArrow(from: CGPoint(x: circle - 12, y: height - 4), to: CGPoint(x: circle, y: height - 54),
+                                             bend: -12),
+                            ].enumerated()), id: \.offset) { _, arrow in
+                                arrow.stroke(.secondary, style: StrokeStyle(lineWidth: 1.6, lineCap: .round, lineJoin: .round))
+                            }
+                        }
+                        .accessibilityHidden(true)
+                    }
+                HStack(alignment: .top) {
+                    callout("On a Trip", "When you use Leeway to navigate, it automatically updates to show your trip.",
+                            color: .orange)
+                    Spacer(minLength: 6)
+                    // Narrow, under the circles, leaving On a Trip the room to wrap less
+                    callout("Routes", "Quickly start your favorite route", color: HomeTint.trip, trailing: true)
+                        .frame(width: 108)
+                }
+                .padding(.bottom, 20)
+
+                HStack(spacing: 12) {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.title3)
+                        .foregroundStyle(.tint)
+                        .frame(width: 40, height: 40)
+                        .background(.tint.opacity(0.12), in: Circle())
+                        .accessibilityHidden(true)
+                    Text("You can also share a route from Google Maps or Apple Maps.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(12)
+                .background(Self.faint, in: Self.card)
+            }
+        }
+    }
+
     private var summary: some View {
         Page(title: "You're set", subtitle: "Change any of these in Settings.", primary: "Start Riding", next: finish) {
             VStack(spacing: 8) {
@@ -881,7 +1024,7 @@ struct FirstRunView: View {
                     ForEach(Array(summaryRows.enumerated()), id: \.offset) { index, row in
                         if index > 0 { Divider().padding(.leading, 56) }
                         HStack(spacing: 12) {
-                            Image(systemName: row.symbol).foregroundStyle(.tint).frame(width: 30)
+                            Image(systemName: row.symbol).foregroundStyle(.tint).frame(width: 30).accessibilityHidden(true)
                             Text(row.title)
                             Spacer()
                             if let routes = row.routes {
@@ -918,9 +1061,14 @@ struct FirstRunView: View {
                            denied: contacts.status == .denied || contacts.status == .restricted) {
                         Task { await contacts.ask() }
                     }
+                    Divider().padding(.leading, 56)
+                    askRow("calendar", "Calendar", "Where you're due today, in New Trip",
+                           allowed: events.isAllowed, denied: events.isDenied) {
+                        Task { await events.ask() }
+                    }
                 }
                 .background(Self.faint, in: Self.card)
-                footnote("You can allow either later in Settings.")
+                footnote("You can allow any of these later in Settings.")
             }
         }
     }
@@ -933,6 +1081,12 @@ struct FirstRunView: View {
             rows.append(("calendar", "Until", answers.until.formatted(.dateTime.weekday().month().day()), nil))
         } else {
             rows.append(("house.fill", "Home", answers.home?.name ?? "Not set", nil))
+            if let work = answers.work {
+                rows.append(("briefcase.fill", "Work", work.name, nil))
+            }
+        }
+        for other in answers.others {
+            rows.append(("mappin", other.name, other.place.name, nil))
         }
         if answers.noStop {
             rows.append(("tram.fill", "Your stop", "None", nil))
@@ -1005,11 +1159,21 @@ struct FirstRunView: View {
                 notFound.insert(result)
                 return
             }
-            answers.setHome(found.place, isHotel: found.isHotel)
-            laterDay = false
-            search.query = ""
-            searching = false
+            use(found.place, isHotel: found.isHotel)
         }
+    }
+
+    /// Makes `place` what the search was for, Home or another, and the search Home's again.
+    private func use(_ place: TripPlace, isHotel: Bool) {
+        if target == .home {
+            answers.setHome(place, isHotel: isHotel)
+            laterDay = false
+        } else {
+            answers.set(target, to: place)
+        }
+        target = .home
+        search.query = ""
+        searching = false
     }
 
     /// AutoFill's (or a pasted) address made Home at once, if it's found in New York near the
@@ -1020,10 +1184,7 @@ struct FirstRunView: View {
             defer { lookingUp = false }
             guard let place = await HomeSearch.place(forAddress: typed),
                   search.query == typed, looking == nil else { return }
-            answers.setHome(place, isHotel: false)
-            laterDay = false
-            search.query = ""
-            searching = false
+            use(place, isHotel: false)
         }
     }
 
@@ -1033,12 +1194,22 @@ struct FirstRunView: View {
         trains = [:]
         guard let train = answers.train else { return }
         let ways = answers.ways.map { Selection(stationID: train.stationID, routes: train.routes, direction: $0) }
+        // Each feed downloaded once for every way (`TrainService.sharingFeeds`)
+        let stops = ways.reduce(into: Set<String>()) { stops, way in
+            stops.formUnion(TrainService.feedStops(for: way, change: nil, destination: nil))
+        }
+        await TrainService.sharingFeeds(atStops: stops) {
+            await fetchTrains(ways)
+        }
+    }
+
+    private func fetchTrains(_ ways: [Selection]) async {
         await withTaskGroup(of: (Direction, [Arrival]?).self) { group in
             for way in ways {
                 group.addTask {
                     let board = try? await TrainService.board(for: way, includingAlerts: false, includingOutages: false,
                                                               fillingFrom: { TimetableStore.load() })
-                    return (way.direction, board.map { way.catchable($0.trains, now: .now) })
+                    return (way.direction, board.map { way.catchable($0.trains, now: AppClock.now) })
                 }
             }
             for await (direction, found) in group {
@@ -1053,7 +1224,7 @@ struct FirstRunView: View {
         guard let found = trains[direction] else { return nil }
         guard !found.isEmpty else { return "No trains soon" }
         let times = found.prefix(2).map { arrival in
-            let minutes = Int(arrival.time.timeIntervalSinceNow / 60)
+            let minutes = Int(arrival.time.timeIntervalSince(AppClock.now) / 60)
             return minutes <= 0 ? "Now" : "\(minutes) min"
         }
         return "Next: " + times.joined(separator: ", ")
@@ -1066,7 +1237,7 @@ struct FirstRunView: View {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(.secondary)
                 .accessibilityHidden(true)
-            TextField("Search for your address", text: $search.query)
+            TextField(searchPrompt, text: $search.query)
                 .focused($searching)
                 .textContentType(.fullStreetAddress)
                 .autocorrectionDisabled()
@@ -1146,9 +1317,115 @@ struct FirstRunView: View {
         .background(Self.faint, in: Self.card)
     }
 
+    /// "Search for your address", or Work's or another place's while it's the one being found.
+    private var searchPrompt: String {
+        switch target {
+        case .home: "Search for your address"
+        case .work: "Search for Work"
+        case .other(let id): "Search for \(answers.others.first { $0.id == id }?.name ?? "the place")"
+        case .new(let name): "Search for \(name)"
+        }
+    }
+
+    /// Work and the other places added, each searched again by a tap or forgotten by its ×, then
+    /// Add Work and Add a Place.
+    private var otherPlaces: some View {
+        VStack(spacing: 8) {
+            cardLabel("Other places")
+            VStack(spacing: 0) {
+                if !answers.visiting, let work = answers.work {
+                    savedRow("briefcase.fill", "Work", work.name, target: .work)
+                    Divider().padding(.leading, 60)
+                }
+                ForEach(answers.others) { other in
+                    savedRow("mappin", other.name, other.place.name, target: .other(other.id))
+                    Divider().padding(.leading, 60)
+                }
+                if !answers.visiting, answers.work == nil {
+                    addRow("briefcase.fill", "Add Work") {
+                        target = .work
+                        searching = true
+                    }
+                    Divider().padding(.leading, 60)
+                }
+                addRow("plus", "Add a Place") {
+                    newName = ""
+                    naming = true
+                }
+            }
+            .background(Self.faint, in: Self.card)
+            footnote("Saved places show as chips in New Trip.")
+        }
+        .padding(.top, 14)
+    }
+
+    /// A place saved beside Home: a tap searches for it again, the × forgets it.
+    private func savedRow(_ symbol: String, _ title: String, _ detail: String, target: FirstRunAnswers.Target) -> some View {
+        HStack(spacing: 12) {
+            Button {
+                self.target = target
+                searching = true
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: symbol)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 34, height: 34)
+                        .background(.tint, in: Circle())
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(title).font(.headline)
+                        Text(detail).font(.subheadline).foregroundStyle(.secondary)
+                    }
+                    .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint("Search for another address")
+            Button {
+                answers.remove(target)
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.title3)
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Remove \(title)")
+        }
+        .padding(.leading, 14)
+        .padding(.trailing, 4)
+        .frame(minHeight: 64)
+    }
+
+    private func addRow(_ symbol: String, _ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: symbol)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.tint)
+                    .frame(width: 34, height: 34)
+                    .background(.tint.opacity(0.15), in: Circle())
+                    .accessibilityHidden(true)
+                Text(title)
+                    .font(.headline)
+                    .foregroundStyle(.tint)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 14)
+            .frame(minHeight: 56)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
     /// Home once it's picked; a tap searches again.
     private func placeCard(_ home: TripPlace) -> some View {
         Button {
+            target = .home
             searching = true
         } label: {
             HStack(spacing: 12) {
@@ -1157,6 +1434,7 @@ struct FirstRunView: View {
                     .foregroundStyle(.white)
                     .frame(width: 34, height: 34)
                     .background(.tint, in: Circle())
+                    .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(home.name).font(.headline)
                     if let detail = home.detail, !detail.isEmpty {
@@ -1168,6 +1446,7 @@ struct FirstRunView: View {
                 Image(systemName: "pencil")
                     .font(.body.weight(.semibold))
                     .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
             }
             .padding(.horizontal, 14)
             .frame(minHeight: 64)
@@ -1259,7 +1538,7 @@ struct FirstRunView: View {
                                 answers.choose(place)
                             } label: {
                                 HStack(spacing: 2) {
-                                    ForEach(place.lines(at: .now).prefix(3).map(\.line), id: \.self) {
+                                    ForEach(place.lines(at: AppClock.now).prefix(3).map(\.line), id: \.self) {
                                         BusBadge(line: $0, size: chosen ? 24 : 18)
                                     }
                                 }
@@ -1270,6 +1549,7 @@ struct FirstRunView: View {
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel(place.name)
+                            .accessibilityAddTraits(chosen ? .isSelected : [])
                         }
                     }
                 }
@@ -1287,6 +1567,7 @@ struct FirstRunView: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(near.station.name)
+                    .accessibilityAddTraits(chosen ? .isSelected : [])
                 }
             }
         }
@@ -1357,7 +1638,7 @@ struct FirstRunView: View {
     private func busCard(_ bus: BusChoice) -> some View {
         let picked = !answers.noStop
         let place = answers.busPlace
-        let allLines = place?.lines(at: .now).map(\.line) ?? bus.allLines
+        let allLines = place?.lines(at: AppClock.now).map(\.line) ?? bus.allLines
         let lines = bus.allLines
         return VStack(spacing: 0) {
             HStack(spacing: 12) {
@@ -1382,15 +1663,16 @@ struct FirstRunView: View {
                     .padding(.horizontal, 12)
                     .padding(.top, 12)
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
-                    ForEach(place.lines(at: .now), id: \.line) { pick in
+                    ForEach(place.lines(at: AppClock.now), id: \.line) { pick in
                         busLineTile(pick, on: lines.contains(pick.line)) {
                             var chosen = lines.contains(pick.line) ? lines.filter { $0 != pick.line } : lines + [pick.line]
                             // Never none; in the stop's order
                             guard !chosen.isEmpty else { return }
                             chosen = allLines.filter(chosen.contains)
                             // The same way, found among the new lines' ways, whose order can differ
-                            let index = place.ways(for: chosen).firstIndex { $0.stop.id == bus.stop.id } ?? 0
-                            answers.bus = place.choice(lines: chosen, way: index, both: bus.bothWays)
+                            let ways = place.ways(for: chosen)
+                            let index = ways.firstIndex { $0.stop.id == bus.stop.id } ?? 0
+                            answers.bus = place.choice(lines: chosen, way: index, of: ways, both: bus.bothWays)
                         }
                     }
                 }
@@ -1408,9 +1690,9 @@ struct FirstRunView: View {
                     let way = ways[index]
                     if index > 0 { Divider().padding(.leading, 52) }
                     choiceRow(index == 0 ? "arrow.up" : "arrow.down", "Toward \(place.going(way, lines: lines))",
-                              place.detail(way, index: index, lines: lines, now: .now),
+                              place.detail(way, index: index, lines: lines, now: AppClock.now),
                               on: picked && !bus.bothWays && bus.stop.id == way.stop.id) {
-                        answers.bus = place.choice(lines: lines, way: index, both: false)
+                        answers.bus = place.choice(lines: lines, way: index, of: ways, both: false)
                         answers.noStop = false
                     }
                 }
@@ -1419,7 +1701,7 @@ struct FirstRunView: View {
                     choiceRow("arrow.up.arrow.down", "Both ways", "The medium widget shows the next bus each way",
                               on: picked && bus.bothWays) {
                         let index = ways.firstIndex { $0.stop.id == bus.stop.id } ?? 0
-                        answers.bus = place.choice(lines: lines, way: index, both: true)
+                        answers.bus = place.choice(lines: lines, way: index, of: ways, both: true)
                         answers.noStop = false
                     }
                 }
@@ -1447,6 +1729,7 @@ struct FirstRunView: View {
                 Spacer(minLength: 0)
                 Image(systemName: on ? "checkmark.circle.fill" : "circle")
                     .foregroundStyle(on ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
+                    .accessibilityHidden(true)
             }
             .padding(10)
             .frame(maxWidth: .infinity)
@@ -1458,6 +1741,7 @@ struct FirstRunView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(BusBadge.spokenName(pick.line))
+        .accessibilityValue(pick.ways.map(\.name).joined(separator: " – "))
         .accessibilityAddTraits(on ? .isSelected : [])
     }
 
@@ -1509,6 +1793,7 @@ struct FirstRunView: View {
                 Image(systemName: on ? "checkmark.circle.fill" : "circle")
                     .font(.title3)
                     .foregroundStyle(on ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
+                    .accessibilityHidden(true)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
@@ -1520,21 +1805,6 @@ struct FirstRunView: View {
     }
 
     /// A row of the privacy page: its icon, what it is, and what happens to it.
-    private func infoRow(_ symbol: String, _ title: String, _ detail: String) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: symbol).foregroundStyle(.tint).frame(width: 24).accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                Text(detail).font(.footnote).foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-        .frame(minHeight: 52)
-        .accessibilityElement(children: .combine)
-    }
-
     /// A bike as Settings' Biking draws it: Citi Bike blue while on for Citi Bike's, the tint for
     /// your own; a bolt on e-bikes; its name under it.
     private func bikeTile(_ name: String, symbol: String = "bicycle", electric: Bool, own: Bool, on: Bool,
@@ -1558,7 +1828,8 @@ struct FirstRunView: View {
         .buttonStyle(.plain)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(name)
-        .accessibilityAddTraits(on ? .isSelected : [])
+        .accessibilityValue(on ? "On" : "Off")
+        .accessibilityAddTraits(on ? [.isToggle, .isSelected] : .isToggle)
     }
 
     /// Whether Citi Bike's `kind` is on, as Settings' tiles have it.
@@ -1600,7 +1871,7 @@ struct FirstRunView: View {
     private func askRow(_ symbol: String, _ title: String, _ detail: String, allowed: Bool, denied: Bool,
                         ask: @escaping () -> Void) -> some View {
         HStack(spacing: 12) {
-            Image(systemName: symbol).foregroundStyle(.tint).frame(width: 30)
+            Image(systemName: symbol).foregroundStyle(.tint).frame(width: 30).accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                 Text(detail).font(.footnote).foregroundStyle(.secondary)
@@ -1614,6 +1885,7 @@ struct FirstRunView: View {
                 Text("Off in Settings").font(.subheadline).foregroundStyle(.secondary)
             } else {
                 Button("Allow", action: ask)
+                    .accessibilityLabel("Allow \(title)")
                     .font(.subheadline.weight(.semibold))
                     .buttonStyle(.plain)
                     .padding(.horizontal, 14)
@@ -1628,7 +1900,7 @@ struct FirstRunView: View {
     private func cardLabel(_ title: String, symbol: String? = nil) -> some View {
         HStack(spacing: 5) {
             if let symbol {
-                Image(systemName: symbol)
+                Image(systemName: symbol).accessibilityHidden(true)
             }
             Text(title)
         }
@@ -1638,6 +1910,54 @@ struct FirstRunView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isHeader)
+    }
+
+    /// One of the privacy page's cards: its icons, named or not, over a line about them.
+    private func privacyCard(_ tiles: [(symbol: String, name: String?)], _ text: String) -> some View {
+        VStack(spacing: 12) {
+            // Named icons share out the card; unnamed ones sit together in the middle
+            let named = tiles.contains { $0.name != nil }
+            HStack(spacing: named ? 0 : 16) {
+                ForEach(tiles, id: \.symbol) { tile in
+                    VStack(spacing: 6) {
+                        Image(systemName: tile.symbol)
+                            .font(.title)
+                            .foregroundStyle(.tint)
+                            .frame(width: 64, height: 64)
+                            .background(.tint.opacity(0.12), in: Circle())
+                        if let name = tile.name {
+                            Text(name).font(.footnote.weight(.medium))
+                        }
+                    }
+                    .frame(maxWidth: named ? .infinity : nil)
+                }
+            }
+            .accessibilityHidden(!named)
+            Text(text)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 18)
+        }
+        .padding(.vertical, 16)
+        .frame(maxWidth: .infinity)
+        .background(Self.faint, in: Self.card)
+        .accessibilityElement(children: .combine)
+    }
+
+    /// A part of the Magic Widget, named in its colour, over what it does.
+    private func callout(_ title: String, _ detail: String, color: Color, trailing: Bool = false) -> some View {
+        VStack(alignment: trailing ? .trailing : .leading, spacing: 2) {
+            Text(title).font(.headline).foregroundStyle(color)
+            Text(detail)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(trailing ? .trailing : .leading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: trailing ? .trailing : .leading)
+        .accessibilityElement(children: .combine)
     }
 
     private func footnote(_ text: String) -> some View {
@@ -1698,8 +2018,79 @@ private extension BikeCarry {
     }
 }
 
-/// One setup page: a big title and line, its content, scrolling, and its button at the foot, if
-/// it has one.
+/// The Magic Widget's buttons as the Home Screen draws them (`QuickTripView`): your stop's card,
+/// then Nearby's and Routes' circles. A picture, without taps.
+private struct MagicWidgetPicture: View {
+    let answers: FirstRunAnswers
+    let style: FavoriteCardStyle
+
+    /// From the widget's right edge to the centre of its circles.
+    static let circleInset: CGFloat = 50
+    private static let circleSize: CGFloat = 52
+
+    var body: some View {
+        HStack(spacing: 0) {
+            card
+                .padding([.leading, .top, .bottom], 16)
+            VStack(spacing: 22) {
+                circle("location.fill", HomeTint.nearby)
+                circle(QuickTripSymbol.name, HomeTint.trip)
+            }
+            .frame(width: 16 + Self.circleSize + 8 + 16)
+        }
+        .frame(height: 170)
+        .frame(maxWidth: .infinity)
+        .background(Color.boardBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .shadow(color: .black.opacity(0.18), radius: 14, y: 6)
+        .accessibilityHidden(true)
+    }
+
+    /// The stop picked a page back, or one to show the card by without one.
+    @ViewBuilder private var card: some View {
+        if answers.busPicked, let bus = answers.bus {
+            RouteCard(route: .bus(SavedBusBoard(choice: bus, buses: [])))
+        } else if !answers.noStop, let train = answers.train, let station = train.station {
+            StopCard(station: station.cardName, heading: train.cardHeading, routes: train.routes, style: style,
+                     fitsHeading: false)
+        } else {
+            StopCard(station: "Bergen St", heading: "to Manhattan", routes: ["F", "G"], style: style, fitsHeading: false)
+        }
+    }
+
+    private func circle(_ symbol: String, _ tint: Color) -> some View {
+        Image(systemName: symbol)
+            .font(.system(size: Self.circleSize * 0.48, weight: .bold))
+            .foregroundStyle(.white)
+            .frame(width: Self.circleSize, height: Self.circleSize)
+            .background(Circle().fill(tint))
+    }
+}
+
+/// A curved arrow from a callout to the part of the widget it's about, bowed by `bend`.
+private struct CalloutArrow: Shape {
+    let from: CGPoint
+    let to: CGPoint
+    var bend: CGFloat = 0
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let dx = to.x - from.x, dy = to.y - from.y
+        let length = max(hypot(dx, dy), 1)
+        let control = CGPoint(x: (from.x + to.x) / 2 - dy / length * bend, y: (from.y + to.y) / 2 + dx / length * bend)
+        path.move(to: from)
+        path.addQuadCurve(to: to, control: control)
+        // The head along the curve's last stretch
+        let angle = atan2(to.y - control.y, to.x - control.x)
+        for side in [-1.0, 1.0] {
+            let wing = angle + .pi + side * 0.45
+            path.move(to: to)
+            path.addLine(to: CGPoint(x: to.x + cos(wing) * 9, y: to.y + sin(wing) * 9))
+        }
+        return path
+    }
+}
+
 private struct Page<Content: View>: View {
     let title: String
     let subtitle: String

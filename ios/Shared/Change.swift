@@ -31,6 +31,20 @@ struct Change: Codable, Hashable, Sendable {
     /// Buses to change to at the change's own station instead, each with its walk; timed by when
     /// they leave the stop, as Bus Time has no times further on.
     var buses: [BusLeg]
+    /// A second change, off the lines changed to here, on to the destination (`then`); empty for
+    /// none. A list only so a change can hold another.
+    private var thenChanges: [Change] = []
+    /// Planned From and To (`SavedWidget.trip`): the widget follows these ways, any ride a train
+    /// or a bus, rather than this change's stations; which are kept for alerts and the countdown.
+    var planned: PlannedTrip? = nil
+
+    /// The change after this one: off the lines changed to here, at its station (or any of its
+    /// `alternatives`), to its lines, which go on to the destination. From an R, the Q at DeKalb
+    /// Av, then the S at Times Sq for Grand Central. Nil for one change.
+    var then: Change? {
+        get { thenChanges.first }
+        set { thenChanges = newValue.map { [$0] } ?? [] }
+    }
 
     /// A station of `alternatives`, and the lines to change to there going `direction` (nil for
     /// your train's way), as in `Change`'s own.
@@ -38,6 +52,41 @@ struct Change: Codable, Hashable, Sendable {
         var stationID: String
         var routes: [String]
         var direction: Direction?
+        /// The change after this one, as `Change.then`; empty for none.
+        private var thenChanges: [Change] = []
+
+        var then: Change? {
+            get { thenChanges.first }
+            set { thenChanges = newValue.map { [$0] } ?? [] }
+        }
+
+        init(stationID: String, routes: [String], direction: Direction? = nil, then: Change? = nil) {
+            self.stationID = stationID
+            self.routes = routes
+            self.direction = direction
+            self.then = then
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case stationID, routes, direction, then
+        }
+
+        /// `then` is left out when there's none, so a stop saves as before.
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.init(stationID: try container.decode(String.self, forKey: .stationID),
+                      routes: try container.decode([String].self, forKey: .routes),
+                      direction: try container.decodeIfPresent(Direction.self, forKey: .direction),
+                      then: try? container.decodeIfPresent(Change.self, forKey: .then))
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(stationID, forKey: .stationID)
+            try container.encode(routes, forKey: .routes)
+            try container.encodeIfPresent(direction, forKey: .direction)
+            try container.encodeIfPresent(then, forKey: .then)
+        }
     }
 
     static let defaultQuickMinutes = 2
@@ -45,7 +94,8 @@ struct Change: Codable, Hashable, Sendable {
 
     init(stationID: String, routes: [String], direction: Direction? = nil,
          quickMinutes: Int = Change.defaultQuickMinutes, walkMinutes: Int = Change.defaultWalkMinutes,
-         smartTransfer: Bool = false, destinationID: String? = nil, alternatives: [Stop] = [], buses: [BusLeg] = []) {
+         smartTransfer: Bool = false, destinationID: String? = nil, alternatives: [Stop] = [], buses: [BusLeg] = [],
+         then: Change? = nil) {
         self.stationID = stationID
         self.routes = routes
         self.direction = direction
@@ -55,6 +105,7 @@ struct Change: Codable, Hashable, Sendable {
         self.destinationID = destinationID
         self.alternatives = alternatives
         self.buses = buses
+        self.then = then
     }
 
     /// This change at each of `stops`, the first as its own station and the rest as
@@ -62,12 +113,32 @@ struct Change: Codable, Hashable, Sendable {
     init?(stops: [Change]) {
         guard var first = stops.first else { return nil }
         first.smartTransfer = false
-        first.alternatives = stops.dropFirst().map { Stop(stationID: $0.stationID, routes: $0.routes, direction: $0.direction) }
+        first.alternatives = stops.dropFirst().map {
+            Stop(stationID: $0.stationID, routes: $0.routes, direction: $0.direction, then: $0.then)
+        }
         self = first
+    }
+
+    /// As a countdown keeps it (`TrainActivityAttributes.change`, the push server's sign-up):
+    /// without `planned`'s ways, here or further on, which only widgets follow and which can take
+    /// a sign-up over the server's 4 KB, or the activity over iOS's limit. An empty plan stays as
+    /// a mark, so it's still kept as it is (`validated(for:)`). The stations and lines, and
+    /// `then`'s, stay for their alerts.
+    var forCountdown: Change {
+        var change = self
+        change.planned = planned.map { _ in PlannedTrip(ways: []) }
+        change.then = then?.forCountdown
+        change.alternatives = alternatives.map { stop in
+            var stop = stop
+            stop.then = stop.then?.forCountdown
+            return stop
+        }
+        return change
     }
 
     private enum CodingKeys: String, CodingKey {
         case stationID, routes, direction, quickMinutes, walkMinutes, smartTransfer, destinationID, alternatives, buses
+        case then, planned
     }
 
     /// Older saves missing `direction`, `quickMinutes`, `walkMinutes`, `smartTransfer`,
@@ -83,7 +154,9 @@ struct Change: Codable, Hashable, Sendable {
                   smartTransfer: try container.decodeIfPresent(Bool.self, forKey: .smartTransfer) ?? false,
                   destinationID: try container.decodeIfPresent(String.self, forKey: .destinationID),
                   alternatives: try container.decodeIfPresent([Stop].self, forKey: .alternatives) ?? [],
-                  buses: (try? container.decodeIfPresent([BusLeg].self, forKey: .buses)) ?? [])
+                  buses: (try? container.decodeIfPresent([BusLeg].self, forKey: .buses)) ?? [],
+                  then: try? container.decodeIfPresent(Change.self, forKey: .then))
+        planned = try? container.decodeIfPresent(PlannedTrip.self, forKey: .planned)
     }
 
     /// As the synthesized encoding, leaving out `alternatives` when there are none so a change at
@@ -103,6 +176,8 @@ struct Change: Codable, Hashable, Sendable {
         if !buses.isEmpty {
             try container.encode(buses, forKey: .buses)
         }
+        try container.encodeIfPresent(then, forKey: .then)
+        try container.encodeIfPresent(planned, forKey: .planned)
     }
 
     /// This change's station then each of `alternatives`, as changes of their own (with the same
@@ -116,8 +191,30 @@ struct Change: Codable, Hashable, Sendable {
             change.stationID = stop.stationID
             change.routes = stop.routes
             change.direction = stop.direction
+            change.then = stop.then
             return change
         }
+    }
+
+    /// Every line changed to at any of `stops` and their `then`s, each once: what the widget
+    /// needs the feeds of.
+    var everyRoute: [String] {
+        var routes = allRoutes
+        for route in stops.compactMap(\.then).flatMap(\.everyRoute) where !routes.contains(route) {
+            routes.append(route)
+        }
+        return routes
+    }
+
+    /// Whether any of `stops` changes again after (`then`).
+    var changesTwice: Bool { stops.contains { $0.then != nil } }
+
+    /// The train you're on after changing to `route` here, for timing `then`: at the station of
+    /// the complex `route` leaves from, going its way.
+    func onward(_ route: String, from selection: Selection) -> Selection? {
+        guard let station else { return nil }
+        let boarding = StationDirectory.changeStations(of: station).first { $0.routes.contains(route) } ?? station
+        return Selection(stationID: boarding.id, routes: [route], direction: departureDirection(of: route, for: selection))
     }
 
     /// Every line changed to at any of `stops`, each once.
@@ -371,7 +468,13 @@ struct Change: Codable, Hashable, Sendable {
     /// `departureSelections(for:)` at each of `smartChanges(for:)`'s stations: the trains whose
     /// alerts a transfer's widget and countdown mention along with your own train's.
     func alertSelections(for selection: Selection) -> [Selection] {
-        smartChanges(for: selection).flatMap { $0.change.departureSelections(for: selection.only($0.lines)) }
+        smartChanges(for: selection).flatMap { part -> [Selection] in
+            let from = selection.only(part.lines)
+            let here = part.change.departureSelections(for: from)
+            guard let then = part.change.then else { return here }
+            return here + part.change.routes.compactMap { part.change.onward($0, from: from) }
+                .flatMap { then.alertSelections(for: $0) }
+        }
     }
 
     /// Feed stop ids of the changed-to lines here, going their way, e.g. "R31N".
@@ -489,6 +592,8 @@ struct Change: Codable, Hashable, Sendable {
     /// none are. An older save's `smartTransfer` has its stations written out as `alternatives`.
     func validated(for selection: Selection,
                    order: ((String) -> [String]?)? = nil) -> Change? {
+        // Planned from the timetable, and followed as planned: kept as it is
+        if planned != nil { return self }
         let stops = smartTransfer && alternatives.isEmpty
             ? legacySmartChanges(for: selection).map(\.change).map { change in
                 var change = change
@@ -502,6 +607,7 @@ struct Change: Codable, Hashable, Sendable {
             let walkedTo = stop.streetWalk?.station.complex
             if let index = kept.firstIndex(where: {
                 $0.stationID == stop.stationID && $0.direction == stop.direction && $0.streetWalk?.station.complex == walkedTo
+                    && $0.then == stop.then
             }) {
                 kept[index].routes += stop.routes.filter { !kept[index].routes.contains($0) }
             } else {
@@ -529,6 +635,10 @@ struct Change: Codable, Hashable, Sendable {
         if direction == nil, change.routes.isEmpty {
             change.routes = leaving(selection.direction.opposite)
             change.direction = selection.direction.opposite
+        }
+        // The change after, checked from the first line changed to; dropped if it's gone
+        if let then = change.then, let route = change.routes.first, let onward = change.onward(route, from: selection) {
+            change.then = then.validated(for: onward, order: order)
         }
         return change.routes.isEmpty ? nil : change
     }
@@ -722,8 +832,11 @@ struct Change: Codable, Hashable, Sendable {
     var key: String {
         "\(stationID) \(routes.joined(separator: ",")) \(walkMinutes)" + (direction.map { " \($0.rawValue)" } ?? "")
             + (smartTransfer ? " smart" : "") + (destinationID.map { " to \($0)" } ?? "")
-            + alternatives.map { " or \($0.stationID) \($0.routes.joined(separator: ","))" + ($0.direction.map { " \($0.rawValue)" } ?? "") }
+            + alternatives.map { " or \($0.stationID) \($0.routes.joined(separator: ","))" + ($0.direction.map { " \($0.rawValue)" } ?? "")
+                + ($0.then.map { " then [\($0.key)]" } ?? "") }
                 .joined()
+            + (then.map { " then [\($0.key)]" } ?? "")
+            + (planned.map { " planned [\($0.key)]" } ?? "")
     }
 
     /// Pairs each of `trains` (at your station, soonest first) that reaches here with the first of
@@ -773,9 +886,12 @@ struct Connection: Codable, Hashable, Sendable {
     var stationID: String? = nil
     /// Every way on from `first`, soonest there first (`TrainService.ways`); nil in older saves.
     var ways: [Way]? = nil
+    /// Where the change is, named, for a planned trip's (`PlannedTrips`), whose changes may be at
+    /// a bus stop; nil to go by `stationID`.
+    var place: String? = nil
 
     private enum CodingKeys: String, CodingKey {
-        case first, arrival, next, walk, stationID, ways
+        case first, arrival, next, walk, stationID, ways, place
     }
 
     /// For each of `trains` with a connection in any of `options` (one list per change station,
@@ -806,6 +922,13 @@ struct Connection: Codable, Hashable, Sendable {
     /// The wait, rounded to whole minutes.
     var waitMinutes: Int? { wait.map { Int(($0 / 60).rounded()) } }
 
+    /// The wait less the walk to `next`: how late your train can run and you still make it. 0
+    /// when `next` is held at the platform already.
+    var leeway: TimeInterval? { wait.map { $0 - walk } }
+
+    /// The leeway in whole minutes, rounded down so it never promises more than there is.
+    var leewayMinutes: Int? { leeway.map { Int($0 / 60) } }
+
     /// "1 min", "<1 min", "stay on", or "–" with no train to change to.
     var waitLabel: String {
         if staysOn { return "stay on" }
@@ -824,7 +947,8 @@ extension Connection {
                   next: try container.decodeIfPresent(Arrival.self, forKey: .next),
                   walk: try container.decodeIfPresent(TimeInterval.self, forKey: .walk) ?? 0,
                   stationID: try container.decodeIfPresent(String.self, forKey: .stationID),
-                  ways: try container.decodeIfPresent([Way].self, forKey: .ways))
+                  ways: try container.decodeIfPresent([Way].self, forKey: .ways),
+                  place: try container.decodeIfPresent(String.self, forKey: .place))
     }
 }
 
@@ -839,6 +963,9 @@ struct Way: Codable, Hashable, Sendable {
     /// The train ridden at the destination (without one, the train changed to at the change);
     /// nil if none is predicted yet.
     var arrival: Arrival?
+    /// A second change (`Change.then`): `first` the train changed to at `connection`, `arrival`
+    /// it at the second change, `next` the train changed to there. Nil for one change.
+    var then: Connection? = nil
 
     /// Whether this way is staying on your train, as it is or as it continues as another line.
     var staysOn: Bool { connection?.staysOn ?? true }

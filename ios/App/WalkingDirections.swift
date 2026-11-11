@@ -35,6 +35,7 @@ enum WalkingDirections {
             let down = boarding.down
             there.steps[last].turn = down.turn
             there.steps[last].instruction = down.instruction
+            there.steps[last].spoken = down.spoken
             there.steps[last].detail = down.detail
         } else {
             there.steps.append(boarding.down)
@@ -66,9 +67,14 @@ enum WalkingDirections {
     /// way a walk was going, routed again from off it, to rejoin (`WalkRouter.Options.along`).
     static func walk(from start: CLLocationCoordinate2D, to end: CLLocationCoordinate2D,
                      along: [Walk.Point] = []) async throws -> Walk {
+        // Not a place (NaN, kCLLocationCoordinate2DInvalid): no walk, rather than a crash
+        // making its cache key
+        guard CLLocationCoordinate2DIsValid(start), CLLocationCoordinate2DIsValid(end),
+              start.latitude.isFinite, start.longitude.isFinite, end.latitude.isFinite, end.longitude.isFinite
+        else { throw MKError(.directionsNotFound) }
         var options = WalkRouting.options
         options.along = along
-        let key = Cache.Key(start, end, routing: WalkRouting.cacheValue(options))
+        let key = CacheKey(start, end, along: along, routing: WalkRouting.cacheValue(options))
         if let walk = await Cache.shared.walk(for: key) {
             return walk
         }
@@ -167,6 +173,33 @@ enum WalkingDirections {
         await Cache.shared.cleanup()
     }
 
+    /// Prototyping's Clear Caches: every walk cached, and how many there were.
+    @discardableResult
+    static func clearCache() async -> Int {
+        await Cache.shared.removeAll()
+    }
+
+    /// How many walks are cached, for Prototyping's Clear Caches.
+    static func cachedCount() async -> Int {
+        await Cache.shared.count
+    }
+
+    /// A walk's place in `Cache`: where it goes from to the nearest metre or so, where to to the
+    /// nearest 10 m or so, the way it's to rejoin (a re-route's `along`), and how it's routed.
+    struct CacheKey: Hashable {
+        let values: [Int]
+
+        /// `routing`: how the walk's routed (`WalkRouting.cacheValue`).
+        init(_ start: CLLocationCoordinate2D, _ end: CLLocationCoordinate2D, along: [Walk.Point] = [], routing: Int) {
+            // A re-route from where another was asked for, to rejoin another way, isn't that walk
+            var rejoining = Hasher()
+            rejoining.combine(along)
+            values = [start.latitude, start.longitude].map { Int(($0 * 100_000).rounded()) }
+                + [end.latitude, end.longitude].map { Int(($0 * 10_000).rounded()) } + [routing]
+                + (along.isEmpty ? [] : [rejoining.finalize()])
+        }
+    }
+
     /// Walks asked for this session, by where they go from to the nearest metre or so, as the
     /// walk's fitted to the sidewalk you start on, and where to, to the nearest 10 m or so.
     private actor Cache {
@@ -175,21 +208,11 @@ enum WalkingDirections {
         /// Maximum number of cached walks to prevent memory bloat
         private static let maxCacheSize = 50
 
-        struct Key: Hashable {
-            let values: [Int]
-
-            /// `routing`: how the walk's routed (`WalkRouting.cacheValue`).
-            init(_ start: CLLocationCoordinate2D, _ end: CLLocationCoordinate2D, routing: Int) {
-                values = [start.latitude, start.longitude].map { Int(($0 * 100_000).rounded()) }
-                    + [end.latitude, end.longitude].map { Int(($0 * 10_000).rounded()) } + [routing]
-            }
-        }
-
-        private var walks: [Key: Walk] = [:]
+        private var walks: [CacheKey: Walk] = [:]
         /// Track when each entry was added for cache expiration
-        private var timestamps: [Key: Date] = [:]
+        private var timestamps: [CacheKey: Date] = [:]
 
-        func walk(for key: Key) -> Walk? { 
+        func walk(for key: CacheKey) -> Walk? { 
             // Check if entry exists and hasn't expired (1 hour)
             if let walk = walks[key], let timestamp = timestamps[key], Date().timeIntervalSince(timestamp) < 3600 {
                 return walk
@@ -201,7 +224,7 @@ enum WalkingDirections {
             }
         }
 
-        func store(_ walk: Walk, for key: Key) {
+        func store(_ walk: Walk, for key: CacheKey) {
             // Limit cache size
             if walks.count >= Self.maxCacheSize {
                 // Remove oldest entries
@@ -227,6 +250,177 @@ enum WalkingDirections {
                 timestamps.removeValue(forKey: key)
             }
         }
+
+        var count: Int { walks.count }
+
+        func removeAll() -> Int {
+            let count = walks.count
+            walks = [:]
+            timestamps = [:]
+            return count
+        }
+    }
+}
+
+// MARK: With a bike
+
+extension WalkingDirections {
+    /// A trip with a bike, as Go follows it: riding all the way, a walk with the ride joined in
+    /// (`Walk.joined`); with a train, the train's walks with the ride joined into the one before
+    /// it or after.
+    enum BikeWalks {
+        case allTheWay(Walk)
+        case withTrain(TripPlanner.Trip, TripWalks)
+    }
+
+    /// `bike`'s walks and rides turn by turn from `start` to `end`: to its pickup dock, the ride
+    /// to its dropoff, and on, each leg's end a step of its own (`Walk.Turn.takeBike`,
+    /// `.leaveBike`). Nil if a station of its train has no entrance listed; throws if Apple Maps
+    /// can't route a walk.
+    static func walks(for bike: BikeTrip, from start: CLLocation, to end: CLLocation) async throws -> BikeWalks? {
+        let rideSeconds = TimeInterval(bike.rideMinutes * 60)
+        guard let option = bike.train else {
+            if bike.owned {
+                let ride = await ride(from: start, to: end, planned: bike.path)
+                return .allTheWay(Walk.joined([ride], rideSeconds: rideSeconds))
+            }
+            async let there = walk(from: start, toPickup: bike)
+            async let ride = ride(of: bike)
+            async let away = walk(from: bike.dropoff.location, to: end)
+            return try await .allTheWay(Walk.joined([there, ride, away], rideSeconds: rideSeconds))
+        }
+        guard let destination = option.endStation else { return nil }
+        let trip = TripPlanner.Trip(selection: option.selection, change: option.change, destination: destination)
+        if bike.bikeFirst {
+            // To the station's nearest way in from where the bike's left
+            let from = bike.owned ? start : bike.dropoff.location
+            guard let boarding = StationWays.boarding(trip.selection, from: from),
+                  let leaving = StationWays.leaving(trip.selection, change: trip.change, at: destination, toward: end)
+            else { return nil }
+            async let away = walk(from: leaving, to: end, after: bike.rideAfter)
+            let toTrain: Walk
+            if bike.owned {
+                var ride = await ride(from: start, to: boarding.location, planned: bike.path)
+                let last = ride.steps.count - 1
+                let down = boarding.down
+                if bike.carried {
+                    // Ridden up to the way down, and taken down it with you
+                    ride.steps[last].turn = down.turn
+                    ride.steps[last].instruction = down.instruction
+                    ride.steps[last].spoken = down.spoken.map { "\($0), with your bike" }
+                    ride.steps[last].detail = down.detail
+                } else {
+                    ride.steps[last].turn = .leaveBike
+                    ride.steps[last].instruction = "Lock your bike at \(destinationName(of: trip))"
+                    ride.steps.append(down)
+                }
+                toTrain = Walk.joined([ride], rideSeconds: rideSeconds)
+            } else {
+                async let there = walk(from: start, toPickup: bike)
+                async let ride = ride(of: bike)
+                async let away = walk(from: bike.dropoff.location, to: boarding)
+                toTrain = try await Walk.joined([there, ride, away], rideSeconds: rideSeconds)
+            }
+            return try await .withTrain(trip, TripWalks(boarding: boarding, toTrain: toTrain, leaving: leaving, fromTrain: away))
+        }
+        // The train first: out toward the bike, then ridden on
+        guard let boarding = StationWays.boarding(trip.selection, from: start),
+              let leaving = StationWays.leaving(trip.selection, change: trip.change, at: destination,
+                                                toward: bike.owned ? end : bike.pickup.location)
+        else { return nil }
+        async let there = walk(from: start, to: boarding)
+        let fromTrain: Walk
+        if bike.owned {
+            var ride = await ride(from: leaving.location, to: end, planned: bike.path)
+            ride.steps.insert(leaving.up, at: 0)
+            fromTrain = Walk.joined([ride], rideSeconds: rideSeconds)
+        } else {
+            async let out = walk(from: leaving.location, to: bike.pickup.location)
+            async let ride = ride(of: bike)
+            async let away = walk(from: bike.dropoff.location, to: end)
+            var toDock = try await out
+            toDock.steps.insert(leaving.up, at: 0)
+            toDock.steps[toDock.steps.count - 1] = takeStep(toDock.steps[toDock.steps.count - 1], bike: bike)
+            fromTrain = try await Walk.joined([toDock, ride, away], rideSeconds: rideSeconds)
+        }
+        return try await .withTrain(trip, TripWalks(boarding: boarding, toTrain: there, leaving: leaving, fromTrain: fromTrain))
+    }
+
+    /// The way out from the train to `end`: walked, or a carried bike's ride `after` it.
+    private static func walk(from leaving: StationWays.Way, to end: CLLocation, after: BikeTrip.Ride?) async throws -> Walk {
+        guard let after else { return try await walk(from: leaving, to: end) }
+        var ride = await ride(from: leaving.location, to: end, planned: after.path)
+        ride.steps.insert(leaving.up, at: 0)
+        return Walk.joined([ride], rideSeconds: TimeInterval(after.minutes * 60))
+    }
+
+    /// Metres from a dock that count as at it: no walk there.
+    private static let atDock: CLLocationDistance = 20
+
+    /// The station a bike's ridden to, by name.
+    private static func destinationName(of trip: TripPlanner.Trip) -> String {
+        trip.selection.station?.name ?? "the station"
+    }
+
+    /// The walk from `start` to `bike`'s pickup dock, ending at it with the bike taken. Just that
+    /// step where you're at the dock already.
+    private static func walk(from start: CLLocation, toPickup bike: BikeTrip) async throws -> Walk {
+        let dock = bike.pickup.location
+        guard start.distance(from: dock) > atDock else {
+            let step = takeStep(Walk.Step(turn: .arrive, instruction: "", meters: start.distance(from: dock),
+                                          points: [Walk.Point(start.coordinate), Walk.Point(dock.coordinate)]), bike: bike)
+            return Walk(steps: [step], seconds: 0, meters: step.meters)
+        }
+        var walk = try await walk(from: start, to: dock)
+        if let last = walk.steps.indices.last { walk.steps[last] = takeStep(walk.steps[last], bike: bike) }
+        return walk
+    }
+
+    /// `step` as where the bike's taken: "Take an e-bike at W 4 St & 6 Ave".
+    private static func takeStep(_ step: Walk.Step, bike: BikeTrip) -> Walk.Step {
+        var step = step
+        step.turn = .takeBike
+        step.instruction = "Take \(bike.kind == .eBike ? "an e-bike" : "a bike") at \(bike.pickup.name)"
+        step.spoken = "Take a Citi \(bike.kind == .eBike ? "e-bike" : "Bike") at \(bike.pickup.name)"
+        step.detail = "\(bike.kind.count(bike.bikes)) there"
+        return step
+    }
+
+    /// `bike`'s ride from its pickup dock to its dropoff, ending with the bike docked.
+    private static func ride(of bike: BikeTrip) async -> Walk {
+        var ride = await ride(from: bike.pickup.location, to: bike.dropoff.location, planned: bike.path)
+        let last = ride.steps.count - 1
+        ride.steps[last].turn = .leaveBike
+        ride.steps[last].instruction = "Dock the bike at \(bike.dropoff.name)"
+        ride.steps[last].detail = "\(bike.docks == 1 ? "1 dock" : "\(bike.docks) docks") free"
+        return ride
+    }
+
+    /// Apple Maps' cycling directions from `start` to `end`, every step ridden (`Walk.Step.riding`),
+    /// the last arriving. Not a ride by ferry. Where Apple Maps has none, the ride as `planned`,
+    /// as one step, so Go still has the way to go.
+    static func ride(from start: CLLocation, to end: CLLocation, planned: [Walk.Point]) async -> Walk {
+        let request = MKDirections.Request()
+        request.source = MKMapItem(location: start, address: nil)
+        request.destination = MKMapItem(location: end, address: nil)
+        request.transportType = .cycling
+        var ride: Walk
+        if let route = try? await MKDirections(request: request).calculate().routes.first,
+           !route.advisoryNotices.contains(where: { $0.localizedCaseInsensitiveContains("ferry") }),
+           !route.steps.contains(where: { $0.instructions.localizedCaseInsensitiveContains("ferry") }) {
+            ride = walk(of: route)
+        } else {
+            let points = planned.isEmpty ? [Walk.Point(start.coordinate), Walk.Point(end.coordinate)] : planned
+            let metres = zip(points, points.dropFirst()).map { $0.metres(to: $1) }.reduce(0, +)
+            ride = Walk(steps: [Walk.Step(turn: .arrive, instruction: "Ride there", meters: metres, points: points)],
+                        seconds: metres / 4, meters: metres)
+        }
+        if ride.steps.isEmpty {
+            ride.steps = [Walk.Step(turn: .arrive, instruction: "Ride there", meters: ride.meters,
+                                    points: [Walk.Point(start.coordinate), Walk.Point(end.coordinate)])]
+        }
+        for index in ride.steps.indices { ride.steps[index].riding = true }
+        return ride
     }
 }
 
@@ -241,18 +435,22 @@ enum WalkRouting {
     static let furthestTimes = 1.6
     static let furthestMore = 300.0
 
-    /// The router's options as set, step-free as the app is.
+    /// The router's options as set, step-free as the app is, for a walk now.
     static var options: WalkRouter.Options {
         let defaults = UserDefaults.standard
         var options = WalkRouter.Options()
         options.preference = defaults.string(forKey: preferenceKey).flatMap(WalkPreference.init(rawValue:)) ?? .balanced
         options.stepFree = SharedStore.loadSettings().stepFree
+        options.time = WalkRouter.Options.Time(AppClock.now)
         return options
     }
 
-    /// `options` as a number for a cache key: walks routed differently kept apart.
+    /// `options` as a number for a cache key: walks routed differently kept apart, by day and
+    /// after dark too.
     static func cacheValue(_ options: WalkRouter.Options) -> Int {
-        1 + (WalkPreference.allCases.firstIndex(of: options.preference) ?? 0) * 2 + (options.stepFree ? 1 : 0)
+        let time = options.time.band.rawValue + (options.time.parksClosed ? 1 : 0)
+        return 1 + (WalkPreference.allCases.firstIndex(of: options.preference) ?? 0) * 2 + (options.stepFree ? 1 : 0)
+            + time * 6
     }
 }
 
@@ -279,9 +477,9 @@ actor CrossStreets {
     private var lastAsked: ContinuousClock.Instant?
     /// Most asked at once: a long walk's crossings, without going past the geocoder's limit.
     private static let most = 24
-    /// Between requests to the geocoder: about 50 a minute, its limit, so a walk's crossings
+    /// Between requests to the geocoder: 40 a minute, under its limit of 50, so a walk's crossings
     /// and a re-route's after them aren't throttled, failing (and cached as nameless) part way.
-    private static let spacing: Duration = .milliseconds(1200)
+    private static let spacing: Duration = .milliseconds(1500)
     /// Meters apart two crossings' middles are taken to be the same crossing's: a re-routed
     /// walk's crossings move a little, but at a corner the other street's is further.
     private static let sameCrossing: Double = 6

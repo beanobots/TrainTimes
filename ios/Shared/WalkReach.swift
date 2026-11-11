@@ -250,8 +250,8 @@ extension TripPlanner {
         case noTrain
 
         /// What No Trip Found says, with the walk to and from the stations (`walk`, as "15 min")
-        /// and whether Walk is on; nil for `noTrain`, which it says itself.
-        func message(walk: String, walkOn: Bool) -> String? {
+        /// nil for `noTrain`, which it says itself.
+        func message(walk: String) -> String? {
             switch self {
             case .noStation(let ends):
                 let which = ends == .both ? "either end" : ends == .start ? "the start" : "the end"
@@ -260,8 +260,7 @@ extension TripPlanner {
                 let which = ends == .both ? "both ends" : ends == .start ? "the start" : "the end"
                 return "There's water between \(which) and the subway, and no bridge over it within a \(walk) walk."
             case .walkingAsQuick:
-                return walkOn ? "Walking there is as quick as the subway."
-                              : "Walking there is as quick as the subway. Turn on Walk to see the walk."
+                return "Walking there is as quick as the subway."
             case .noTrain:
                 return nil
             }

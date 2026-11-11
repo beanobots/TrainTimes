@@ -91,7 +91,8 @@ struct OpenStationIntent: OpenIntent {
 }
 
 /// The station a Spotlight tap opened, for `AppTabs` to show its picker; or the bus home stop,
-/// for Nearby to open.
+/// for Nearby to open; or a Saved Route whose button was tapped (`PlanRouteTripIntent`), for New
+/// Trip to plan.
 @MainActor
 @Observable
 final class StationOpening {
@@ -99,6 +100,8 @@ final class StationOpening {
 
     var station: Station?
     var busStop: BusChoice?
+    /// A `SavedWidget.id`; New Trip clears it once it's planning it.
+    var route: UUID?
 }
 
 /// Settings' home stop in Spotlight when it's a bus: "5 Av & Union St", with its lines. Only that

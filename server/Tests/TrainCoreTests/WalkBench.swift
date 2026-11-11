@@ -13,7 +13,9 @@ import Testing
 ///
 ///     WALKBENCH=1 swift test --filter WalkBench
 ///
-/// Pictures and report.md go to ~/Desktop/Leeway walk bench (or WALKBENCH_OUT).
+/// Pictures and report.md go to ~/Desktop/Leeway walk bench (or WALKBENCH_OUT). Walked at
+/// noon, or at WALKBENCH_HOUR (0–23) for the night costs; the walks in walks.json, or
+/// WALKBENCH_WALKS (night_walks.json: parks, waterfronts and industrial blocks).
 @Suite(.serialized, .enabled(if: ProcessInfo.processInfo.environment["WALKBENCH"] != nil))
 struct WalkBench {
     struct Bench: Decodable {
@@ -36,9 +38,12 @@ struct WalkBench {
     static let output = URL(fileURLWithPath: ProcessInfo.processInfo.environment["WALKBENCH_OUT"]
         ?? NSHomeDirectory() + "/Desktop/Leeway walk bench")
 
+    static let hour = ProcessInfo.processInfo.environment["WALKBENCH_HOUR"].flatMap(Int.init) ?? 12
+
     @Test func bench() async throws {
         let router = try #require(WalkRouterTests.router, "ios/App/walkgraph.sqlite")
-        let walks = try JSONDecoder().decode([Bench].self, from: Data(contentsOf: Self.tools.appendingPathComponent("walks.json")))
+        let walks = try JSONDecoder().decode([Bench].self, from: Data(contentsOf: Self.tools.appendingPathComponent(
+            ProcessInfo.processInfo.environment["WALKBENCH_WALKS"] ?? "walks.json")))
         try FileManager.default.createDirectory(at: Self.output, withIntermediateDirectories: true)
         var report = "# Walk bench\n\n| Walk | Route | m | min | crossings | no light | wide, no light | ramps | ms |\n"
             + "|---|---|---|---|---|---|---|---|---|\n"
@@ -49,7 +54,9 @@ struct WalkBench {
             var timings: [WalkPreference: Int] = [:]
             for preference in WalkPreference.allCases {
                 let began = Date()
-                if let route = router.route(from: start, to: end, options: .init(preference: preference)) {
+                var options = WalkRouter.Options(preference: preference)
+                options.time = .init(hour: Self.hour)
+                if let route = router.route(from: start, to: end, options: options) {
                     routes.append((preference, route))
                 }
                 timings[preference] = Int(Date().timeIntervalSince(began) * 1000)

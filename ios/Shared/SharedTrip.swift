@@ -183,11 +183,12 @@ extension SharedStore {
     }
 
     /// Saves the walk's stage (nil for none: walking to a train, at a change, or ended), and
-    /// redraws Transit Directions with it.
-    static func saveWalkStage(_ stage: WalkStage?) {
-        guard walkStageFile != nil else { return }
+    /// redraws Transit Directions with it unless not `reloading` (something else reloads it).
+    /// Neither if it's unchanged.
+    static func saveWalkStage(_ stage: WalkStage?, reloading: Bool = true) {
+        guard walkStageFile != nil, read(WalkStage.self, from: walkStageFile) != stage else { return }
         write(stage, to: walkStageFile)
-        WidgetCenter.shared.reloadTimelines(ofKind: WidgetKind.directions)
+        if reloading { WidgetCenter.shared.reloadTimelines(ofKind: WidgetKind.directions) }
     }
 }
 

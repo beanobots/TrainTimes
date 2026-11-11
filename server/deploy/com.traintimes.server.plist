@@ -72,10 +72,6 @@
         <string>30</string>
         <key>MAX_KEYS_PER_IP_PER_DAY</key>
         <string>10</string>
-        <!-- Google's Routes API key, for GET /routes (directions shared to the
-             app). Leave it out, or empty, to turn that off -->
-        <key>GOOGLE_ROUTES_API_KEY</key>
-        <string></string>
         <!-- MTA Bus Time's API key, for GET /buses (the next buses for a
              route's bus rides). Leave it out, or empty, to turn that off -->
         <key>BUS_TIME_API_KEY</key>

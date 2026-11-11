@@ -10,6 +10,8 @@ enum WidgetKind {
     /// Transit Directions: a trip shared from a maps app or planned with Quick Trip, else its
     /// Quick Trip and Favorite Stop buttons.
     static let directions = "DirectionsWidget"
+    /// Citi Bike: a favorite dock's counts, or the nearest dock's.
+    static let citiBike = "CitiBikeWidget"
 }
 
 /// Widgets reloaded only because others of their kind were, to redraw with other widgets' times
@@ -71,14 +73,19 @@ extension WidgetCenter {
     /// widgets, so others of those kinds redraw too, from their own saved times (`Bystanders`).
     /// `drawing`: a widget drawing those times now, whose kind needn't reload for it alone.
     func reloadWidgets(showing trainID: String, drawing widgetID: String? = nil) async {
-        guard let infos = try? await currentConfigurations() else { return }
+        await reloadWidgets(showing: [trainID], drawing: widgetID)
+    }
+
+    /// As `reloadWidgets(showing:drawing:)` for any of `trainIDs`, each kind reloaded once.
+    func reloadWidgets(showing trainIDs: Set<String>, drawing widgetID: String? = nil) async {
+        guard !trainIDs.isEmpty, let infos = try? await currentConfigurations() else { return }
         let saved = SharedStore.loadWidgets()
         let now = Date.now
         let placed = infos.compactMap { info -> (widgetID: String, kind: String, showing: Bool)? in
             guard info.kind == WidgetKind.train || info.kind == WidgetKind.transfers else { return nil }
             let intent = info.widgetConfigurationIntent(of: TrainWidgetIntent.self) ?? TrainWidgetIntent()
             let id = intent.widgetID(kind: info.kind, family: info.family)
-            return (id, info.kind, intent.trainID(kind: info.kind, at: now, in: saved) == trainID && id != widgetID)
+            return (id, info.kind, trainIDs.contains(intent.trainID(kind: info.kind, at: now, in: saved)) && id != widgetID)
         }
         let showing = placed.filter(\.showing)
         let kinds = Set(showing.map(\.kind))

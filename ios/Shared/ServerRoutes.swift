@@ -2,16 +2,17 @@ import CoreLocation
 import Foundation
 import os
 
-/// Google's subway routes for shared directions, from the push server's `GET /routes`
-/// (server/README.md), which keeps Google's key: the trains the maps apps recommend, as their
-/// links don't say. Matched to the app's stations, lines and directions (`trips(from:)`).
+/// Routes by subway and bus between two places, planned on the phone's timetables
+/// (`LocalRoutes`) or by the push server's `GET /routes` (server/README.md) without them: for New
+/// Trip, and shared directions, whose links don't say which trains. Matched to the app's stations,
+/// lines and directions (`trips(from:)`).
 enum ServerRoutes {
     /// One route's train rides, in order, as the server sends them.
     struct Route: Decodable, Equatable {
         var legs: [Leg]
 
         struct Leg: Decodable, Equatable {
-            /// Google's short name for the line: "R", "6", "S", "B63".
+            /// The line's short name: "R", "6", "GS", "B63".
             var line: String
             var from: Stop
             var to: Stop
@@ -21,9 +22,9 @@ enum ServerRoutes {
             var headsign: String? = nil
             /// Stops ridden, counting the last.
             var stops: Int? = nil
-            /// How long the ride takes by Google's timetable.
+            /// How long the ride takes by the timetable.
             var seconds: Int? = nil
-            /// When it leaves by Google's timetable, in seconds since 1970; nil from a server that
+            /// When it leaves by the timetable, in seconds since 1970; nil from a server that
             /// predates it.
             var leaves: Int? = nil
 
@@ -40,7 +41,7 @@ enum ServerRoutes {
                                leaves: leaves.map { Date(timeIntervalSince1970: TimeInterval($0)) })
             }
 
-            /// How long the ride takes: Google's time, or about 2 minutes a stop without one.
+            /// How long the ride takes: the timetable's time, or about 2 minutes a stop without one.
             var duration: TimeInterval {
                 seconds.map(TimeInterval.init) ?? TimeInterval((stops ?? 5) * 120)
             }
@@ -63,8 +64,8 @@ enum ServerRoutes {
 
         /// Ending at the first of its rides, from its first bus on, that ends within `meters` of
         /// `end` where walking the rest is no more than `changeWorth` slower than riding it by
-        /// Google's times: Google adds a short second bus a walk would do (the Q17 to Jamaica,
-        /// then the Q20 two stops). As it is with no bus, or none of them.
+        /// the timetable's times: a route can add a short second bus a walk would do (the Q17 to
+        /// Jamaica, then the Q20 two stops). As it is with no bus, or none of them.
         func trimmed(within meters: Double, of end: CLLocation) -> Route {
             guard let firstBus = legs.firstIndex(where: \.isBus) else { return self }
             for index in legs.indices.dropLast() where index >= firstBus {
@@ -81,7 +82,7 @@ enum ServerRoutes {
         /// on foot against them.
         private static let changeWorth: TimeInterval = 3 * 60
 
-        /// Seconds from getting off ride `index` to `end` riding the rest, by Google's times
+        /// Seconds from getting off ride `index` to `end` riding the rest, by the timetable's times
         /// where it gives them: each walk to the next ride, the wait for it, the ride, and the
         /// walk from the last.
         private func secondsRiding(after index: Int, to end: CLLocation) -> TimeInterval {
@@ -142,20 +143,25 @@ enum ServerRoutes {
     /// `AppLog` writes to a file only the app can, for diagnostics).
     private static let log = Logger(subsystem: "dev.dctp.leeway", category: "Server")
 
-    /// Meters a stop Google names may be from the station it's matched to.
+    /// Meters a route's stop may be from the station it's matched to.
     private static let matchRange: Double = 400
 
-    /// Google's routes from `start` to `end` leaving at `departure`, best first, by bus too with
-    /// `buses`, and without trains with `subway` off; nil if the server can't be reached, refuses
-    /// (e.g. over its daily limit) or has no Google key.
-    static func routes(from start: CLLocation, to end: CLLocation, at departure: Date = .now,
+    /// Routes from `start` to `end` leaving at `departure`, best first, by bus too with `buses`,
+    /// and without trains with `subway` off: planned on the phone (`LocalRoutes`), or without the
+    /// timetables for it by the server; nil if neither can, as the server can't be reached or
+    /// refuses (e.g. over its daily limit).
+    static func routes(from start: CLLocation, to end: CLLocation, at departure: Date = AppClock.now,
                        buses: Bool = false, subway: Bool = true) async -> [Route]? {
         await fetchRoutes(from: start, to: end, at: departure, buses: buses, subway: subway).routes
     }
 
     /// `routes`, and whether the server refused them as over its daily limit (a 429).
-    static func fetchRoutes(from start: CLLocation, to end: CLLocation, at departure: Date = .now,
+    static func fetchRoutes(from start: CLLocation, to end: CLLocation, at departure: Date = AppClock.now,
                             buses: Bool = false, subway: Bool = true) async -> (routes: [Route]?, overLimit: Bool) {
+        // Planned on the phone where its timetables cover the trip: no wait, and no signal needed
+        if let planned = await LocalRoutes.routes(from: start, to: end, at: departure, buses: buses, subway: subway) {
+            return (planned, false)
+        }
         guard let baseURL, var components = URLComponents(url: baseURL.appendingPathComponent("routes"),
                                                           resolvingAgainstBaseURL: false) else { return (nil, false) }
         let point = { (location: CLLocation) in
@@ -176,12 +182,12 @@ enum ServerRoutes {
         return (answer.value?.routes, answer.status == 429)
     }
 
-    /// The most trips `plan` offers, Google's and the app's together.
+    /// The most trips `plan` offers, the planned routes' and the app's own together.
     static let maxOptions = 6
 
-    /// The trips from `start` to `end`: Google's routes, the trains the maps apps recommend, and
+    /// The trips from `start` to `end`: the planned routes (`routes`), and
     /// the app's own (`TripPlanner`), each once, ranked together by when they get there with the
-    /// timetable (`TripPlanner.ranked`). Google's come first where they tie, or with no timetable.
+    /// timetable (`TripPlanner.ranked`). The planned routes' come first where they tie, or with no timetable.
     /// The same train changing on to the same end is one trip, changing at each of their stations
     /// (`TripPlanner.joiningChanges(_:)`). Neither walks more than `walkRange` to or from a train.
     /// A trip whose lines another's include, from the same station to the same end, is that one
@@ -199,17 +205,17 @@ enum ServerRoutes {
         planned(await routes(from: start, to: end) ?? [], from: start, to: end, walkRange: walkRange)
     }
 
-    /// `plan`'s trips with Google's `routes`, leaving at `now`.
+    /// `plan`'s trips with the planned `routes`, leaving at `now`.
     static func plan(_ routes: [Route], from start: CLLocation, to end: CLLocation,
-                     walkRange: Double = TripPlanner.walkRange, at now: Date = .now) -> [TripPlanner.Trip] {
+                     walkRange: Double = TripPlanner.walkRange, at now: Date = AppClock.now) -> [TripPlanner.Trip] {
         planned(routes, from: start, to: end, walkRange: walkRange, at: now).trips
     }
 
-    /// `planned`'s trips and why there are none, with Google's `routes`, leaving at `now`. Nor
-    /// Google's trips whose change takes them away from the end (`TripPlanner.withoutDetours`).
+    /// `planned`'s trips and why there are none, with the planned `routes`, leaving at `now`. Nor
+    /// the routes' trips whose change takes them away from the end (`TripPlanner.withoutDetours`).
     static func planned(_ routes: [Route], from start: CLLocation, to end: CLLocation,
                         walkRange: Double = TripPlanner.walkRange,
-                        at now: Date = .now) -> (trips: [TripPlanner.Trip], none: TripPlanner.NoTrip?) {
+                        at now: Date = AppClock.now) -> (trips: [TripPlanner.Trip], none: TripPlanner.NoTrip?) {
         let found = routes.filter { $0.walks(within: walkRange, from: start, to: end) }
         let google = trips(from: found).filter { !TripPlanner.ridesBack($0) }
         var seen = Set<String>()
@@ -279,7 +285,7 @@ enum ServerRoutes {
     }
 
     /// The trips from `start` to `end` with buses as well, for New Trip with Settings › Include
-    /// buses: Google's routes by train, bus, two buses, or a bus and one train, in Google's
+    /// buses: the planned routes by train, bus, two buses, or a bus and one train, in their
     /// order, then the app's own train trips (`TripPlanner`), each once. A route needing more
     /// than one change isn't offered, as a widget shows one, unless it can end sooner a walk from
     /// the end (`Route.trimmed(within:of:)`). The same train changing on to the same end is one
@@ -291,9 +297,9 @@ enum ServerRoutes {
         planWithBuses(await routes(from: start, to: end, buses: true) ?? [], from: start, to: end, walkRange: walkRange)
     }
 
-    /// `planWithBuses`'s trips with Google's `routes`, leaving at `now`.
+    /// `planWithBuses`'s trips with the planned `routes`, leaving at `now`.
     static func planWithBuses(_ routes: [Route], from start: CLLocation, to end: CLLocation,
-                              walkRange: Double = TripPlanner.walkRange, at now: Date = .now) -> [Planned] {
+                              walkRange: Double = TripPlanner.walkRange, at now: Date = AppClock.now) -> [Planned] {
         let google = routes.map { $0.trimmed(within: walkRange, of: end) }
             .filter { $0.walks(within: walkRange, from: start, to: end) }
         var planned: [Planned] = []
@@ -318,7 +324,7 @@ enum ServerRoutes {
             else { return }
             planned.append(Planned(choice: .train(trip.option), trip: trip))
         }
-        // In step-free mode, Google's trains as `TripPlanner.stepFree(_:)` takes them, as the
+        // In step-free mode, the routes' trains as `TripPlanner.stepFree(_:)` takes them, as the
         // app's own are; a bus is step-free itself
         let stepFree = SharedStore.loadSettings().stepFree
         for route in google {
@@ -337,7 +343,7 @@ enum ServerRoutes {
         }
         TripPlanner.ranked(TripPlanner.plan(from: start, to: end, at: now, walkRange: walkRange), from: start, to: end, at: now)
             .forEach(add)
-        // The same line from a further station than another trip's, Google's or the app's, isn't
+        // The same line from a further station than another trip's, the routes' or the app's, isn't
         // offered, nor one walking more to get there later than another on its line, nor one whose
         // change takes it away from the end (`TripPlanner.withoutDetours`)
         let nearest = TripPlanner.withoutDetours(
@@ -424,7 +430,7 @@ enum ServerRoutes {
         return nil
     }
 
-    /// The app's route ids a line Google names could be: itself, as feeds name expresses ("6X"
+    /// The app's route ids a route's line name could be: itself, as feeds name expresses ("6X"
     /// is the 6), and for "S", each shuttle (which of them is told by the stations).
     private static func routeIDs(for line: String) -> [String] {
         let name = line.trimmingCharacters(in: .whitespaces).uppercased()

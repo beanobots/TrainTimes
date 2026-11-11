@@ -141,8 +141,15 @@ struct Selection: Codable, Hashable, Sendable {
         connections.first { leaveTime(for: $0.first) > now }
     }
 
-    /// Default until you choose: 14 St-Union Sq, N Q R W, toward Uptown & Queens.
-    static let fallback = Selection(stationID: "R20", routes: ["N", "Q", "R", "W"], direction: .north)
+    /// Default until you choose: 14 St-Union Sq, N Q R W, toward Uptown & Queens. As `validated()`
+    /// has it, under the station's own id ("635", the complex's first platform), not R20's: else
+    /// the fallback and a saved copy of it differ in `trainID`, and a countdown on one isn't
+    /// shown by widgets showing the other.
+    static let fallback: Selection = {
+        let union = Selection(stationID: "R20", routes: ["N", "Q", "R", "W"], direction: .north)
+        // Not `validated()`, which falls back to this
+        return union.validatedIfKnown() ?? union
+    }()
 
     var station: Station? { StationDirectory.station(id: stationID) }
 

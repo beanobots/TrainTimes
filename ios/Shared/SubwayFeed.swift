@@ -84,7 +84,10 @@ enum SubwayFeed {
     /// or over `staleAfter + clockAllowance` older than `now`. A `newest` ahead of `now` is a
     /// device clock that's slow, and kept, so a frozen feed isn't let go on as long as it's slow;
     /// one more than `clockAllowance` ahead is a feed stamped wrong, and `now` is used instead.
+    /// Every feed while Pretend Time is on (`AppClock`): its trains are the real time's; unless
+    /// they're saved ones read at the pretend time (`AppClock.feedsAreAtPretendTime`).
     static func isStale(made: Date, newest: Date?, now: Date) -> Bool {
+        if AppClock.isPretending && !AppClock.feedsAreAtPretendTime { return true }
         let newest = newest.map { $0 > now.addingTimeInterval(clockAllowance) ? now : $0 } ?? now
         return newest.timeIntervalSince(made) > staleAfter
             || now.timeIntervalSince(made) > staleAfter + clockAllowance

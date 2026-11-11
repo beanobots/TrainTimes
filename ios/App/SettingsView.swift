@@ -18,27 +18,48 @@ final class SettingsStore {
             read.defaultTrain = oldValue.defaultTrain
             read.defaultBothWays = oldValue.defaultBothWays
             read.defaultBus = oldValue.defaultBus
+            // Only Citi Bike and Nearby show docks
+            read.bikeKinds = oldValue.bikeKinds
+            // Reloaded a moment on (`alertsChanged`)
+            read.alertKinds = oldValue.alertKinds
             if settings.defaultBus != oldValue.defaultBus {
                 Task { await SpotlightBusStop.indexHome() }
             }
             if settings.bikeKinds != oldValue.bikeKinds {
-                WidgetCenter.shared.reloadTimelines(ofKind: WidgetKind.train)
+                WidgetCenter.shared.reloadTimelines(ofKind: WidgetKind.citiBike)
             }
-            if settings.favoriteCard != oldValue.favoriteCard || settings.defaultTrain != oldValue.defaultTrain
+            // Each once, however many of what they read changed
+            if read != oldValue || settings.favoriteCard != oldValue.favoriteCard
+                || settings.defaultTrain != oldValue.defaultTrain
                 || settings.defaultBothWays != oldValue.defaultBothWays || settings.defaultBus != oldValue.defaultBus {
                 WidgetCenter.shared.reloadTrainWidgets()
             }
-            if read != oldValue {
-                WidgetCenter.shared.reloadTrainWidgets()
+            if read != oldValue || settings.bikeKinds != oldValue.bikeKinds {
                 WidgetCenter.shared.reloadTimelines(ofKind: Nearby.widgetKind)
             }
             // Alert changes need a refetch; mark changes just redraw, no network
             if settings.alertKinds != oldValue.alertKinds {
-                Task { await TrainActivityController.refresh() }
+                alertsChanged()
             } else if settings.marksLiveTimes != oldValue.marksLiveTimes
                         || settings.marksScheduledTimes != oldValue.marksScheduledTimes {
                 Task { await TrainActivityController.redraw() }
             }
+        }
+    }
+
+    @ObservationIgnored private var reloadingAlerts: Task<Void, Never>?
+
+    /// Widgets and the countdown, with their alerts fetched again, a second after the last of
+    /// several alert kinds toggled in a row, not for each.
+    private func alertsChanged() {
+        reloadingAlerts?.cancel()
+        reloadingAlerts = Task {
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled else { return }
+            WidgetCenter.shared.reloadTrainWidgets()
+            WidgetCenter.shared.reloadTimelines(ofKind: Nearby.widgetKind)
+            // Not cancelled by a toggle after it's begun
+            Task { await TrainActivityController.refresh() }
         }
     }
 
@@ -70,10 +91,14 @@ final class SettingsStore {
     }
 }
 
-/// The Settings tab, in New Trip's look: a plain page under its title, faint rounded cards. The
-/// home station, General (vibrating on walks, NY North), walking and biking, accessibility, which
-/// alerts every widget mentions as icon toggles, diagnostics, and the data sources.
+/// The Settings tab, in New Trip's look: a plain page under its title, one faint rounded card with
+/// no headings or lines, its settings spaced apart, each an icon and title with any note under the
+/// title's words: the home station or stop, Grid North, walk safety and comfortable walk, Biking,
+/// step-free and time marks, Transit Alerts (which alerts every widget mentions) as icon toggles,
+/// and diagnostics. The data sources are a credit line under it.
 struct SettingsView: View {
+    /// The secret Prototyping card, shown by tapping the Settings tab 5 times quickly (`AppTabs`).
+    var showsPrototyping = false
     @Environment(SettingsStore.self) private var store
     @Environment(WidgetStore.self) private var widgets
     @Environment(\.accessibilityDifferentiateWithoutColor) private var withoutColor
@@ -92,8 +117,9 @@ struct SettingsView: View {
     @State private var warnsNoBikes = false
     @State private var transitBike: OwnBike?
     @State private var lastTransitBike = OwnBike.bike
-    @AppStorage(WalkSession.vibratesKey) private var vibratesOnInstruction = true
     @AppStorage(MapNorth.key) private var nyNorth = false
+    /// The Prototyping tool open in its sheet.
+    @State private var prototypeTool: PrototypeTool?
 
     /// The page's side margin and its cards' corners, as New Trip's.
     private static let margin: CGFloat = 16
@@ -135,36 +161,33 @@ struct SettingsView: View {
                     .padding(.bottom, 6)
                     .accessibilityAddTraits(.isHeader)
 
-                cardLabel(store.settings.defaultBus == nil ? "Home Station" : "Home Stop")
-                homeStation
-                    .padding(.bottom, 14)
+                // Room between settings, so each reads as its own
+                VStack(spacing: 14) {
+                    homeStation
+                    gridNorth
+                    walkSafety
+                    comfortableWalk
+                    biking
+                    accessibility
+                    alertToggles
+                    diagnostics
+                }
+                .padding(.vertical, 6)
+                .background(Self.faint, in: Self.card)
 
-                cardLabel("General")
-                general
-                    .padding(.bottom, 14)
-
-                cardLabel("Walking", symbol: "figure.walk")
-                walking
-                    .padding(.bottom, 14)
-
-                cardLabel("Biking", symbol: "bicycle")
-                biking
-                    .padding(.bottom, 14)
-
-                cardLabel("Accessibility")
-                accessibility
-                    .padding(.bottom, 14)
-
-                cardLabel("Alerts")
-                alertToggles
-                    .padding(.bottom, 14)
-
-                cardLabel("Diagnostics")
-                diagnostics
-                    .padding(.bottom, 14)
-
-                cardLabel("Data Sources")
                 dataSources
+                    .padding(.top, 8)
+
+                if showsPrototyping {
+                    Label("Prototyping", systemImage: "hammer")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 4)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, 14)
+                        .accessibilityAddTraits(.isHeader)
+                    prototyping
+                }
             }
             .padding(.horizontal, Self.margin)
             .padding(.top, 8)
@@ -172,33 +195,16 @@ struct SettingsView: View {
         }
     }
 
-    /// A small label over a card, as New Trip's "Depart from", with its icon before it if it
-    /// has one.
-    private func cardLabel(_ title: String, symbol: String? = nil) -> some View {
-        HStack(spacing: 5) {
-            if let symbol {
-                Image(systemName: symbol)
-                    .foregroundStyle(.tint)
-                    .accessibilityHidden(true)
-            }
-            Text(title)
-        }
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 4)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .accessibilityAddTraits(.isHeader)
-    }
-
-    /// The home stop as a faint card, as the others: the default train, or its bus when it's one
-    /// (Home Stop); a tap picks another (`HomeStopPicker`). Or, with none chosen, No Primary Stop
-    /// and the train used meanwhile.
+    /// The home stop under its title: the default train, or its bus when it's one; a tap picks
+    /// another (`HomeStopPicker`). Or, with none chosen, No Primary Stop and the train used meanwhile.
     private var homeStation: some View {
         @Bindable var store = store
         let selection = store.defaultTrain
         return Button {
             choosingDefaultTrain = true
         } label: {
+            VStack(alignment: .leading, spacing: 10) {
+            rowTitle("Home Station or Stop", symbol: "house.fill")
             HStack(spacing: 12) {
                 if store.hasNoStop {
                     Image(systemName: "mappin.slash")
@@ -216,7 +222,7 @@ struct SettingsView: View {
                     .lineLimit(2)
                 } else if let bus = store.settings.defaultBus {
                     HStack(spacing: 2) {
-                        ForEach(bus.allLines.prefix(3), id: \.self) { BusBadge(line: $0, size: bus.allLines.count > 1 ? 28 : 36) }
+                        ForEach(bus.allLines.prefix(3), id: \.self) { BusBadge(line: $0, size: bus.allLines.count > 1 ? 28 : 32) }
                     }
                     VStack(alignment: .leading, spacing: 1) {
                         Text(bus.stopName).font(.headline)
@@ -226,7 +232,7 @@ struct SettingsView: View {
                     }
                     .lineLimit(1)
                 } else {
-                    LineBullets(routes: selection.routes, size: 36)
+                    LineBullets(routes: selection.routes, size: 32)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(selection.station?.name ?? "Choose a Train").font(.headline)
                         if selection.station != nil {
@@ -242,54 +248,99 @@ struct SettingsView: View {
                     .font(.body.weight(.semibold))
                     .frame(width: 36, height: 36)
                     .background(.quaternary, in: Circle())
+                    .accessibilityHidden(true)
+            }
+            // Under the title's words, as the notes are
+            .padding(.leading, 36)
             }
             .padding(Self.margin)
-            .contentShape(Self.card)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .background(Self.faint, in: Self.card)
         .accessibilityElement(children: .combine)
         .accessibilityHint(store.hasNoStop ? "Choose a station or bus stop, and its direction"
                                            : "Choose another station or bus stop, or direction")
         .sheet(isPresented: $choosingDefaultTrain) {
             HomeStopPicker(train: $store.defaultTrain, bothWays: $store.settings.defaultBothWays,
-                           bus: $store.settings.defaultBus)
+                           bus: $store.settings.defaultBus) { train, bothWays in
+                // One save, so the widgets reload (and Spotlight indexes) once
+                var settings = store.settings
+                settings.defaultTrain = train
+                settings.defaultBothWays = bothWays
+                settings.defaultBus = nil
+                store.settings = settings
+            }
         }
     }
 
-    /// Vibrate During Navigation: a buzz as each turn's shown on a walk (`WalkSession.vibratesKey`,
-    /// `WalkVibration`). NY North: every map turned the grid's 29°, Manhattan's
-    /// avenues up it (`MapNorth`).
-    private var general: some View {
-        VStack(spacing: 0) {
-            switchRow("Vibrate During Navigation", symbol: "iphone.radiowaves.left.and.right", tint: .accentColor,
-                      isOn: $vibratesOnInstruction)
-            Divider().padding(.leading, 52)
-            switchRow("NY North", detail: "Manhattan avenues become North-South", symbol: "building.2",
-                      tint: .accentColor, isOn: $nyNorth)
+    /// Grid North: every map turned the grid's 29°, Manhattan's avenues up it (`MapNorth`), with
+    /// the island as its icon (`ManhattanIcon`). Speaking and vibrating on walks are the walking
+    /// map's sound button (`WalkSound`), not here.
+    private var gridNorth: some View {
+        switchRow("Grid North", detail: nyNorth ? "Compass shows Uptown as North" : "Compass uses true North",
+                  isOn: $nyNorth) {
+            ManhattanIcon()
+                .fill(.tint)
+                .frame(width: 13, height: 32)
         }
-        .background(Self.faint, in: Self.card)
     }
 
-    /// Safety, unlabelled: how much longer a safer walk may take (`WalkRouting`). Comfortable Walk:
-    /// how far New Trip's rides may have you walk to and from them (`WalkSlider`).
-    private var walking: some View {
-        VStack(spacing: 0) {
-            // Safest first; VoiceOver reads it as Safety
-            Picker("Safety", selection: $walkPreference) {
+    /// Walk Safety: how much longer a safer walk may take (`WalkRouting`), safest first, with what
+    /// the one picked does under it.
+    private var walkSafety: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            rowTitle("Walk Safety", symbol: "figure.walk")
+            Picker("Walk Safety", selection: $walkPreference) {
                 ForEach(WalkPreference.allCases.reversed(), id: \.self) { preference in
                     Text(preference.name).tag(preference)
                 }
             }
             .pickerStyle(.segmented)
-            .padding(.horizontal, Self.margin)
-            .padding(.vertical, 12)
-            Divider().padding(.leading, Self.margin)
-            WalkSlider(minutes: $walkMinutes)
-                .padding(.horizontal, Self.margin)
-                .padding(.vertical, 12)
+            note(walkPreference.note)
         }
-        .background(Self.faint, in: Self.card)
+        .padding(.horizontal, Self.margin)
+        .padding(.vertical, 12)
+    }
+
+    /// Comfortable Walk: how far New Trip's rides may have you walk to and from them (`WalkSlider`).
+    private var comfortableWalk: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            WalkSlider(minutes: $walkMinutes)
+            note("Longest walk to or from a train, bus or bike. Walking the whole way is always offered.")
+        }
+        .padding(.horizontal, Self.margin)
+        .padding(.vertical, 12)
+    }
+
+    /// What a setting does, under it, lined up with the titles' words rather than their icons.
+    private func note(_ text: String) -> some View {
+        Text(text)
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.leading, 36)
+    }
+
+    /// A row of icon toggles under its title, as Walk Safety's.
+    private func titled(_ title: String, symbol: String, @ViewBuilder content: () -> some View) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            rowTitle(title, symbol: symbol)
+                .padding(.horizontal, Self.margin)
+                .padding(.top, 10)
+            content()
+        }
+    }
+
+    /// A setting's title over its control, its icon as the switch rows'.
+    private func rowTitle(_ title: String, symbol: String) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: symbol)
+                .foregroundStyle(.tint)
+                .frame(width: 24)
+                .accessibilityHidden(true)
+            Text(title).fontWeight(.medium)
+        }
+        .accessibilityAddTraits(.isHeader)
     }
 
     /// Bikes: which Citi Bikes New Trip rides and Nearby counts (`BikeKinds`; neither is
@@ -298,22 +349,23 @@ struct SettingsView: View {
     /// (`BikeCarry`). With none at all, a warning that New Trip won't offer biking.
     private var biking: some View {
         VStack(spacing: 0) {
-            HStack(alignment: .top, spacing: 8) {
-                bikeTile("Citi Bike", electric: false, own: false, on: citiBike(.bike))
-                bikeTile("Citi E-Bike", electric: true, own: false, on: citiBike(.eBike))
-                Rectangle()
-                    .fill(.quaternary)
-                    .frame(width: 1, height: 44)
-                    .padding(.top, 2)
-                    .accessibilityHidden(true)
-                bikeTile("My Bike", electric: false, own: true, on: myBike(.bike))
-                bikeTile("My E-Bike", electric: true, own: true, on: myBike(.eBike))
+            titled("Biking", symbol: "bicycle") {
+                HStack(alignment: .top, spacing: 8) {
+                    bikeTile("Citi Bike", electric: false, own: false, on: citiBike(.bike))
+                    bikeTile("Citi E-Bike", electric: true, own: false, on: citiBike(.eBike))
+                    Rectangle()
+                        .fill(.quaternary)
+                        .frame(width: 1, height: 44)
+                        .padding(.top, 2)
+                        .accessibilityHidden(true)
+                    bikeTile("My Bike", electric: false, own: true, on: myBike(.bike))
+                    bikeTile("My E-Bike", electric: true, own: true, on: myBike(.eBike))
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 12)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 12)
             // Both always there, each unrolling down from the tiles as it's needed (`Unroll`)
             VStack(spacing: 0) {
-                Divider().padding(.leading, 52)
                 HStack(spacing: 12) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
@@ -335,7 +387,6 @@ struct SettingsView: View {
                 .padding(.bottom, 8)
                 .modifier(Unroll(shown: transitBike != nil))
         }
-        .background(Self.faint, in: Self.card)
     }
 
     /// Your own bike on a trip with a train (`BikeCarry`), as two switches in a panel of your bike's
@@ -391,7 +442,7 @@ struct SettingsView: View {
                                                 : AnyShapeStyle(.quaternary), in: Capsule())
                     .eBikeBadge(electric)
                 Text(name)
-                    .font(.caption2)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
                     .multilineTextAlignment(.center)
@@ -403,6 +454,7 @@ struct SettingsView: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(name)
         .accessibilityValue(on.wrappedValue ? "On" : "Off")
+        .accessibilityAddTraits(on.wrappedValue ? [.isToggle, .isSelected] : .isToggle)
         .accessibilityHint(own ? "Whether New Trip rides your own" : "Whether New Trip and Nearby count these")
     }
 
@@ -437,38 +489,40 @@ struct SettingsView: View {
     /// Each kind of alert an icon, tinted in its colour while widgets mention it, as New Trip's
     /// Subway and Bus; its name under it.
     private var alertToggles: some View {
-        HStack(alignment: .top, spacing: 8) {
-            ForEach(ServiceAlert.Kind.allCases, id: \.self) { kind in
-                let on = alertKind(kind)
-                Button {
-                    on.wrappedValue.toggle()
-                } label: {
-                    VStack(spacing: 4) {
-                        Image(systemName: kind.symbol)
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(on.wrappedValue ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
-                            .frame(width: 48, height: 38)
-                            .background(on.wrappedValue ? AnyShapeStyle(kind.tint) : AnyShapeStyle(.quaternary),
-                                        in: Capsule())
-                        Text(kind.shortLabel)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                            .multilineTextAlignment(.center)
+        titled("Transit Alerts", symbol: "bell.badge.fill") {
+            HStack(alignment: .top, spacing: 8) {
+                ForEach(ServiceAlert.Kind.allCases, id: \.self) { kind in
+                    let on = alertKind(kind)
+                    Button {
+                        on.wrappedValue.toggle()
+                    } label: {
+                        VStack(spacing: 4) {
+                            Image(systemName: kind.symbol)
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(on.wrappedValue ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
+                                .frame(width: 48, height: 38)
+                                .background(on.wrappedValue ? AnyShapeStyle(kind.tint) : AnyShapeStyle(.quaternary),
+                                            in: Capsule())
+                            Text(kind.shortLabel)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                                .multilineTextAlignment(.center)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .contentShape(Rectangle())
                     }
-                    .frame(maxWidth: .infinity)
-                    .contentShape(Rectangle())
+                    .buttonStyle(.plain)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(kind.settingsLabel)
+                    .accessibilityValue(on.wrappedValue ? "On" : "Off")
+                    .accessibilityAddTraits(on.wrappedValue ? [.isToggle, .isSelected] : .isToggle)
+                    .accessibilityHint("Whether widgets mention these")
                 }
-                .buttonStyle(.plain)
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel(kind.settingsLabel)
-                .accessibilityValue(on.wrappedValue ? "On" : "Off")
-                .accessibilityHint("Whether widgets mention these")
             }
+            .padding(.vertical, 12)
+            .padding(.horizontal, 8)
         }
-        .padding(.vertical, 12)
-        .padding(.horizontal, 8)
-        .background(Self.faint, in: Self.card)
     }
 
     /// Step-free mode and the time marks, each a switch with its icon.
@@ -477,7 +531,6 @@ struct SettingsView: View {
         return VStack(spacing: 0) {
             switchRow("Step-Free Mode", symbol: "figure.roll", tint: .accentColor, isOn: $store.settings.stepFree)
             if store.settings.stepFree && !widgetsWithoutElevators.isEmpty {
-                Divider().padding(.leading, 52)
                 Button {
                     for var widget in widgetsWithoutElevators {
                         widget.selection.elevatorAlerts = true
@@ -491,83 +544,70 @@ struct SettingsView: View {
                         .contentShape(Rectangle())
                 }
             }
-            Divider().padding(.leading, 52)
             // Always on while Differentiate Without Color is
             switchRow("Mark Live Times", symbol: LiveMark.symbol, tint: .liveText,
                       isOn: withoutColor ? .constant(true) : $store.settings.marksLiveTimes)
                 .disabled(withoutColor)
-            Divider().padding(.leading, 52)
             switchRow("Mark Scheduled Times", symbol: ScheduledMark.symbol, tint: .secondary,
                       isOn: $store.settings.marksScheduledTimes)
         }
-        .background(Self.faint, in: Self.card)
     }
 
     /// Share Diagnostics (`Diagnostics`): off until turned on; turned off, reports not yet sent
-    /// are dropped. Then Run Setup Again.
+    /// are dropped.
     private var diagnostics: some View {
+        switchRow("Share Diagnostics", symbol: "stethoscope", tint: .accentColor, isOn: $sharesDiagnostics)
+            .onChange(of: sharesDiagnostics) { _, isOn in
+                if !isOn { Diagnostics.discardPending() }
+            }
+    }
+
+    /// Tools for trying the app out, hidden till unlocked (`PrototypeTool`), each a sheet; then
+    /// Run Setup Again.
+    private var prototyping: some View {
         VStack(spacing: 0) {
-            switchRow("Share Diagnostics", symbol: "stethoscope", tint: .accentColor, isOn: $sharesDiagnostics)
-                .onChange(of: sharesDiagnostics) { _, isOn in
-                    if !isOn { Diagnostics.discardPending() }
+            ForEach(PrototypeTool.allCases) { tool in
+                Button {
+                    prototypeTool = tool
+                } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: tool.symbol)
+                            .foregroundStyle(.tint)
+                            .frame(width: 24)
+                            .accessibilityHidden(true)
+                        Text(tool.title)
+                        Spacer(minLength: 0)
+                        if let status = tool.status {
+                            Text(status).font(.subheadline).foregroundStyle(.orange).lineLimit(1)
+                        }
+                        Image(systemName: "chevron.right")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(.tertiary)
+                            .accessibilityHidden(true)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+                    .padding(.horizontal, Self.margin)
+                    .contentShape(Rectangle())
                 }
-            Divider().padding(.leading, 52)
+                .buttonStyle(.plain)
+                Divider().padding(.leading, 52)
+            }
             rerunSetup
         }
         .background(Self.faint, in: Self.card)
+        .transition(.opacity.combined(with: .move(edge: .bottom)))
+        .sheet(item: $prototypeTool) { PrototypeSheet(tool: $0) }
     }
 
-    /// Where the app's data comes from, each a link to its source. OpenStreetMap's licence (the
-    /// ODbL) needs its credit and a link to its copyright page, for the signals walks cross at.
+    /// Where the app's data comes from, a line under the card, each name a link to its source.
+    /// OpenStreetMap's licence (the ODbL) needs its credit and a link to its copyright page, for
+    /// the signals walks cross at.
     private var dataSources: some View {
-        VStack(spacing: 0) {
-            sourceRow("MTA", symbol: "tram.fill",
-                      url: "https://new.mta.info/developers")
-            Divider().padding(.leading, 52)
-            sourceRow("New York State Open Data", symbol: "stairs", url: "https://data.ny.gov")
-            Divider().padding(.leading, 52)
-            sourceRow("NYC Open Data", symbol: "figure.walk",
-                      url: "https://opendata.cityofnewyork.us")
-            Divider().padding(.leading, 52)
-            sourceRow("OpenStreetMap", symbol: "light.beacon.max.fill",
-                      credit: "© OpenStreetMap contributors",
-                      url: "https://www.openstreetmap.org/copyright")
-            Divider().padding(.leading, 52)
-            sourceRow("Citi Bike", symbol: "bicycle", url: "https://citibikenyc.com/system-data")
-        }
-        .background(Self.faint, in: Self.card)
-    }
-
-    /// A source's row: its icon, name and any credit its licence needs, opening its page.
-    private func sourceRow(_ name: String, symbol: String, credit: String? = nil, url: String) -> some View {
-        Link(destination: URL(string: url)!) {
-            HStack(spacing: 12) {
-                Image(systemName: symbol)
-                    .foregroundStyle(.tint)
-                    .frame(width: 24)
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(name)
-                    if let credit {
-                        Text(credit).font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-                .multilineTextAlignment(.leading)
-                Spacer(minLength: 0)
-                Image(systemName: "arrow.up.right")
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(.tertiary)
-                    .accessibilityHidden(true)
-            }
-            .padding(.horizontal, Self.margin)
-            .padding(.vertical, 10)
-            .frame(minHeight: 52)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isLink)
-        .accessibilityHint("Opens its website")
+        Text("Data from [MTA](https://new.mta.info/developers), [New York State](https://data.ny.gov) and [NYC Open Data](https://opendata.cityofnewyork.us), [Citi Bike](https://citibikenyc.com/system-data) and [© OpenStreetMap contributors](https://www.openstreetmap.org/copyright)")
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 24)
     }
 
     /// Shows first-run setup again (AppTabs puts it up once `firstRunDone` clears). Saved places
@@ -591,28 +631,36 @@ struct SettingsView: View {
         .buttonStyle(.plain)
     }
 
-    /// A 52 pt row with its icon and a switch, as New Trip's From and To rows.
+    /// A 56 pt row with its icon and a switch, as New Trip's From and To rows.
     private func switchRow(_ title: String, detail: String? = nil, symbol: String, tint: Color,
                            isOn: Binding<Bool>) -> some View {
+        switchRow(title, detail: detail, isOn: isOn) {
+            Image(systemName: symbol).foregroundStyle(tint)
+        }
+    }
+
+    /// A switch row with its own icon.
+    private func switchRow(_ title: String, detail: String? = nil, isOn: Binding<Bool>,
+                           @ViewBuilder icon: () -> some View) -> some View {
         Toggle(isOn: isOn) {
             HStack(spacing: 12) {
-                Image(systemName: symbol)
-                    .foregroundStyle(tint)
+                icon()
                     .frame(width: 24)
                     .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(title)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).fontWeight(.medium)
                     if let detail {
                         Text(detail)
-                            .font(.subheadline)
+                            .font(.footnote)
                             .foregroundStyle(.secondary)
+                            .contentTransition(.opacity)
                     }
                 }
             }
         }
         .padding(.horizontal, Self.margin)
-        .padding(.vertical, 6)
-        .frame(minHeight: 52)
+        .padding(.vertical, 8)
+        .frame(minHeight: 56)
     }
 
     /// Whether widgets mention this kind of alert.
@@ -630,6 +678,15 @@ struct SettingsView: View {
 }
 
 extension WalkPreference {
+    /// What it does, under Settings' Walk Safety.
+    fileprivate var note: String {
+        switch self {
+        case .safest: "Uses safer crossings with walk lights, avoids areas with higher crime, and avoids dark streets, even if it makes the route longer."
+        case .balanced: "Prefers safer crossings and well-lit streets when it adds no more than a few minutes."
+        case .fastest: "The fastest way, even if that means wider crossings and darker streets."
+        }
+    }
+
     fileprivate var name: String {
         switch self {
         case .fastest: "Fastest"

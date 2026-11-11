@@ -179,13 +179,13 @@ struct NearbyProvider: AppIntentTimelineProvider {
             let placeName = {
                 await TrainService.value(of: place, by: Date.now.addingTimeInterval(NearbyLocator.nameWait)) ?? nil
             }
-            // The nearest bus place and dock alongside the trains
+            // The nearest bus place and dock alongside the trains: the nearest with the bikes
+            // Settings picks to take, not one out of service or with none of them
             let busPlace = Task { modes.bus ? await NearbyBuses.places(near: location)?.first : nil }
+            let has = CitiBike.Has(taking: settings.bikeKinds)
             let nearestDock = Task { () -> NearbyDock? in
-                guard modes.bike, let docks = await CitiBike.docks() else { return nil }
-                return docks.map { NearbyDock(dock: $0, meters: $0.location.distance(from: location)) }
-                    .filter { $0.meters < 800 }
-                    .min { $0.meters < $1.meters }
+                guard modes.bike, let docks = await CitiBike.docks(near: location, limit: 1, has: has) else { return nil }
+                return docks.first.map { NearbyDock(dock: $0, meters: $0.location.distance(from: location)) }
             }
             let near = modes.subway ? Nearby.stations(near: location, limit: 3) : []
             guard !near.isEmpty || !modes.subway else {
@@ -461,7 +461,9 @@ struct NearbyWidgetView: View {
                 .contentShape(Rectangle())
             })
             .accessibilityLabel("Nearby, \(entry.modes.summary)")
+            .accessibilityRemoveTraits(.isToggle)
             .accessibilityAddTraits(.isButton)
+            .accessibilityHint("Shows times near you")
         } else {
             ZStack(alignment: .topTrailing) {
                 // A toggle that's always off, as iOS flips it on tap before the intent runs: it
@@ -471,6 +473,8 @@ struct NearbyWidgetView: View {
                         board(refreshing: isOn.wrappedValue)
                             .contentShape(Rectangle())
                     })
+                    .accessibilityRemoveTraits(.isToggle)
+                    .accessibilityAddTraits(.isButton)
                     .accessibilityHint("Finds what's near you again, and its times")
                 EndTripButton(large: true, closing: NearbyProvider.boardID)
                     .frame(height: NearbyLayout.header)

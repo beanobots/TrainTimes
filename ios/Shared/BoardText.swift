@@ -9,6 +9,17 @@ enum TimerText {
     }
 }
 
+/// Minutes left over before a train, after the walk to it: on walks and at changes.
+enum Leeway {
+    /// "6 minutes of leeway", "1 minute of leeway", or "No leeway" under a minute. `short`, where
+    /// room is tight: "6 mins of leeway", "1 min of leeway".
+    static func label(_ minutes: Int, short: Bool = false) -> String {
+        guard minutes >= 1 else { return "No leeway" }
+        let unit = short ? (minutes == 1 ? "min" : "mins") : (minutes == 1 ? "minute" : "minutes")
+        return "\(minutes) \(unit) of leeway"
+    }
+}
+
 /// A train's countdown just past 0:00: "At Station" for `seconds` after it's due, then on to the
 /// next train. Trains only: a bus's countdown stays at 0:00.
 enum AtStation {
@@ -86,12 +97,10 @@ enum ClockPattern {
 }
 
 extension Connection {
-    /// For VoiceOver: "2 minute wait", "under a minute's wait" (plus ", quick change" if
-    /// `quick`), "Stay on", or "No train to change to".
-    func spokenWait(quick: Bool) -> String {
+    /// For VoiceOver: "2 minutes of leeway", "no leeway", "Stay on", or "No train to change to".
+    var spokenLeeway: String {
         if staysOn { return "Stay on" }
-        guard let minutes = waitMinutes else { return "No train to change to" }
-        let wait = minutes < 1 ? "under a minute's wait" : "\(minutes) minute wait"
-        return quick ? "\(wait), quick change" : wait
+        guard let minutes = leewayMinutes else { return "No train to change to" }
+        return minutes < 1 ? "no leeway" : Leeway.label(minutes)
     }
 }

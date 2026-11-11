@@ -107,6 +107,7 @@ import Testing
         let east = CLLocation(latitude: 40.7398, longitude: -73.9852)
         let downtown = try #require(StationWays.boarding(train(from: "634", ["6"], .south), from: east))
         #expect(downtown.entrance.side == .south)
+        #expect(downtown.down.spoken?.hasSuffix(" for the Downtown-bound 6 train") == true)
         #expect(downtown.down.detail == "Downtown-bound only")
         let uptown = try #require(StationWays.boarding(train(from: "634", ["6"], .north), from: east))
         #expect(uptown.entrance.side == .north)
@@ -116,12 +117,14 @@ import Testing
     @Test func theWayDownAndUpSayWhere() throws {
         let corner = CLLocation(latitude: 40.67055, longitude: -73.98880)
         let ninth = try #require(StationWays.boarding(train(from: "R33", ["R"], .north), from: corner))
-        #expect(ninth.down.instruction == "Down the stairs at the NW corner of 4 Av & 9 St")
+        #expect(ninth.down.instruction == "Down the stairs, NW corner of 4 Av & 9 St")
+        #expect(ninth.down.spoken == "Down the stairs at the NW corner of 4 Av & 9 St")
         // Its sides are joined, so the stairs aren't just for one
         #expect(ninth.down.detail == nil)
         #expect(ninth.down.turn == .stairsDown)
         let out = try #require(try leaving(train(from: "R16", ["R"], .south), at: "R33", toward: corner))
-        #expect(out.up.instruction == "Up the stairs to the NW corner of 4 Av & 9 St")
+        #expect(out.up.instruction == "Up the stairs, NW corner of 4 Av & 9 St")
+        #expect(out.up.spoken == "Up the stairs to the NW corner of 4 Av & 9 St")
     }
 
     /// Flushing-Main St's escalators by Main St & Roosevelt Av only go in.
@@ -182,5 +185,51 @@ import Testing
                                    following: [], notice: nil, updated: now, walk: walk)
         #expect(state.staleDate == now.addingTimeInterval(300))
         #expect(state.movedOn(at: now.addingTimeInterval(400)).walk == walk)
+    }
+
+    // MARK: Over both streets at a corner
+
+    /// A point `east` and `north` metres from 5th Ave & 17th St's middle.
+    func corner(_ east: Double, _ north: Double) -> Walk.Point {
+        let origin = Walk.Point(lat: 40.7379, lon: -73.9922)
+        return Walk.Point(lat: origin.lat + north / Earth.metresPerDegree,
+                          lon: origin.lon + east / (Earth.metresPerDegree * cos(origin.lat * .pi / 180)))
+    }
+
+    /// Down 5th Ave's east side over W 17th St and then 5th Ave, to W 17th St's south side: one
+    /// instruction before the first crossing, the way over both the step after's.
+    @Test func overTheStreetAheadThenTurningIsSaidAsOne() throws {
+        let path = [corner(8, 100), corner(8, 8), corner(8, -8), corner(-8, -8), corner(-100, -8)]
+        var walk = Walk(steps: [
+            Walk.Step(turn: .right, instruction: "Take a right onto W 17th St", meters: 108, points: Array(path[0...2])),
+            Walk.Step(turn: .arrive, instruction: "The destination is on your left", meters: 108, points: Array(path[2...])),
+        ], seconds: 200, meters: 216, crossings: [[path[1], path[2]], [path[2], path[3]]],
+                        lights: [.signal, .unsignalledWide], streets: ["W 17th St", "5th Ave"])
+        walk.addCrossingSteps()
+        #expect(walk.steps.map(\.instruction) == ["Cross W 17th St, then turn right and continue on W 17th St after crossing 5th Ave",
+                                                  "The destination is on your left"])
+        #expect(walk.steps[0].points.last == path[1])
+        #expect(walk.steps[1].points == Array(path[1...]))
+        #expect(walk.steps[0].light == .unsignalledWide)
+        #expect(abs(walk.steps.map(\.meters).reduce(0, +) - 216) < 0.5)
+        #expect(Walk.street(in: walk.steps[0].instruction) == "W 17th St")
+    }
+
+    /// The other way round, over 5th Ave and then W 17th St: one instruction, the turn the one
+    /// at the far corner.
+    @Test func overTheStreetOnThenAheadIsSaidAsOne() throws {
+        let path = [corner(8, 100), corner(8, 8), corner(-8, 8), corner(-8, -8), corner(-100, -8)]
+        var walk = Walk(steps: [
+            Walk.Step(turn: .right, instruction: "Take a right onto W 17th St", meters: 92, points: Array(path[0...1])),
+            Walk.Step(turn: .arrive, instruction: "The destination is on your left", meters: 124, points: Array(path[1...])),
+        ], seconds: 200, meters: 216, crossings: [[path[1], path[2]], [path[2], path[3]]],
+                        lights: [.leading, .signal], streets: ["5th Ave", "W 17th St"])
+        walk.addCrossingSteps()
+        #expect(walk.steps.map(\.instruction) == ["Cross 5th Ave, then cross W 17th St and turn right onto it",
+                                                  "The destination is on your left"])
+        #expect(walk.steps[0].turn == .right)
+        #expect(walk.steps[0].light == .leading)
+        #expect(walk.steps[1].points == Array(path[1...]))
+        #expect(abs(walk.steps.map(\.meters).reduce(0, +) - 216) < 0.5)
     }
 }

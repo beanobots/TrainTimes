@@ -35,8 +35,8 @@ import Testing
     /// of a train to Brooklyn, and the front.
     @Test func theTrainsPartByAnEntranceFollowsItsWay() throws {
         let first = try platform("L06")
-        let west = try #require(first.entrances.first { $0.streets == ["1 Av", "14 St"] })
-        let east = try #require(first.entrances.first { $0.streets == nil && ($0.along ?? 0) > 60 })
+        let west = try #require(first.entrances.first { $0.streets == ["1 Av", "E 14 St"] })
+        let east = try #require(first.entrances.first { $0.streets?.contains("Av A") == true && ($0.along ?? 0) > 60 })
         #expect(first.part(of: "L", going: .south, by: west) == .back)
         #expect(first.part(of: "L", going: .south, by: east) == .front)
         #expect(first.part(of: "L", going: .north, by: west) == .front)

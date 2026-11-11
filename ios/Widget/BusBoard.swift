@@ -34,9 +34,9 @@ struct BusBoardEntry {
     /// (`routeFetchWait`): whatever's late by `fetchWait` is shown unreachable.
     static func fetch(_ trip: BusTrip, otherWay: BusRide? = nil, now: Date) async -> BusBoardEntry {
         let deadline = Date.now.addingTimeInterval(Self.fetchWait)
-        let stopTimes = Task { await BusTimes.arrivals(line: trip.bus.line, at: trip.bus.from, now: now) }
-        let otherTimes = Task { await otherWay.asyncMap { await BusTimes.arrivals(line: $0.line, at: $0.from, now: now) } }
-        let onwardTimes = Task { await trip.onward.asyncMap { await BusTimes.arrivals(line: $0.line, at: $0.from, now: now) } }
+        let stopTimes = Task { await arrivals(line: trip.bus.line, at: trip.bus.from, now: now) }
+        let otherTimes = Task { await otherWay.asyncMap { await arrivals(line: $0.line, at: $0.from, now: now) } }
+        let onwardTimes = Task { await trip.onward.asyncMap { await arrivals(line: $0.line, at: $0.from, now: now) } }
         // The train's catchable times and when each gets there; nil if the MTA couldn't be reached
         let trainTimes = Task { () -> (trains: [Arrival], times: [String: Date])? in
             guard let train = trip.train else { return ([], [:]) }
@@ -53,9 +53,21 @@ struct BusBoardEntry {
         let onward = await TrainService.value(of: onwardTimes, by: deadline) ?? (trip.onward == nil ? nil : .some(nil))
         let problem = buses == nil || onward == .some(nil) ? "Couldn't reach Bus Time"
             : train == nil ? "Couldn't reach the MTA" : nil
-        return BusBoardEntry(trip: trip, buses: buses?.arrivals ?? [], trains: train?.trains ?? [],
+        return BusBoardEntry(trip: trip, buses: buses ?? [], trains: train?.trains ?? [],
                              trainTimes: train?.times ?? [:], problem: problem, otherWay: otherWay,
-                             otherBuses: other??.arrivals ?? [], onwardBuses: onward??.arrivals ?? [])
+                             otherBuses: (other ?? nil) ?? [], onwardBuses: (onward ?? nil) ?? [])
+    }
+
+    /// `line`'s next buses at `place`: those saved under `BusTimes.reuse` ago (by a reload just
+    /// before, or a tap's), as the server would send them again; else fetched and saved.
+    private static func arrivals(line: String, at place: BusRide.Place, now: Date) async -> [BusArrival]? {
+        let key = "trip bus \(line)@" + String(format: "%.6f,%.6f", place.latitude, place.longitude)
+        if let saved = SharedStore.loadBuses(for: key), saved.fetched.isWithin(BusTimes.reuse, before: .now) {
+            return saved.buses.filter { ($0.time ?? .distantPast) > now }
+        }
+        guard let times = await BusTimes.arrivals(line: line, at: place, now: now) else { return nil }
+        SharedStore.saveBuses(.init(fetched: .now, buses: times.arrivals), for: key)
+        return times.arrivals
     }
 
     /// When the board changes after `now`, sorted: each time what it counts down to goes, and

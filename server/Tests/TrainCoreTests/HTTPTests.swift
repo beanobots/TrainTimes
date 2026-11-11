@@ -71,6 +71,44 @@ func text(_ response: TestResponse) -> String {
         }
     }
 
+    @Test func servesTheMonthsTimetableAndTheBusesWhenBuilt() async throws {
+        let week = TimetableCopy(), month = TimetableCopy(), buses = TimetableCopy()
+        let services = HTTPServices(store: try Store(directory: nil), auth: .secret(secret), appID: testAppID,
+                                    limits: testLimits(), timetable: week, monthTimetable: month, busTimetable: buses)
+        try await Application(router: HTTPRoutes.router(services)).test(.router) { client in
+            try await client.execute(uri: "/bus-timetable", method: .get) { #expect($0.status == .serviceUnavailable) }
+            await week.set(Data("week".utf8), made: .now)
+            let weekETag = try #require(await week.etag)
+            // The month's not built yet: the week's
+            try await client.execute(uri: "/timetable?days=30", method: .get) { response in
+                #expect(response.status == .ok)
+                #expect(text(response) == "week")
+                #expect(response.headers[.eTag] == weekETag)
+            }
+            await month.set(Data("month".utf8), made: .now)
+            try await client.execute(uri: "/timetable?days=30", method: .get) { #expect(text($0) == "month") }
+            // Any other days, or none: the week's
+            try await client.execute(uri: "/timetable?days=7", method: .get) { #expect(text($0) == "week") }
+            try await client.execute(uri: "/timetable", method: .get) { #expect(text($0) == "week") }
+
+            await buses.set(Data("buses".utf8), made: .now)
+            let etag = try #require(await buses.etag)
+            try await client.execute(uri: "/bus-timetable", method: .get) { response in
+                #expect(response.status == .ok)
+                #expect(text(response) == "buses")
+                #expect(response.headers[.eTag] == etag)
+            }
+            try await client.execute(uri: "/bus-timetable", method: .get, headers: [.ifNoneMatch: etag]) { response in
+                #expect(response.status == .notModified)
+                #expect(response.body.readableBytes == 0)
+            }
+            // An older one's: sent again
+            try await client.execute(uri: "/bus-timetable", method: .get, headers: [.ifNoneMatch: "\"old\""]) {
+                #expect($0.status == .ok)
+            }
+        }
+    }
+
     @Test func rejectsMissingWrongAndMalformedSecrets() async throws {
         let wrong: [HTTPFields] = [
             [:],

@@ -11,7 +11,7 @@ import Foundation
 /// street goes from the corner on one side of its arm to the corner on the other.
 struct WalkGraph: Sendable {
     /// The file layout this reads (`make_walk_graph.py`'s `FORMAT`).
-    static let format = "4"
+    static let format = "5"
 
     /// Metres in a degree of latitude, and of longitude at the graph's own latitude: corners
     /// are placed in that plane.
@@ -83,6 +83,24 @@ struct WalkGraph: Sendable {
         static let priority = BlockSafety(rawValue: 1 << 1)
         static let rampAtStart = BlockSafety(rawValue: 1 << 2)
         static let rampAtEnd = BlockSafety(rawValue: 1 << 3)
+    }
+
+    /// The parts of the day crime's counted in, by the hour it started: day 6–18, evening
+    /// 18–23, late 23–6.
+    enum Band: Int, CaseIterable, Hashable, Sendable {
+        case day, evening, late
+
+        init(hour: Int) {
+            self = 6..<18 ~= hour ? .day : 18..<23 ~= hour ? .evening : .late
+        }
+    }
+
+    /// A path at night: away from the street lights and not tagged lit (or tagged unlit), or
+    /// in a park, which closes 1–6.
+    struct Night: OptionSet, Sendable {
+        let rawValue: UInt8
+        static let dark = Night(rawValue: 1 << 0)
+        static let park = Night(rawValue: 1 << 1)
     }
 
     enum CornerKind: UInt8, Sendable {
@@ -158,6 +176,15 @@ struct WalkGraph: Sendable {
     /// A block's `BlockSafety` bits, and a crosswalk's pedestrians hurt, as `nodeCrashes`.
     let blockSafety: [UInt8]
     let blockCrashes: [UInt8]
+    /// Crime against people outdoors over the average of the streets within 400 m, in quarter
+    /// crimes over three years, by part of the day (`Band`): a junction's at its corners, a
+    /// block's per 100 m, a crosswalk's its junction's (`make_walk_graph.py`'s `add_night`).
+    let nodeCrime: [[UInt8]]
+    let blockCrime: [[UInt8]]
+    /// Shops per 100 m along a street, and its sidewalks, at most 255.
+    let blockShops: [UInt8]
+    /// A path's `Night` bits.
+    let blockNight: [UInt8]
     /// Street names as the city has them ("4 AVE", "W 43 ST"), by `blockName`.
     let names: [String]
     /// The blocks running off the loaded tiles.
@@ -185,6 +212,8 @@ struct WalkGraph: Sendable {
         var nodeLat: [Int32] = [], nodeLon: [Int32] = [], nodeLevel: [UInt8] = [], nodeSignal: [UInt8] = []
         var nodePart: [UInt32] = [], nodeSafety: [UInt8] = [], nodeCrashes: [UInt8] = [], cornerRamp: [UInt8] = []
         var blockSafety: [UInt8] = [], blockCrashes: [UInt8] = []
+        var nodeCrime: [[UInt8]] = [[], [], []], blockCrime: [[UInt8]] = [[], [], []]
+        var blockShops: [UInt8] = [], blockNight: [UInt8] = []
         var armStart: [UInt32] = [], armBlock: [UInt32] = [], armEnd: [UInt8] = []
         var cornerDX: [Int16] = [], cornerDY: [Int16] = [], cornerKind: [UInt8] = [], cornerLink: [UInt32] = []
         var blockA: [UInt32] = [], blockB: [UInt32] = [], blockSlotA: [UInt16] = [], blockSlotB: [UInt16] = []
@@ -204,6 +233,7 @@ struct WalkGraph: Sendable {
             nodePart += try array(tile, "node_part")
             nodeSafety += try array(tile, "node_safety")
             nodeCrashes += try array(tile, "node_crashes")
+            for band in Band.allCases { nodeCrime[band.rawValue] += try array(tile, "node_crime_\(band)") }
             var at = armBlock.count
             for count in counts {
                 armStart.append(UInt32(at))
@@ -228,6 +258,8 @@ struct WalkGraph: Sendable {
             let lefts: [UInt8] = try array(tile, "block_offset_left"), rights: [UInt8] = try array(tile, "block_offset_right")
             let crossings: [UInt8] = try array(tile, "block_crossing"), sides: [UInt8] = try array(tile, "block_sides")
             let safeties: [UInt8] = try array(tile, "block_safety"), crashes: [UInt8] = try array(tile, "block_crashes")
+            let crimes: [[UInt8]] = try Band.allCases.map { try array(tile, "block_crime_\($0)") }
+            let shops: [UInt8] = try array(tile, "block_shops"), nights: [UInt8] = try array(tile, "block_night")
             let starts: [UInt32] = try array(tile, "geom_start"), whole: [UInt8] = try array(tile, "block_whole")
             let lats: [Int32] = try array(tile, "geom_lat"), lons: [Int32] = try array(tile, "geom_lon")
             for (i, id) in blockIDs.enumerated() where blockIndex[id] == nil {
@@ -239,6 +271,8 @@ struct WalkGraph: Sendable {
                 blockOffsetLeft.append(lefts[i]); blockOffsetRight.append(rights[i])
                 blockCrossing.append(crossings[i]); blockSides.append(sides[i])
                 blockSafety.append(safeties[i]); blockCrashes.append(crashes[i])
+                for band in Band.allCases { blockCrime[band.rawValue].append(crimes[band.rawValue][i]) }
+                blockShops.append(shops[i]); blockNight.append(nights[i])
                 // Its line: its first point, then each one's change from the one before; only
                 // the points between its ends where both are this tile's junctions
                 geomStart.append(UInt32(geomLat.count))
@@ -293,6 +327,7 @@ struct WalkGraph: Sendable {
         self.blockCut = blockCut
         self.nodeSafety = nodeSafety; self.nodeCrashes = nodeCrashes; self.cornerRamp = cornerRamp
         self.blockSafety = blockSafety; self.blockCrashes = blockCrashes
+        self.nodeCrime = nodeCrime; self.blockCrime = blockCrime; self.blockShops = blockShops; self.blockNight = blockNight
         self.geomStart = geomStart; self.geomLat = geomLat; self.geomLon = geomLon
         let count = (names.keys.max() ?? -1) + 1
         self.names = (0..<count).map { names[$0] ?? "" }
@@ -395,6 +430,13 @@ struct WalkGraph: Sendable {
     func safety(of block: Int) -> BlockSafety { BlockSafety(rawValue: blockSafety[block]) }
     /// Whether a corner has a curb ramp.
     func hasRamp(_ corner: Int) -> Bool { cornerRamp[corner] != 0 }
+    /// Crimes over the neighbours' average at a junction's corners in three years, in `band`.
+    func crime(ofNode node: Int, in band: Band) -> Double { Double(nodeCrime[band.rawValue][node]) / 4 }
+    /// Crimes per 100 m over the neighbours' average along a block in three years, in `band`;
+    /// a crosswalk's at its junction.
+    func crime(of block: Int, in band: Band) -> Double { Double(blockCrime[band.rawValue][block]) / 4 }
+    func shops(of block: Int) -> Double { Double(blockShops[block]) }
+    func night(of block: Int) -> Night { Night(rawValue: blockNight[block]) }
     /// Metres along it.
     func length(of block: Int) -> Double { Double(blockLength[block]) / 10 }
     /// Whether its start (`end` 0) or end (1) is on the ground, not up on a bridge or down a tunnel.

@@ -53,17 +53,33 @@ public enum ServerMain {
                             concurrency: config.pushConcurrency, keyRetention: config.limits.keyRetention,
                             logPushes: config.logPushes, feeds: feeds, buses: buses.map(Poller.liveBuses(from:)),
                             boards: Poller.liveBoards(from: feeds))
-        // Built each day, for the app to fall back on when the MTA can't be reached
+        // Built each day, for the app to fall back on when the MTA can't be reached: the subway's
+        // week, and for phones saving it for offline its month and the buses' week. From the
+        // GTFS zips kept in DATA_DIR/gtfs, downloaded again only once they've changed
         let timetable = TimetableCopy()
-        let maker = TimetableMaker(copy: timetable, directory: config.dataDirectory)
-        // Google's subway routes, for directions shared to the app, with a key
-        let routes = config.googleRoutesKey.map { key in
-            TransitRoutes(key: key, perClientPerDay: config.limits.routesPerIPPerDay, perDay: config.limits.routesPerDay)
-        }
+        let monthTimetable = TimetableCopy()
+        let busTimetable = TimetableCopy()
+        let gtfs = config.dataDirectory.appendingPathComponent("gtfs")
+        let makers = [
+            TimetableMaker(copy: timetable, directory: config.dataDirectory) {
+                try await TimetableBuilder.downloadSubway(now: $0, keptIn: gtfs)
+            },
+            TimetableMaker(copy: monthTimetable, directory: config.dataDirectory, file: "timetable-30.bin",
+                           name: "timetable-30", hour: 4, minute: 30) {
+                try await TimetableBuilder.downloadSubway(days: 30, now: $0, keptIn: gtfs)
+            },
+            TimetableMaker(copy: busTimetable, directory: config.dataDirectory, file: "bus-timetable.bin",
+                           name: "bus timetable", hour: 5) { try await TimetableBuilder.downloadBuses(now: $0, keptIn: gtfs) },
+        ]
+        // Trips planned on the subway's and buses' timetables, for New Trip and directions
+        // shared to the app
+        let routes = TransitRoutes(perClientPerDay: config.limits.routesPerIPPerDay, perDay: config.limits.routesPerDay,
+                                   subway: timetable, buses: busTimetable)
         // Crash and hang reports from phones sharing diagnostics
         let diagnostics = try DiagnosticStore(directory: config.dataDirectory, maxReports: config.limits.maxDiagnostics)
         let services = HTTPServices(store: store, auth: config.auth, appID: config.appID, limits: config.limits,
-                                    feeds: feeds, timetable: timetable, routes: routes, buses: buses,
+                                    feeds: feeds, timetable: timetable, monthTimetable: monthTimetable,
+                                    busTimetable: busTimetable, routes: routes, buses: buses,
                                     diagnostics: diagnostics)
 
         let authDescription: String
@@ -76,7 +92,7 @@ public enum ServerMain {
 
         var logger = Logger(label: "TrainTimesServer")
         logger.logLevel = .warning
-        var background: [any Service] = [poller, maker, DiagnosticPruner(store: diagnostics)]
+        var background: [any Service] = [poller] + makers + [DiagnosticPruner(store: diagnostics)]
         if let logFile = config.logFile { background.append(LogReopener(path: logFile)) }
         let app = Application(
             router: HTTPRoutes.router(services),
@@ -94,8 +110,7 @@ public enum ServerMain {
             + "pushing when a train is over \(Int(config.pushTiming.earlier)) s earlier or \(Int(config.pushTiming.later)) s later, "
             + "a following one \(Int(config.pushTiming.following)) s, refreshing after \(Int(config.pushTiming.refresh)) s, "
             + "auth \(authDescription), "
-            + (routes == nil ? "no Google routes (no GOOGLE_ROUTES_API_KEY)"
-                : "Google routes up to \(config.limits.routesPerIPPerDay) a client and \(config.limits.routesPerDay) a day")
+            + "routes up to \(config.limits.routesPerIPPerDay) a client and \(config.limits.routesPerDay) a day"
             + (buses == nil ? ", no Bus Time (no BUS_TIME_API_KEY)"
                 : ", Bus Time up to \(config.limits.busTimePerIPPerDay) a client and \(config.limits.busTimePerDay) a day"))
         do {

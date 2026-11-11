@@ -13,7 +13,7 @@ struct NextTrainIntent: AppIntent {
         let now = Date.now
         // A bus home stop, with no train asked for: its next buses
         if stop == nil, let bus = SharedStore.defaultBus {
-            let times = await BusTimes.arrivals(lines: bus.allLines, at: bus.place, now: now)
+            let times = await BusTimes.arrivals(lines: bus.allLines, at: bus.place, onlyAt: bus.stop.id, now: now)
             let buses = Array((times?.arrivals ?? []).prefix(3))
             return .result(dialog: "\(Spoken.nextBus(bus, buses: buses, reached: times != nil, now: now))",
                            view: NextBusSnippet(bus: bus, buses: buses))
@@ -46,8 +46,8 @@ struct StartCountdownIntent: LiveActivityIntent {
     func perform() async throws -> some IntentResult & ProvidesDialog {
         // A bus home stop, with no train asked for: its next bus
         if stop == nil, let bus = SharedStore.defaultBus {
-            let due = try await TrainActivityController.start(bus: bus)
-            return .result(dialog: "Counting down to the \(Spoken.clock(due)) \(BusNames.label(bus.line)).")
+            let started = try await TrainActivityController.start(bus: bus)
+            return .result(dialog: "Counting down to the \(Spoken.clock(started.due)) \(BusNames.label(started.line)).")
         }
         let app = Selection.defaultTrain
         let selection = stop?.selection(basedOn: app) ?? app

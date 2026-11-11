@@ -55,7 +55,7 @@ only for rate limits, and logs it only as a keyed hash.
 | `APNS_KEY_ID` | required | its key ID |
 | `APNS_TEAM_ID` | required | `XUU899AG4D` |
 | `APNS_TOPIC` | `dev.dctp.leeway.push-type.liveactivity` | |
-| `DATA_DIR` | required | holds `traintimes.sqlite` |
+| `DATA_DIR` | required | holds `traintimes.sqlite`, the timetables and, in `gtfs/`, the MTA's GTFS zips they're built from |
 | `ATTEST_MODE` | `on` | `off` is for development only, e.g. the simulator; it then needs `API_SECRET` |
 | `ATTEST_ENVIRONMENT` | `production` | `development` (builds from Xcode), `production` (TestFlight, App Store) or `both` |
 | `APP_ID` | `XUU899AG4D.dev.dctp.leeway` | the App ID App Attest checks |
@@ -75,9 +75,8 @@ only for rate limits, and logs it only as a keyed hash.
 | `FEED_RATE_LIMIT_PER_MINUTE` | `240` | per client address, on `GET /feeds` only, which uses none of the limit above |
 | `FEED_RATE_LIMIT_BURST` | `120` | |
 | `MAX_KEYS_PER_IP_PER_DAY` | `10` | keys attested per client address per UTC day; attestations that fail don't count |
-| `GOOGLE_ROUTES_API_KEY` | | Google's Routes API key, for `GET /routes`; without it, that route isn't offered |
-| `ROUTES_PER_IP_PER_DAY` | `30` | `GET /routes` requests to Google per client address per UTC day |
-| `ROUTES_PER_DAY` | `300` | the same for everyone together, to stay in Google's free allowance |
+| `ROUTES_PER_IP_PER_DAY` | `1000` | trips `GET /routes` plans per client address per UTC day |
+| `ROUTES_PER_DAY` | `200000` | the same for everyone together |
 | `BUS_TIME_API_KEY` | | MTA Bus Time's API key ([free](https://register.developer.obanyc.com)), for `GET /buses`; without it, that route isn't offered |
 | `BUS_TIME_PER_IP_PER_DAY` | `2000` | requests to Bus Time per client address per UTC day, for `GET /buses` and `GET /buses/nearby`; what's kept, or already being asked for, doesn't count |
 | `BUS_TIME_PER_DAY` | `100000` | the same for everyone together |
@@ -107,11 +106,16 @@ if this can't be reached or fails. `name` is the feed's name after the MTA's
 `.../mtagtfsfeeds/`, unescaped: `nyct/gtfs-nqrw`, `nyct/gtfs` (the numbered
 lines), `camsys/subway-alerts.json` or `nyct/nyct_ene.json`. No other address
 can be asked for. The answer is the feed's bytes as the MTA sent them. The
-server reads every one of these feeds once each `POLL_SECONDS`, whether or not
-anyone's counting down, and the countdowns use the same copies; a request is
-only ever answered from them, never by reading the MTA. A copy is passed on
-until it's `2 × POLL_SECONDS + 10` seconds old, so one failed read doesn't
-matter; after that, `502` until the MTA can be read again. It needs no
+server reads the train feeds once each `POLL_SECONDS`, the alerts once a
+minute and the elevator outages every 2 minutes (never more often than
+`POLL_SECONDS`), while anyone's counting down a train or a feed's been asked
+for in the last 5 minutes, and the countdowns use the same copies. A request is
+answered from them, but for the first after an idle spell, as at night, when
+the copy's gone: that reads the MTA, once however many ask, and waits up to 4
+seconds for it. A feed read the same as before keeps what was cut and gzipped
+from it. A copy is passed on until it's twice its read interval and 10
+seconds old (`2 × POLL_SECONDS + 10` for a train feed), so one failed read
+doesn't matter; after that, `502` until the MTA can be read again. It needs no
 authentication, as widgets can't sign requests, and has its own rate limit
 (`FEED_RATE_LIMIT_PER_MINUTE`), as one refresh reads several feeds per widget.
 
@@ -120,29 +124,54 @@ authentication, as widgets can't sign requests, and has its own rate limit
 | `200` | the feed |
 | `400` | no `name` |
 | `404` | not a feed the app reads |
-| `502` | no recent copy: just started, or the MTA couldn't be read for a while |
+| `502` | no recent copy: just started, or the MTA couldn't be read for a while (or in 4 seconds, after an idle spell) |
 
-### `GET /routes?from=<lat,lon>&to=<lat,lon>[&at=<time>][&bus=1]`: subway routes, for shared directions
+### `GET /timetable[?days=30]` and `GET /bus-timetable`: the timetables the app falls back on
 
-Only with `GOOGLE_ROUTES_API_KEY`. The app's Share extension sends the start
-and end of directions shared from Apple Maps or Google Maps, whose links say
-nothing of which trains they take, and gets Google's subway routes between
-them, best first: each route's train rides, in order. `at`, in seconds since
+The MTA's timetable, for when its feeds can't be reached, as the app's
+`Timetable` encodes it (zlib-compressed). The server builds each once a day
+from the MTA's GTFS, New York time, and keeps it in `DATA_DIR` for a restart:
+the subway's week at 04:00 (`timetable.bin`), its 30 days at 04:30
+(`timetable-30.bin`, with `days=30`, for phones saving it for offline; the
+week's until it's built) and the buses' week at 05:00 (`bus-timetable.bin`,
+from the six borough and MTA Bus feeds). Each GTFS zip is kept in
+`DATA_DIR/gtfs/` with its `ETag` and asked for with `If-None-Match`, so it's
+downloaded again only once the MTA has changed it (the week's and the month's
+builds share the subway's). A build that fails is tried again an
+hour later, the last one still served. No authentication, like `GET /feeds`.
+Each has an `ETag`: with `If-None-Match` it, `304`.
+
+| Status | Meaning |
+|---|---|
+| `200` | the timetable |
+| `304` | the phone has this one |
+| `503` | not built yet |
+
+### `GET /routes?from=<lat,lon>&to=<lat,lon>[&at=<time>][&bus=1][&subway=0]`: trips between two places
+
+New Trip, and the Share extension for directions shared from Apple Maps or
+Google Maps, whose links say nothing of which trains they take, send a start
+and end and get trips between them, best first: each trip's rides, in order.
+The server plans them itself on the timetables it builds (`TransitPlanner`, by
+RAPTOR): the quickest with one ride and with two, then by subway alone and by
+bus alone, and without each line those ride, walking up to 1.2 km to the first
+stop and from the last (2.4 km where that finds nothing), and changing on foot
+between stops 400 m apart or the MTA's timed transfers. `at`, in seconds since
 1970, is when to leave, from now to a week on; it defaults to now. Both places
 must be in New York City. It needs no authentication, as app extensions can't
-use the app's App Attest key, so Google is asked at most
-`ROUTES_PER_IP_PER_DAY` times a day for each client address and
-`ROUTES_PER_DAY` for everyone. The key stays on the server; where trips go
-isn't logged or stored.
+use the app's App Attest key, so it plans at most `ROUTES_PER_IP_PER_DAY` trips
+a day for each client address and `ROUTES_PER_DAY` for everyone. The same trip
+asked again within 2 minutes (places to about 10 m, leaving in the same minute,
+the same `bus` and `subway`) is answered with what was planned and counts
+toward neither. Where trips go isn't logged or stored.
 
-With `bus=1`, Google is asked for routes by bus as well, and their bus rides
-are kept too. Each ride's `mode` is `subway` or `bus`, and `seconds` and `leaves`,
-where Google gives the times, how long the ride takes and when it leaves (in
-seconds since 1970) by its timetable. Without it, routes with a bus ride are
-left out, as an app that predates them can't match them to stations;
-`GET /buses` gives the next buses for a bus ride. So are routes with a ride the
-app can't show, the LIRR, Metro-North, a ferry or a tram, which would leave a
-gap; the Staten Island Railway (`SIR`) is a `subway` ride.
+With `bus=1`, trips by bus are planned as well, and with `subway=0` by bus
+alone. Each ride's `mode` is `subway` or `bus`, `seconds` how long it takes and
+`leaves` when it leaves (in seconds since 1970) by the timetable, `stops` the
+stops ridden, and a bus ride's `headsign` where it's going. Without `bus=1`,
+only trains: an app that predates buses can't match them to stations.
+`GET /buses` gives the next buses for a bus ride. The Staten Island Railway
+(`SI`) is a `subway` ride.
 
 ```json
 {"routes": [{"legs": [
@@ -157,11 +186,10 @@ gap; the Staten Island Railway (`SIR`) is a `subway` ride.
 
 | Status | Meaning |
 |---|---|
-| `200` | the routes; none if Google found no subway route |
+| `200` | the routes; none if there's no trip |
 | `400` | `from` or `to` missing, malformed or outside the city |
-| `404` | no `GOOGLE_ROUTES_API_KEY` |
 | `429` | over a daily limit, with `Retry-After` until midnight UTC |
-| `502` | Google refused or couldn't be reached |
+| `502` | no timetable built yet for what's asked |
 
 ### `GET /buses?line=<line>&stop=<lat,lon>`: the next buses, for a route's bus ride
 
@@ -176,7 +204,9 @@ authentication, like `GET /routes`, so Bus Time is asked at most
 `BUS_TIME_PER_IP_PER_DAY` times a day for each client address and
 `BUS_TIME_PER_DAY` for everyone. The stop found is kept for a day and its
 buses for 30 seconds, and asking together asks Bus Time once, so phones don't
-add to what Bus Time is asked.
+add to what Bus Time is asked. The line's buses come from the stop's every
+line kept for a countdown or `GET /buses/nearby`, when that has some; Bus Time
+not answering for a stop is kept 30 seconds too.
 
 ```json
 {"stop": {"id": "308209", "name": "4 AV/9 ST", "latitude": 40.6697, "longitude": -73.9877, "direction": "NE"},
@@ -222,6 +252,37 @@ for a day, and each stop's buses for 30 seconds.
 | `404` | no `BUS_TIME_API_KEY` |
 | `429` | over a daily limit, with `Retry-After` until midnight UTC |
 | `502` | Bus Time refused or couldn't be reached |
+
+### `GET /docks`: Citi Bike docks near a place, for Nearby and the widgets
+
+No authentication, like the feeds. Citi Bike's GBFS feed gives the whole city's
+counts as one file of about 1 MB; the server reads it at most once a minute,
+its own `ttl` (where the docks are, once a day), once however many ask, and
+gives each phone only the docks it shows. A read that fails isn't tried again
+for 30 seconds (where the docks are, 10 minutes), the last copy served
+meanwhile:
+
+| Query | |
+|---|---|
+| `at=<lat,lon>` | docks nearest there, nearest first |
+| `limit=<1–10>` | how many, 5 if not given |
+| `within=<meters>` | how far to look, at most 2000, 800 if not given |
+| `has=` | `any` (the default), `service` (taking or leaving bikes), `bike`, `ebike` or `either` (with one to take) |
+| `ids=<a,b>` | instead of `at`: those docks (up to 10), in that order |
+| `places=1` | instead: every dock's place and name, counts all 0; with an `ETag` (`If-None-Match` it, `304`) and `Cache-Control: max-age=3600` |
+
+```json
+{"docks": [
+  {"id": "66db6387-0aca-11e7-82f6-3863bb44ef7c", "name": "4 Av & 9 St", "lat": 40.6700, "lon": -73.9880,
+   "bikes": 3, "eBikes": 2, "docks": 10, "renting": true, "returning": true}
+]}
+```
+
+| Status | |
+|---|---|
+| `304` | `places=1`: the phone has these |
+| `400` | no `at` in the city, or `limit`, `within`, `has` or `ids` out of range |
+| `502` | Citi Bike couldn't be reached |
 
 ### `GET /attest/challenge`
 
@@ -290,11 +351,14 @@ their way, as well as its own train's. One that's no longer a change for
 
 `widgetToken` is optional: the phone's WidgetKit push token
 (`WidgetCenter.shared.currentPushInfo?.token`), hex. With it, each time a push
-gives the countdown other trains or times, the server also sends that phone a
-widgets push (topic `<bundle ID>.push-type.widgets`, from `APNS_TOPIC`), so its
-Next train and Transfers widgets reload and show the same times (they read them
-from `GET /activities/<token>/state`). One APNs no longer knows is forgotten,
-and the countdown's pushes go on.
+gives the countdown another train, its train another minute or liveness, or a
+following train coming, going or moving `PUSH_FOLLOWING_SECONDS` or more, the
+server also sends that phone a widgets push (topic
+`<bundle ID>.push-type.widgets`, from `APNS_TOPIC`), so its Next train and
+Transfers widgets reload and show the same times (they read them from
+`GET /activities/<token>/state`). Not for a move on to the next train between
+passes, which the widgets make themselves. One APNs no longer knows is
+forgotten, and the countdown's pushes go on.
 
 Headers:
 
@@ -434,11 +498,14 @@ holds the app's version, the iOS version, the iPhone model, MetricKit's report
 (call stacks and the like) and the app's last log lines, which never say where
 someone is or is going. Nothing in a report says which phone or key sent it.
 
-`GET /routes` passes a trip's start and end to Google and keeps neither.
+`GET /routes` plans a trip on the server, sending its start and end to no one,
+and keeps the routes found for 2 minutes in memory, under the start and end to
+about 10 m, with nothing about who asked.
 `GET /buses` passes the stop's place and line to MTA Bus Time, and keeps the
 stop it finds for a day and its buses for 30 seconds, with nothing about who
 asked. `GET /buses/nearby` passes Bus Time where you are, rounded to about
-100 m, and keeps the same.
+100 m, and keeps the same. `GET /docks` sends Citi Bike nothing about who
+asked or where.
 
 No IP addresses are stored. Logs show tokens only by their first 8
 characters, and key IDs and IPs only as keyed hashes that change on every
@@ -504,7 +571,7 @@ rotation needs `LOG_FILE` added (the script reminds you). Delete its
   (`ios/Shared/Countdown.swift`), and running countdowns and the database
   hold states made before an update, so a field added to it must be
   optional; update the server before releasing an app that sends one.
-  The subway timetable it downloads itself, but its bus stops' lines
+  The subway and bus timetables it downloads itself, but its bus stops' lines
   (`bus_stop_lines.json`) are built in: after the MTA's new bus schedules,
   make it again (the repo's README, "Where the data comes from") and update.
   Until then, countdowns at stops new in them are refused, each logged as

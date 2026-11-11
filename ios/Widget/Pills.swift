@@ -127,6 +127,7 @@ struct EndTripButton: View {
             }
             .toggleStyle(style)
             .accessibilityLabel(label)
+            .accessibilityRemoveTraits(.isToggle)
             .accessibilityAddTraits(.isButton)
         } else {
             Button(intent: intent) {
@@ -149,7 +150,8 @@ struct BoardButton: View {
     }
 }
 
-/// Starts or stops the countdown; lit while it's running.
+/// Starts or stops the countdown; lit while it's running. On a Saved Route that goes somewhere
+/// (`plansRoute`), opens New Trip on it instead (`RouteTripButton`).
 struct WalkButton<Intent: AppIntent>: View {
     let intent: Intent
     let route: String
@@ -157,14 +159,46 @@ struct WalkButton<Intent: AppIntent>: View {
     let running: Bool
     var fills = false
     var large = false
+    /// `TrainEntry.plansRoute`.
+    var plansRoute: UUID? = nil
+    @Environment(\.stillControls) private var still
+
+    var body: some View {
+        if let plansRoute {
+            RouteTripButton(routeID: plansRoute, route: route, fills: fills, large: large)
+        } else if still {
+            Pill(symbol: Self.symbol, lit: running ? LineStyle.of(route) : nil, fills: fills, large: large)
+        } else {
+            FlashButton(symbol: Self.symbol, intent: intent, route: route,
+                        label: running ? "Stop the countdown" : "Start the countdown", isOn: running, fills: fills,
+                        large: large)
+        }
+    }
+
+    static var symbol: String { "stopwatch" }
+}
+
+/// Opens the app on New Trip, planned from where you are to a Saved Route's end, with only the
+/// route's ways (`PlanRouteTripIntent`).
+struct RouteTripButton: View {
+    let routeID: UUID
+    let route: String
+    var fills = false
+    var large = false
     @Environment(\.stillControls) private var still
 
     var body: some View {
         if still {
-            Pill(symbol: "figure.walk", lit: running ? LineStyle.of(route) : nil, fills: fills, large: large)
+            Pill(symbol: Self.symbol, fills: fills, large: large)
         } else {
-            FlashButton(symbol: "figure.walk", intent: intent, route: route,
-                        label: running ? "Stop the countdown" : "I'm on my way", isOn: running, fills: fills, large: large)
+            Button(intent: PlanRouteTripIntent(routeID: routeID)) {
+                Pill(symbol: Self.symbol, fills: fills, large: large)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Start navigation using this route")
         }
     }
+
+    /// New Trip's own.
+    static let symbol = "point.topleft.down.to.point.bottomright.curvepath.fill"
 }

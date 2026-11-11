@@ -1,0 +1,842 @@
+# How New Yorkers say names that dictionaries get wrong or don't have, read by
+# make_voice_words.py. Phonemes are Kokoro's (misaki's): A eɪ, I aɪ, O oʊ, W aʊ, Y ɔɪ,
+# ᵊ a light schwa; ˈ and ˌ go right before the stressed vowel. "check": said more than
+# one way, or not sure; review.tsv lists those first, for a New Yorker's ear.
+word	phonemes	sure	note
+houston	hˈWstən	sure	Manhattan
+greenwich	ɡɹˈɛnɪʧ	sure	Manhattan
+gouverneur	ɡˌʌvəɹnˈɪɹ	check	Manhattan
+delancey	dəlˈænsi	sure	Manhattan
+chrystie	kɹˈɪsti	sure	Manhattan
+bleecker	blˈikəɹ	sure	Manhattan
+lafayette	lˌæfiˈɛt	sure	Manhattan
+bowery	bˈWəɹi	sure	Manhattan
+cortlandt	kˈɔɹtlənd	sure	Manhattan
+dyckman	dˈIkmən	sure	Manhattan
+isham	ˈIʃəm	sure	Manhattan
+spuyten	spˈItᵊn	sure	Manhattan
+duyvil	dˈIvᵊl	sure	Manhattan
+lenox	lˈɛnəks	sure	Manhattan
+nagle	nˈAɡᵊl	check	Manhattan
+riis	ɹˈis	sure	Manhattan
+koch	kˈɑʧ	sure	Manhattan
+schiff	ʃˈɪf	sure	Manhattan
+macombs	məkˈOmz	sure	Manhattan
+throop	tɹˈup	sure	Brooklyn
+wyckoff	wˈIkɔf	sure	Brooklyn
+gowanus	ɡəwˈɑnəs	sure	Brooklyn
+nostrand	nˈɑstɹənd	sure	Brooklyn
+schermerhorn	skˈɜɹməɹhˌɔɹn	sure	Brooklyn
+dekalb	dikˈæb	sure	Brooklyn
+boerum	bˈOɹəm	sure	Brooklyn
+joralemon	ʤˌɔɹəlˈimən	check	Brooklyn
+pierrepont	pˈɪɹpɑnt	sure	Brooklyn
+remsen	ɹˈɛmsən	sure	Brooklyn
+montague	mˈɑntəɡjˌu	sure	Brooklyn
+cortelyou	kˈɔɹtəljˌu	sure	Brooklyn
+canarsie	kənˈɑɹsi	sure	Brooklyn
+gravesend	ɡɹˈAvzˌɛnd	sure	Brooklyn
+cropsey	kɹˈɑpsi	sure	Brooklyn
+utica	jˈutɪkə	sure	Brooklyn
+schenectady	skənˈɛktədi	sure	Brooklyn
+lefferts	lˈɛfəɹts	sure	Brooklyn
+ditmas	dˈɪtməs	sure	Brooklyn
+gerritsen	ɡˈɛɹɪtsən	sure	Brooklyn
+wallabout	wˈɑləbˌWt	sure	Brooklyn
+kosciuszko	kəʃˈuskO	check	Brooklyn
+schenck	skˈɛŋk	sure	Brooklyn
+siclen	sˈɪklən	sure	Brooklyn
+vandam	vændˈæm	sure	Brooklyn
+bushwick	bˈʊʃwɪk	sure	Brooklyn
+flatbush	flˈætbˌʊʃ	sure	Brooklyn
+ditmars	dˈɪtmɑɹz	sure	Queens
+sutphin	sˈʌtfɪn	sure	Queens
+wyck	wˈIk	sure	Queens
+kissena	kɪsˈinə	sure	Queens
+maspeth	mˈæspəθ	sure	Queens
+rego	ɹˈiɡO	sure	Queens
+arverne	ˈɑɹvəɹn	sure	Queens
+neponsit	nəpˈɑnsɪt	sure	Queens
+laguardia	ləɡwˈɑɹdiə	sure	Queens
+steinway	stˈInwˌA	sure	Queens
+corona	kəɹˈOnə	sure	Queens
+elmhurst	ˈɛlmhˌɜɹst	sure	Queens
+pulaski	pəlˈæski	sure	Queens
+throgs	θɹˈɑɡz	sure	Queens
+throggs	θɹˈɑɡz	sure	Queens
+mosholu	məʃˈOlu	sure	The Bronx
+pelham	pˈɛləm	sure	The Bronx
+bruckner	bɹˈʌknəɹ	sure	The Bronx
+morrisania	mˌɔɹɪsˈAniə	sure	The Bronx
+tremont	tɹˈimɑnt	sure	The Bronx
+bartow	bˈɑɹtO	sure	The Bronx
+deegan	dˈiɡən	sure	The Bronx
+willis	wˈɪlɪs	sure	The Bronx
+goethals	ɡˈOθəlz	sure	Staten Island and the bridges out
+verrazzano	vˌɛɹəzˈɑnO	sure	Staten Island and the bridges out
+verrazano	vˌɛɹəzˈɑnO	sure	Staten Island and the bridges out
+stuy	stˈI	sure	Brooklyn
+bayonne	bˌAˈOn	sure	Staten Island and the bridges out
+huguenot	hjˈuɡənˌɑt	sure	Staten Island and the bridges out
+kull	kˈʌl	sure	Staten Island and the bridges out
+hylan	hˈIlən	sure	Staten Island and the bridges out
+nassau	nˈæsɔ	sure	Staten Island and the bridges out
+abc	ˌAbˌiˈsi	sure	abbreviation: A B C, spelled out
+abib	əbˈib	check	Abib Newborn; ah-BEEB
+abule	əbˈul	check	unclear; ah-BOOL
+adalbert	ˈædəlbəɹt	sure	AD-al-bert
+addisleigh	ˈædɪslˌi	sure	Addisleigh Park, ADD-is-lee
+adrianne	ˌAdɹiˈæn	check	given name; also AY-dree-an
+agrig	ˈæɡɹɪɡ	check	unknown origin
+alafia	ˌæləfˈiə	check	Yoruba-derived; also uh-LAH-fee-uh
+alagantic	ˌæləɡˈæntɪk	check	coined name
+albermarle	ˈælbəmˌɑɹl	sure	typo: Albemarle
+albourne	ˈælbɔɹn	check	AL-borne
+alecia	əlˈiʃə	check	also uh-LEE-see-uh
+algonkin	ælɡˈɑŋkɪn	sure	al-GONK-in
+almont	ˈælmɑnt	check	AL-mont assumed
+alst	ˈælst	sure	Van Alst
+alstyne	ˈɔlstIn	sure	ALL-stine
+alvine	ælvˈin	check	al-VEEN
+alwick	ˈælwɪk	sure	plain reading
+amaron	ˈæməɹˌɑn	check	surname; stress uncertain
+amedola	ˌæmədˈOlə	check	Italian; maybe a-MEN-do-la (Amendola)
+amersfort	ˈæməɹzfˌɔɹt	sure	AM-erz-fort
+amstel	ˈæmstəl	sure	as the Dutch river
+amstrdm	ˈæmstəɹdˌæm	sure	abbreviation: Amsterdam
+andrease	ændɹˈiəs	check	surname; also an-DREES
+androvette	ˌændɹəvˈɛt	check	an-dro-VET
+anjali	ˈʌnʤəli	check	Hindi name UN-juh-lee
+ankener	ˈæŋkənəɹ	check	German surname
+antin	ˈæntɪn	sure	AN-tin
+antonetty	ˌæntənˈɛti	check	Evelina Antonetty, Puerto Rican activist
+anx	ˈænɛks	sure	abbreviation: Annex
+ap	əpɹˈOʧ	sure	abbreviation: approach
+arcilla	ɑɹsˈijə	check	Spanish; ar-SEE-ya, also ar-SIL-a
+arielle	ˌɛɹiˈɛl	sure	air-ee-EL
+arion	əɹˈIən	check	uh-RYE-un; also AIR-ee-un
+arleigh	ˈɑɹli	sure	AR-lee
+arlngton	ˈɑɹlɪŋtən	sure	abbreviation: Arlington
+arlo	ˈɑɹlO	sure	AR-lo
+arnprior	ɑɹnpɹˈIəɹ	check	Scottish/Ontario place arn-PRY-er
+arrochar	ˈɛɹəkˌɑɹ	check	Staten Island; AIR-uh-car, some say AIR-oh-kar
+ascan	ˈæskən	sure	AS-kan
+ascenzi	əʃˈɛnzi	check	Italian; a-SHEN-zee, also a-SEN-zee
+aske	ˈæsk	check	like ask; could be ASK-ee
+asser	ˈæsəɹ	sure	AS-er (Asser Levy)
+assoc	əsˌOsiˈAʃən	sure	abbreviation: Association
+atmore	ˈætmˌɔɹ	sure	plain English
+attucks	ˈætəks	sure	Crispus Attucks
+audley	ˈɔdli	sure	AWD-lee
+augustina	ˌɔɡəstˈinə	sure	aw-guh-STEE-nuh
+aurelia	ɔɹˈiliə	sure	or-EE-lee-a
+ausable	əsˈAbəl	sure	as Ausable River NY, uh-SAY-bul
+aviva	əvˈivə	sure	uh-VEE-vuh
+aymar	ˈAmɑɹ	check	AY-mar assumed
+badame	bədˈɑmi	check	unclear; ba-DAH-mee
+banneker	bˈænəkəɹ	sure	Benjamin Banneker
+banyer	bˈænjəɹ	check	BAN-yer assumed
+barbey	bˈɑɹbi	sure	BAR-bee
+baretto	bəɹˈɛtO	sure	buh-RET-oh
+bartholdi	bɑɹtˈOldi	sure	bar-TOLE-dee; th = t
+bdwy	bɹˈɔdwˌA	sure	abbreviation: Broadway
+beadel	bˈidəl	check	BEE-dul; also BED-ul
+bealin	bˈilɪn	check	BEE-lin
+bedofrd	bˈɛdfəɹd	sure	typo: Bedford
+behagen	bəhˈAɡən	check	unclear; be-HAY-gen
+beirbower	bˈɪɹbˌWəɹ	check	German surname BEER-bow-er
+bellaire	bɛlˈɛɹ	sure	bel-AIR
+belmar	bˈɛlmɑɹ	sure	BEL-mar
+bennerson	bˈɛnəɹsən	sure	surname, plain reading
+bensnhrst	bˈɛnsənhˌɜɹst	sure	abbreviation: Bensonhurst
+berkwit	bˈɜɹkwɪt	sure	plain reading
+berriman	bˈɛɹɪmən	sure	BER-i-man
+berwin	bˈɜɹwɪn	sure	plain reading
+bessemund	bˈɛsəmənd	check	surname; plain reading
+betances	bɛtˈɑnsɛs	sure	beh-TAHN-ses (Ramon Betances)
+bildersee	bˈɪldəɹsˌi	check	Dutch-style surname; guess BIL-der-see
+billiou	bˈɪlju	check	Huguenot surname (Billiou-Stillwell house); BILL-yoo
+billop	bˈɪləp	sure	BILL-up
+binnen	bˈɪnən	sure	Dutch binnen, BIN-en
+bionia	bIˈOniə	check	by-OH-nee-a
+birmington	bˈɜɹmɪŋtən	sure	plain reading
+blmingdale	blˈumɪŋdˌAl	sure	abbreviation: Bloomingdale
+blondel	blɑndˈɛl	check	Blondell Ave, Bronx; also said BLON-dl
+boelsen	bˈOlsən	check	Dutch/German; BOLE-sen assumed
+bojangles	bOʤˈæŋɡəlz	sure	Bill "Bojangles" Robinson
+bokee	bˈOki	check	BO-kee assumed
+borincano	bˌɔɹinkˈɑnO	sure	Spanish, bo-reen-KAH-no
+borinquen	bˌOɹiŋkˈɛn	sure	bo-reen-KEN
+borkel	bˈɔɹkəl	sure	plain reading
+boscobel	bˈɑskəbˌɛl	sure	BOS-ko-bel
+boscombe	bˈɑskəm	sure	BOS-kum
+bovanizer	bˈOvənˌIzəɹ	check	surname; stress uncertain
+brackley	bɹˈækli	sure	plain English surname
+braisted	bɹˈAstɪd	sure	BRAY-sted
+breeney	bɹˈini	sure	BREE-nee
+brehaut	bɹəhˈO	check	French bruh-HOE; maybe BREE-hout
+breukelen	bɹˈɜɹkələn	check	Dutch original of Brooklyn; also BROO-kə-lən
+brevoort	bɹˈɛvɔɹt	check	BREV-ort; also BREV-ert
+brielle	bɹiˈɛl	sure	bree-EL
+brienna	bɹiˈɛnə	sure	bree-EN-uh
+briesen	bɹˈizən	check	German surname Von Briesen; BREE-zen
+brilliante	bɹijˈɑntA	check	typo: brillante (Spanish), bree-YAHN-teh
+brinckerhoff	bɹˈɪŋkəɹhˌɔf	sure	Dutch surname, BRINK-er-hoff
+brinsmade	bɹˈɪnzmˌAd	sure	BRINZ-made
+brisas	bɹˈisɑs	sure	Spanish, BREE-sahs
+brocher	bɹˈOkəɹ	check	surname; could be BRO-sher
+bu	bˌi jˈu	check	unclear abbreviation in "180-BU" bus direction; spoken as letters
+buhre	bˈuɹi	check	BOO-ree; also BYOO-er
+bulwer	bˈʊlwəɹ	sure	BULL-wer
+bunnecke	bˈʌnɪk	check	German surname; could be BUN-eh-kee
+calvanico	kˌælvənˈikO	check	Italian surname
+calyer	kˈæljəɹ	sure	CAL-yer
+camberleng	kˈæmbəɹlˌɛŋ	check	Bronx street; guess CAM-ber-leng
+cambreleng	kˈæmbɹəlˌɛŋ	check	CAM-bruh-leng
+campiz	kˈɑmpis	check	Puerto Rican surname, KAHM-pees
+canda	kˈændə	check	CAN-duh assumed
+candon	kˈændən	sure	CAN-dun
+caney	kˈAni	sure	KAY-nee
+cantius	kˈænʃəs	check	St John Cantius; also CAN-tee-us
+capadanno	kˌæpədˈænO	sure	Capodanno Blvd, Staten Island, cap-uh-DAN-oh
+capellan	kəpˈɛlən	check	kuh-PEL-an assumed
+capodanno	kˌæpədˈænO	check	cap-oh-DAN-oh on Staten Island; Italian kah-po-DAHN-no
+capsouto	kæpsˈutO	check	Capsouto Freres; cap-SOO-toe
+carnesecca	kˌɑɹnəsˈɛkə	sure	Lou Carnesecca, car-nuh-SEK-uh
+caroll	kˈɛɹəl	check	likely typo: Carroll; said like Carroll
+carreau	kəɹˈO	check	French; kuh-ROH
+carthan	kˈɑɹθən	sure	CAR-thun
+cartigan	kˈɑɹtɪɡən	sure	plain reading
+cattaraugus	kˌætəɹˈɔɡəs	sure	NY county, cat-uh-RAW-gus
+causa	kˈWsə	sure	Spanish, COW-sah
+cebra	sˈibɹə	check	SEE-bra; maybe SEB-ra
+chahales	ʃəhˈælɪs	check	Greek surname; unsure of local reading
+chappetto	ʃəpˈɛtO	check	Italian; Americanized shuh-PET-oh, also kuh-PET-oh
+charlecote	ʃˈɑɹlkˌOt	sure	SHARL-coat
+chesbrough	ʧˈɛzbɹO	check	CHEZ-bro; also CHEZ-bruh
+chiarantano	kˌɛɹəntˈɑnO	check	Italian, kyah-ran-TAH-no
+chicot	ʃˈikO	check	French; SHEE-ko, could be CHIK-ot
+chlsea	ʧˈɛlsi	sure	abbreviation: Chelsea
+ciarcia	ʧˈɑɹʧə	check	Italian CHAR-cha
+cimi	sˈimi	check	Italian surname; SEE-mee or CHEE-mee
+cincinnatus	sˌɪnsɪnˈætəs	sure	sin-sin-AT-us
+cip	kɹˈɔs ˈIlənd pˈɑɹkwˌA	sure	abbreviation: Cross Island Parkway
+claradon	klˈɛɹədən	check	CLAIR-uh-dun assumed
+cleef	klˈif	sure	Van CLEEF
+cletus	klˈitəs	sure	CLEE-tus
+cloistrs	klˈYstəɹz	sure	abbreviation: Cloisters
+cmty	kəmjˈunəti	sure	abbreviation: Community
+cncrse	kˈɑnkɔɹs	sure	abbreviation: Concourse
+cobeck	kˈObˌɛk	check	KO-bek assumed
+codwise	kˈɑdwˌIz	sure	COD-wise
+coenties	kwˈɛntiz	check	Dutch; KWEN-teez, also co-EN-teez
+cohancy	kOhˈænsi	check	co-HAN-see
+colfax	kˈOlfæks	sure	COLE-fax
+colita	kOlˈitə	sure	ko-LEE-tuh
+communipaw	kəmjˈunɪpˌɔ	sure	Jersey City, kuh-MYOO-nih-paw
+conccourse	kˈɑnkɔɹs	sure	typo: Concourse
+conselyea	kənsˈɛljə	check	con-SELL-ya; also con-sel-YAY
+conyingham	kˈʌnɪŋəm	check	CUN-ing-um like Cunningham; guess garbled
+coonley	kˈunli	sure	KOON-lee
+copperflagg	kˈɑpəɹflˌæɡ	sure	copper + flag
+corlear	kˈɔɹlɪɹ	check	COR-leer (Van Corlear)
+corlears	kˈɔɹlɪɹz	check	COR-leers Hook
+cornaga	kɔɹnˈæɡə	check	cor-NAG-a; maybe cor-NAH-ga
+coryllos	kəɹˈɪlOs	check	Greek surname
+coryn	kˈɔɹɪn	check	KOR-in assumed
+courtlandt	kˈɔɹtlənd	sure	CORT-land
+coverly	kˈʌvəɹli	check	CUV-er-lee; maybe COVE-er-lee
+cracken	kɹˈækən	sure	part of Mac Cracken (MacCracken)
+creston	kɹˈɛstən	sure	CRES-tun
+crispi	kɹˈɪspi	sure	KRIS-pee
+crispus	kɹˈɪspəs	sure	Crispus Attucks
+croes	kɹˈOz	check	CROZE; possibly CROW-es
+crommelin	kɹˈʌmlɪn	check	Huguenot name, often KRUM-lin; also KROM-uh-lin
+cronston	kɹˈɑnstən	sure	CRON-stun
+crosstwn	kɹˈɔstˌWn	sure	abbreviation: Crosstown
+crotona	kɹətˈOnə	sure	cruh-TOE-nuh
+crowninshield	kɹˈWnɪnʃˌild	sure	CROWN-in-shield
+crse	kˈɔɹs	sure	abbreviation: Course
+cubberly	kˈʌbəɹli	sure	CUB-er-lee
+cuevita	kwɛvˈitə	sure	Spanish, kweh-VEE-tah
+cuite	kwˈit	check	Thomas Cuite; unsure, KWEET or KYOOT
+culloden	kəlˈɑdən	sure	kuh-LOD-en
+culotta	kulˈɑtə	check	Italian koo-LOT-uh
+curzon	kˈɜɹzən	sure	KUR-zun
+cuvillier	kjuvˈɪljəɹ	check	French surname; kyoo-VIL-yer guess
+d'auria	dˈɔɹiə	sure	DOR-ee-a
+d'emic	dˈɛmɪk	check	surname; DEM-ick or DEE-mick
+d'onofrio	dənˈOfɹiO	check	Italian, deh-NO-free-oh; also dee-ON-oh-free-oh
+dalny	dˈɔlni	check	Russian place Dalny; DAWL-nee
+damrosch	dˈæmɹɑʃ	sure	Damrosch Park, DAM-rosh
+dayna	dˈAnə	sure	DAY-nuh
+deauville	dˈOvɪl	sure	DOH-vil
+deisius	dˈIsiəs	check	DYE-see-us
+dekoven	dəkˈOvən	sure	De Koven, duh-KO-ven
+delencey	dəlˈænsi	sure	typo: Delancey
+delevan	dˈɛləvən	sure	DEL-uh-van
+delury	dəlˈʊɹi	check	John DeLury; deh-LURE-ee
+delwit	dˈɛlwɪt	sure	DEL-wit
+demutiis	dəmˈuʃis	check	Italian De Mutiis; unsure
+dept	dəpˈɑɹtmənt	sure	abbreviation: Department
+desalvio	dəsˈælviO	sure	deh-SAL-vee-oh
+desarc	dəsˈɑɹk	check	des-ARK assumed
+desbrosses	dˈɛsbɹɑsɪz	check	Manhattan; DES-bross-iz, some say deh-BROSS
+deseree	dˈɛzəɹˌA	check	Staten Island street; DEZ-er-ay or DEZ-er-ee
+deserre	dəzˈɛɹ	check	French; duh-ZAIR
+detmold	dˈɛtmOld	sure	DET-mold
+devanney	dəvˈæni	sure	Irish surname, deh-VAN-ee
+dierauf	dˈɪɹˌWf	check	German DEER-owf
+digney	dˈɪɡni	sure	DIG-nee
+dimattina	ˌdimətˈinə	sure	DiMattina, dee-muh-TEE-nuh
+dintree	dˈɪntɹi	sure	DIN-tree
+discala	dɪskˈɑlə	sure	DiScala, dis-KAH-luh
+disosway	dˈɪsəzwˌA	check	Staten Island family; DIS-oz-way
+ditson	dˈɪtsən	sure	DIT-sun
+dohlen	dˈOlən	check	German surname, DOH-len
+dolgon	dˈɑlɡən	check	surname, DOLL-gun
+dongan	dˈɑŋɡən	sure	DONG-gan
+donnellon	dˈɑnəlɪn	check	DON-uh-lin assumed
+donough	dˈʌnə	check	part of Mac Donough; mac-DUN-uh, some say mac-DON-oh
+doone	dˈun	sure	DOON
+dorit	dɔɹˈit	check	Hebrew name do-REET; also DOR-it
+doxsey	dˈɑksi	sure	DOCK-see
+doyers	dˈYəɹz	sure	DOY-erz
+dreiser	dɹˈIzəɹ	sure	DRY-zer (Theodore Dreiser)
+drumgoole	dɹˈʌmɡul	sure	DRUM-gool
+drvwy	dɹˈIvwˌA	sure	abbreviation: Driveway
+drwy	dɹˈIvwˌA	sure	abbreviation: Driveway
+dubons	dˈubɑnz	check	DOO-bonz assumed
+dubos	dubˈO	check	René Dubos, French doo-BOH; locals may say DOO-boss
+dulancey	dulˈænsi	check	doo-LAN-see assumed
+dumfries	dʌmfɹˈis	sure	Scottish dum-FREES
+duncomb	dˈʌŋkəm	sure	DUNK-um
+durgess	dˈɜɹʤɪs	check	DUR-jis; could be hard g
+dustan	dˈʌstən	sure	DUS-tun
+duzer	dˈuzəɹ	sure	Van DOO-zer
+dwy	dɹˈIvwˌA	sure	abbreviation: Driveway
+dyre	dˈIəɹ	sure	like "dire"
+eae	ˈIə	check	odd given name; possibly typo; unknown reading
+eastchstr	ˈisʧˌɛstəɹ	sure	abbreviation: Eastchester
+easttremont	ˈist tɹˈimɑnt	sure	typo: East Tremont (Bronx TREE-mont)
+ebbitts	ˈɛbɪts	sure	EB-its
+edenwald	ˈidənwˌɔld	sure	EE-den-wald
+ederle	ˈAdəɹli	sure	AY-der-lee (Gertrude Ederle)
+edmore	ˈɛdmˌɔɹ	sure	plain reading
+edstone	ˈɛdstˌOn	sure	plain reading
+egmont	ˈɛɡmɑnt	sure	EG-mont
+egrit	ˈiɡɹɪt	sure	typo: Egret
+eibs	ˈIbz	check	Eibs Pond, Staten Island; EYEBZ guess
+elbertson	ˈɛlbəɹtsən	sure	EL-bert-son
+eldert	ˈɛldəɹt	sure	EL-dert
+elderts	ˈɛldəɹts	sure	EL-derts
+elmbank	ˈɛlmbˌæŋk	sure	elm + bank
+elmjack	ˈɛlmʤˌæk	sure	Elmhurst/Jackson blend
+elmont	ˈɛlmɑnt	sure	EL-mont
+elmtree	ˈɛlmtɹˌi	sure	ELM-tree
+eltinge	ˈɛltɪnʤ	sure	EL-tinj
+eltngvlle	ˈɛltɪŋvˌɪl	sure	abbreviation: Eltingville
+eltvlle	ˈɛltɪŋvˌɪl	sure	abbreviation: Eltingville
+emeric	ˈɛməɹɪk	sure	EM-er-ik
+emt	ˌiˌɛmtˈi	sure	abbreviation: E M T letters
+endale	ˈɛndˌAl	check	Endale Arch, Prospect Park; EN-dale
+endor	ˈɛndˌɔɹ	sure	EN-dor
+epwy	ɪkspɹˈɛswˌA	sure	abbreviation: Expressway
+erben	ˈɜɹbən	sure	UR-ben
+esmac	ˈɛzmæk	check	EZ-mack
+everit	ˈɛvəɹɪt	sure	like Everett
+exwpy	ɪkspɹˈɛswˌA	sure	abbreviation: Expressway (misspelled)
+eyck	ˈIk	sure	Ten Eyck = ten IKE
+eylandt	ˈIlənd	check	Dutch; EYE-land
+eylendt	ˈAlənt	check	Staten Island street; guess EYE-lent or AY-lent
+farraday	fˈɛɹədˌA	sure	like Faraday
+fayann	fˌAˈæn	check	fay-AN assumed
+fdny	ˌɛfˌdiˌɛnwˈI	sure	abbreviation: F D N Y letters
+feldmeyers	fˈɛldmIəɹz	sure	FELD-my-erz
+ficarelle	fˌɪkəɹˈɛl	check	Italian-derived; fik-uh-REL
+figurea	fɪɡjəɹˈiə	check	fig-yur-EE-a; maybe fi-GUR-ee-a
+filipe	fəlˈipA	check	Portuguese fih-LEE-pay; also fih-LEEP
+fillat	fˈɪlət	check	FIL-ut assumed
+fingal	fˈɪŋɡəl	sure	FING-gul
+flamboyan	flˌɑmbOjˈɑn	sure	Spanish flamboyán
+flatlnds	flˈætləndz	sure	abbreviation: Flatlands
+foch	fˈɔʃ	check	French marshal FOSH; some Queens locals say FOCK/FOTCH
+folin	fˈOlɪn	check	FO-lin assumed
+forbell	fˈɔɹbɛl	check	FOR-bell; maybe for-BELL
+forley	fˈɔɹli	sure	FOR-lee
+forten	fˈɔɹtᵊn	sure	James Forten
+foxholm	fˈɑkshˌOm	check	holm like home; also FOX-holm
+francid	fɹˈænsɪs	sure	typo: Francis
+frela	fɹˈɛlə	check	garden name; FRAY-lah or FREL-ah
+fteley	ftˈɛli	check	Swiss name; F-TEL-ee, some say TEL-ee
+gadell	ɡədˈɛl	check	guh-DEL assumed
+gadsen	ɡˈædzən	sure	like Gadsden
+galanaugh	ɡˈælənˌɔ	check	Irish surname GAL-uh-naw
+galapo	ɡəlˈɑpO	check	surname, guess guh-LAH-po
+galvaston	ɡˈælvəstən	sure	like Galveston
+gansevoort	ɡˈænsəvˌɔɹt	sure	GAN-suh-vort
+garlinge	ɡˈɑɹlɪnʤ	check	surname; GAR-linj guess
+gaton	ɡˈAtən	check	GAY-tun; also guh-TONE
+gaudens	ɡˈɔdᵊnz	sure	Saint-Gaudens, GAW-dnz
+gauldy	ɡˈɔldi	check	GAWL-dee assumed
+geigerich	ɡˈIɡəɹɪk	check	German surname; GUY-ger-ick
+geldner	ɡˈɛldnəɹ	sure	GELD-ner
+gervil	ɡˈɜɹvɪl	check	GUR-vil; could be soft g
+gethsemane	ɡɛθsˈɛməni	sure	biblical, geth-SEM-uh-nee
+gianna	ʤiˈɑnə	sure	jee-AH-nuh
+giordan	ʤˈɔɹdən	check	Italian JOR-dun
+gleane	ɡlˈin	sure	GLEEN
+glenz	ɡlˈɛnz	sure	GLENZ
+granja	ɡɹˈɑnhɑ	sure	Spanish, GRAHN-hah
+grimsby	ɡɹˈɪmzbi	sure	GRIMZ-bee
+grymes	ɡɹˈImz	sure	GRIMES
+gte	ɡˈAt	sure	abbreviation: Gate (Sea Gate)
+guerlain	ɡɛɹlˈAn	check	French gair-LANE; maybe GER-lin
+guinzburg	ɡˈɪnzbəɹɡ	sure	GINZ-burg
+gurdon	ɡˈɜɹdən	sure	GUR-dun
+gurino	ɡəɹˈinO	check	Italian guh-REE-no
+guyan	ɡˈIən	check	Queens street; GUY-an guess
+gwenn	ɡwˈɛn	sure	GWEN
+haffen	hˈæfən	sure	Bronx surname, HAFF-en
+hafstrom	hˈæfstɹəm	sure	HAF-strum
+hallister	hˈælɪstəɹ	sure	HAL-is-ter
+hammarskjold	hˈæməɹʃˌOld	sure	Dag Hammarskjöld, HAM-er-shold
+hampden	hˈæmdən	sure	HAM-den
+hargold	hˈɑɹɡˌOld	sure	HAR-gold
+haughwout	hˈWət	check	Staten Island HOW-it; some say HOG-wout
+havemeyer	hˈævəmˌIəɹ	sure	HAV-uh-my-er
+hawtree	hˈɔtɹi	sure	HAW-tree
+hegney	hˈɛɡni	sure	HEG-nee
+heisser	hˈIsəɹ	sure	German surname, HIGH-ser
+herban	ˈɜɹbən	check	pun on urban/herb; may be said HER-ban
+herkimer	hˈɜɹkɪməɹ	sure	HER-kim-er
+hermany	hˈɜɹməni	sure	HER-ma-nee
+herzl	hˈɜɹtsəl	sure	HERT-sul (Theodor Herzl)
+heusden	hjˈuzdən	check	Dutch town; HYOOZ-den assumed
+heyson	hˈAsən	check	HAY-sun assumed
+hillmeyer	hˈɪlmIəɹ	sure	HILL-my-er
+himrod	hˈɪmɹɑd	sure	HIM-rod
+hoda	hˈOdə	sure	HO-duh
+hoesen	hˈusən	check	part of Van Hoesen; HOO-sen, also HO-sen
+holbernt	hˈOlbəɹnt	sure	HOLE-bernt
+holsman	hˈOlzmən	sure	HOLZ-man
+holzka	hˈOlskə	check	surname, HOLE-skuh
+hoparkinson	hˈɑpkɪnsən	check	typo: Hopkinson (Brooklyn avenue) likely
+hor	hˈɔɹɪs	sure	abbreviation: Horace (Horace Harding Expwy)
+hosmer	hˈɑzməɹ	sure	HOZ-mer
+hostos	hˈɑstOs	check	HOS-tohs locally; Spanish OHS-tohs
+hovenden	hˈʌvəndən	check	HUV-en-den; also HOV-en-den
+humacao	ˌuməkˈW	sure	Puerto Rico town, oo-mah-KOW
+hunterfly	hˈʌntəɹflˌI	sure	Hunterfly Road
+idlease	ˈIdlˌis	sure	idle + ease
+ifo	ˈɪn fɹˈʌnt ʌv	check	abbreviation: in front of
+igneri	ɪɡnˈɛɹi	check	Italian surname, ig-NAIR-ee
+igros	ˈiɡɹOs	check	EE-grohs assumed
+ikefugi	ˌikəfˈuʤi	check	Japanese surname (Ikefuji?); unsure
+ilion	ˈɪliən	sure	ILL-ee-un
+ilyse	ɪlˈis	check	ih-LEESE; also ih-LICE
+ilyssa	ɪlˈɪsə	sure	ih-LISS-uh
+imani	imˈɑni	sure	Swahili, ee-MAH-nee
+imba	ˈɪmbə	check	likely IMBA trail group acronym; said IM-buh
+indale	ˈɪndˌAl	sure	IN-dale
+indep	ˌɪndəpˈɛndəns	sure	abbreviation: Independence (Fort Independence St)
+int	ˈɪntəɹʧˌAnʤ	sure	abbreviation: Interchange
+isabahlia	ˌɪzəbˈɑliə	check	coined garden name; guess
+isernia	ɪsˈɜɹniə	check	Italian town; ih-SER-nee-a, Italian ee-ZER-nya
+islin	ˈIslɪn	check	EYE-slin; could be like Iselin
+ismay	ˈɪzmA	sure	IZ-may
+isora	ɪsˈɔɹə	check	ih-SOR-uh assumed
+jaydee	ʤˈAdˌi	sure	JAY-dee
+jerzee	ʤˈɜɹzi	sure	Jersey
+jes	ʤˈɛs	check	dialect "jes'" = just; maybe a name
+jojo	ʤˈOʤˌO	sure	JO-jo
+joline	ʤOlˈin	check	jo-LEEN
+journeay	ʤˈɜɹni	check	Staten Island family; JUR-nee
+joval	ʤˈOvəl	check	JO-vul assumed
+jughandle	ʤˈʌɡhˌændəl	sure	jug + handle
+julieann	ʤˌuliˈæn	sure	joo-lee-AN
+jumel	ʤˈuməl	check	JOO-mel locally; French zhoo-MEL
+juni	ʤˈuni	check	JOO-nee; also YOO-nee
+kaltenmeier	kˈɔltənmˌIəɹ	sure	KALL-ten-my-er
+kalver	kˈælvəɹ	sure	KAL-ver
+kappock	kˈæpək	sure	KAP-uck
+karweg	kˈɑɹwɛɡ	check	KAR-weg assumed
+katan	kətˈæn	check	kuh-TAN; maybe KAY-tan
+katonah	kətˈOnə	sure	kuh-TOE-nuh
+kazimiroff	kəzˈɪməɹˌɔf	check	kuh-ZIM-er-off; guess was garbled
+keap	kˈip	sure	KEEP
+kehayas	kəhˈIəs	check	Greek surname kuh-HY-us
+keiber	kˈIbəɹ	check	KY-ber
+keltch	kˈɛlʧ	sure	plain reading
+kemball	kˈɛmbəl	sure	like Kimball
+kenkeleba	kˌɛŋkəlˈɛbə	check	Kenkeleba House; ken-kə-LEB-ah guess
+kensico	kˈɛnsɪkˌO	sure	as Kensico Reservoir, KEN-sih-ko
+kilroe	kˈɪlɹO	sure	KIL-roe
+kimlau	kˈɪmlˌW	sure	Kimlau Square, Chinatown, KIM-lau
+kion	kˈIən	check	KY-un assumed
+kirshon	kˈɜɹʃən	sure	KUR-shun
+kleeck	klˈik	sure	part of Van Kleeck, KLEEK
+kleupfel	klˈupfəl	check	German KLOOP-ful
+knauth	nˈɔθ	check	German name; may be said k-NOWTH
+knesel	nˈɛsəl	check	unclear; could be NEE-zel
+kngsbridge	kˈɪŋzbɹˌɪʤ	sure	abbreviation: Kingsbridge
+koskiusko	kəʃˈuskO	check	typo: Kosciuszko; Bed-Stuy also says kos-kee-OS-ko
+kouwenhoven	kˈWənhˌOvən	check	Dutch family; usually KOW-en-hoh-ven
+krissa	kɹˈɪsə	sure	plain reading
+kruif	kɹˈIf	check	De Kruif, after Paul de Kruif (KRIFE)
+kruser	kɹˈuzəɹ	check	KROO-zer likely
+kwame	kwˈɑmi	sure	Kwame Ture, KWAH-mee
+labau	ləbˈO	check	luh-BOH
+lacon	lˈAkən	check	LAY-kon likely
+laight	lˈAt	sure	LATE
+lamoka	ləmˈOkə	sure	plain reading
+lanark	lˈænəɹk	sure	LAN-ark
+lanett	lənˈɛt	check	luh-NET
+langere	lˈæŋɡəɹ	check	unclear; maybe lan-JEER
+lavall	ləvˈæl	check	De Lavall; luh-VAL likely
+lebewohl	lˈibəwˌOl	check	Abe Lebewohl of 2nd Ave Deli; LEE-buh-wohl, also LEB-uh-vole
+lenevar	lˈɛnəvɑɹ	check	LEN-uh-var
+lentol	lˈɛntᵊl	sure	Joseph Lentol, LEN-tl
+lenzie	lˈɛnzi	sure	plain reading
+leonello	lˌiənˈɛlO	check	Italian; also lay-oh-NEL-lo
+lerer	lˈɛɹəɹ	sure	plain reading
+lewmay	lˈumA	sure	plain reading
+lexa	lˈɛksə	sure	plain reading
+lindower	lˈɪndOəɹ	check	surname; LIN-doh-er guess
+linnaeus	lɪnˈiəs	sure	lin-NEE-us
+linneaus	lɪnˈiəs	sure	typo: Linnaeus
+liotti	liˈɑti	check	Italian, lee-OTT-ee
+lispenard	lˈɪspənəɹd	sure	LISP-en-ard
+litchhult	lˈɪʧhʌlt	check	Swedish surname; LITCH-hult guess
+lithonia	lɪθˈOniə	sure	plain reading
+lodovick	lˈɑdəvɪk	sure	LOD-o-vick
+loubet	lubˈA	check	French loo-BAY
+lowerre	lOˈɛɹ	check	old Bronx family; low-AIR, also LOW-er
+lundi	lˈʌndi	check	also LOON-dee
+luquer	lˈukəɹ	sure	Brooklyn; LOO-ker
+lurting	lˈɜɹtɪŋ	sure	LUR-ting
+lydig	lˈɪdɪɡ	check	LID-ig; guess LIE-dig
+lyvere	lIvˈɪɹ	check	Bronx; lie-VEER likely, also LIE-ver
+machate	məʃˈɑt	check	surname; muh-SHOT or MAK-ate
+machpelah	mækpˈilə	check	Hebrew cemetery name; mak-PEE-lah, also mak-PEL-ah
+macnish	məknˈɪʃ	sure	mac-NISH
+macormac	məkˈɔɹmək	sure	plain reading
+madisn	mˈædɪsən	sure	abbreviation: Madison
+mador	mˈAdɔɹ	check	MAY-dor likely
+mafera	məfˈɛɹə	check	Italian, muh-FAIR-uh
+malba	mˈælbə	sure	Malba, Queens
+malbone	mˈælbˌOn	sure	MAL-bone
+malvine	mælvˈin	check	mal-VEEN, also MAL-vine
+mandanici	mˌændənˈiʧi	check	Italian, man-dah-NEE-chee
+manee	mˈæni	check	Staten Island; MAN-ee, also MAY-nee
+manhttnville	mænhˈætnvˌɪl	sure	abbreviation: Manhattanville
+manida	mənˈidə	check	muh-NEE-da
+maranzano	mˌɛɹənzˈɑnO	sure	Italian, mar-an-ZAH-no
+maretzek	məɹˈɛtsɛk	check	after Max Maretzek
+margaretta	mˌɑɹɡəɹˈɛtə	sure	plain reading
+margrichante	mˌɑɹɡɹiʃˈɑntA	check	coined garden name; unknown
+marillac	mˈɛɹəlˌæk	check	after Louise de Marillac; French mah-ree-YAK
+marinette	mˌɛɹɪnˈɛt	sure	plain reading
+maritcha	məɹˈɪʧə	check	Maritcha Lyons; muh-RITCH-uh guess
+marolla	məɹˈOlə	sure	plain reading
+martense	mˈɑɹtəns	sure	MAR-tens
+matti	mˈæti	check	De Matti; MAT-ee or MAH-tee
+maujer	mˈɔʤəɹ	check	MAW-jer; also MOW-jer
+mayrose	mˈAɹˌOz	sure	MAY-rose
+mazeau	məzˈO	check	muh-ZOH
+mcbaine	məkbˈAn	sure	plain reading
+mcclancy	məklˈænsi	sure	plain reading
+mcgolrick	məkɡˈɑlɹɪk	sure	McGolrick Park, mick-GOLL-rick
+mcowen	məkˈWən	sure	mc-OW-en
+meagan	mˈAɡən	check	MAY-gan or MEE-gan
+melyn	mˈɛlɪn	check	after Cornelis Melyn, Dutch
+menahan	mˈɛnəhæn	sure	MEN-uh-han
+mentone	mɛntˈOni	check	men-TOE-nee; maybe men-TONE
+merivale	mˈɛɹəvˌAl	sure	MER-i-vale
+mesereau	mˈɛsəɹˌO	check	French-origin; MESS-er-oh
+meucci	mAˈuʧi	check	Antonio Meucci; may-OO-chee, also MOO-chee
+mhba	ˌɛmˌAʧbˌiˈA	check	abbreviation: letters M H B A
+micieli	mɪʧˈɛli	check	Italian; mi-CHEL-ee
+mickardan	mɪkˈɑɹdən	check	unclear coined name
+middagh	mˈɪdɔ	sure	MID-aw
+middlemay	mˈɪdᵊlmˌA	sure	MIDDLE-may
+midtwn	mˈɪdtˌWn	sure	abbreviation: Midtown
+minetta	mɪnˈɛtə	sure	min-ET-a
+minthorne	mˈɪnθˌɔɹn	sure	plain reading
+minuit	mˈɪnjuɪt	sure	MIN-yoo-it (Peter Minuit)
+montauk	mˈɑntɔk	sure	MON-tawk
+montbellier	mɑntbˈɛljəɹ	check	French-style surname; guess
+montell	mɑntˈɛl	sure	plain reading
+morani	mɔɹˈɑni	sure	mo-RAH-nee
+morenci	məɹˈɛnsi	sure	plain reading
+muhlebach	mˈulbˌɑk	check	German; MYOOL-bahk also heard
+muliner	mˈʌlɪnəɹ	check	MULL-in-er
+nahant	nəhˈænt	sure	like Nahant, Massachusetts
+nakks	nˈæks	check	unknown; NAKS
+nameoke	nˈæmiˌOk	check	NAM-ee-oak; final e silent
+nansen	nˈænsən	sure	after Fridtjof Nansen
+naquan	nəkwˈɑn	check	given name; nuh-KWAHN
+neboh	nˈibO	check	Mount Neboh Cemetery; NEE-bo
+nedra	nˈɛdɹə	sure	plain reading
+negundo	nəɡˈʌndO	sure	nuh-GUN-doe
+nepton	nˈɛptən	sure	plain reading
+nesmythe	nˈɛzmɪθ	check	like Nesmith; could be NEZ-mithe
+newfolden	nˈufˌOldən	check	NEW-fold-en
+norelli	nəɹˈɛli	sure	plain reading
+northerleigh	nˈɔɹðəɹlˌi	check	NOR-ther-lee guess
+notus	nˈOtəs	sure	NO-tus
+nunzie	nˈʌnzi	sure	plain reading
+nurge	nˈɜɹʤ	sure	plain reading
+nutly	nˈʌtli	sure	plain reading
+nuvern	nˈuvəɹn	check	unclear coined name
+ny	nu jˈɔɹk	sure	abbreviation: New York
+nycta	ˌɛnwˌIsˌitˌiˈA	sure	abbreviation: N Y C T A (New York City Transit Authority), spelled out
+nyise	ˌɛnwˌIˌIˌɛsˈi	check	abbreviation: NY Institute for Special Education, letters
+nyu	ˌɛnwˌIjˈu	sure	abbreviation: N Y U, spelled out
+oban	ˈObən	sure	like Oban, Scotland
+oko	ˈOkO	sure	Oko Farms, OH-koh
+olivet	ˈɑlɪvˌɛt	sure	OL-i-vet
+olmsted	ˈOmstɛd	sure	OHM-sted; l silent
+ordell	ɔɹdˈɛl	check	or-DELL likely
+otf	ˌOtˌiˈɛf	check	abbreviation: unknown, letters O T F
+ottavio	ətˈɑviO	sure	Italian name
+ouen	wˈɑn	check	St Ouen, French saint (san-TWAN); locals may say OO-en
+ovington	ˈOvɪŋtən	sure	OH-ving-tun
+ovis	ˈOvɪs	sure	plain reading
+ovps	ˈOvəɹpˌæs	sure	abbreviation: overpass
+owasco	OwˈɑskO	sure	like Owasco Lake
+oxholm	ˈɑkshˌOlm	check	OX-holm; maybe OX-ohm
+oxport	ˈɑkspˌɔɹt	sure	plain reading
+paerdegat	pˈɑɹdəɡˌæt	check	Dutch; PAR-deh-gat, also PAIR-deh-gat
+paidge	pˈAʤ	sure	Greenpoint; PAYJ
+paraiso	pˌɑɹəˈisO	sure	Spanish paraíso
+passannante	pˌæsənˈænti	check	Italian, pass-uh-NAN-tee
+pauw	pˈW	check	Dutch; POW, maybe PAW
+peare	pˈɪɹ	check	PEER or PAIR
+peconic	pəkˈɑnɪk	sure	plain reading
+pedestiran	pədˈɛstɹiən	sure	typo: pedestrian
+pelhambruck	pˈɛləmbɹˌʊk	sure	PEL-um-brook; h silent
+pembrook	pˈɛmbɹʊk	sure	PEM-brook
+penbroke	pˈɛmbɹˌOk	sure	like Pembroke
+perkiomen	pˌɜɹkiˈOmən	sure	per-kee-OH-men
+phroane	fɹˈOn	check	unclear; FRONE likely
+piave	piˈɑvA	sure	pee-AH-vay
+pinchot	pˈɪnʃO	sure	after Gifford Pinchot, PIN-show
+plattsburg	plˈætsbɜɹɡ	sure	plain reading
+plce	plˈAs	sure	abbreviation: place
+poillon	pˈYlən	check	POY-lun; also POY-yon
+pomonok	pˈɑmənˌɑk	sure	POM-uh-nock
+pople	pˈOpəl	check	POPE-ul or POP-ul
+poppenhusen	pˈɑpənhjˌuzən	sure	POP-en-hyoo-zen
+poultney	pˈOltni	sure	POLT-nee
+prol	pɹˈOl	check	unclear short name
+provi	pɹˈOvi	sure	Doña Provi, PRO-vee
+psychaitric	sˌIkiˈætɹɪk	sure	typo: Psychiatric
+pumone	pumˈOni	check	Italian surname; may be pyoo-MONE
+purroy	pəɹˈY	check	Bronx; pur-OY likely
+quencer	kwˈɛnsəɹ	sure	KWEN-ser
+quenns	kwˈinz	sure	typo: Queens
+radigan	ɹˈædəɡən	check	RAD-i-gan likely
+ragazzi	ɹəɡˈɑtsi	check	Italian; ra-GAHT-see
+raily	ɹˈAli	sure	plain reading
+raimonda	ɹAmˈɑndə	check	Italian, ray-MON-dah
+ramapo	ɹˈæməpˌO	sure	RAM-uh-po
+ranaqua	ɹənˈɑkwə	check	ruh-NAH-kwa
+rapelye	ɹəpˈili	check	Dutch family Rapalje; ruh-PEEL-ee, also RAP-uh-lee
+ratbun	ɹˈæθbən	check	typo: Rathbun (Staten Island avenue)
+rbi	ˌɑɹbˌiˈI	sure	abbreviation: R B I letters
+rchmond	ɹˈɪʧmənd	sure	abbreviation: Richmond
+rentar	ɹˈɛntɑɹ	check	unclear coined name
+reon	ɹˈiɑn	check	REE-on
+retner	ɹˈɛtnəɹ	sure	plain reading
+rewe	ɹˈu	check	ROO or REE-wee
+reyem	ɹˈAəm	check	Meyer backwards; RAY-um guess
+riegelmann	ɹˈiɡəlmən	sure	REE-gul-mun, as the boardwalk
+rienzi	ɹiˈɛnzi	sure	Italian, ree-EN-zee
+rigimar	ɹˈɪʤɪmˌɑɹ	check	unclear coined name
+riv	ɹˈɪvəɹ	sure	abbreviation: River
+robard	ɹˈObɑɹd	check	ROH-bard, also ro-BARD
+robitzek	ɹˈɑbɪtsɛk	check	after Dr Edward Robitzek
+rochambeau	ɹˌOʃæmbˈO	sure	ro-sham-BOH
+rokeby	ɹˈOkbi	sure	ROKE-bee
+rombouts	ɹˈɑmbWts	check	Dutch; ROM-bowts
+roosvlt	ɹˈOzəvˌɛlt	sure	abbreviation: Roosevelt
+roselle	ɹOzˈɛl	sure	plain reading
+rumpler	ɹˈʌmpləɹ	sure	plain reading
+ruscoe	ɹˈʌskO	sure	plain reading
+russek	ɹˈʌsɪk	check	RUSS-ek
+russy	ɹˈʌsi	sure	De Russy, duh-RUSS-ee
+ruyter	ɹˈItəɹ	sure	De RYE-ter
+ryawa	ɹIˈɑwə	check	rye-AH-wa
+sabba	sˈæbə	check	surname, SAB-uh
+saccheri	səkˈɛɹi	check	Italian; sa-KEH-ree
+saltaire	sˈɔltˌɛɹ	sure	SALT-air
+sandgap	sˈændɡˌæp	sure	plain reading
+sanilac	sˈænəlˌæk	sure	plain reading
+sankofa	sæŋkˈOfə	sure	Akan, san-KOH-fah
+santina	sæntˈinə	sure	plain reading
+santruce	sɑntˈuɹsA	check	typo: Santurce (Puerto Rico), sahn-TOOR-seh
+sapolin	sˈæpəlɪn	check	surname, SAP-uh-lin
+sarcona	sɑɹkˈOnə	sure	plain reading
+saull	sˈɔl	sure	plain reading
+saunder	sˈɔndəɹ	sure	plain reading
+scarangella	skˌæɹənʤˈɛlə	check	Italian; scar-an-JELL-uh
+scheffelin	ʃˈɛflɪn	check	like Schieffelin, SHEF-lin
+schervier	ʃəɹvˈɪɹ	check	Frances Schervier; sher-VEER
+schmul	ʃmˈʊl	check	SHMOOL; maybe SHMULL
+schoharie	skOhˈæɹi	sure	sko-HAIR-ee
+schurz	ʃˈɜɹts	sure	SHURTS (Carl Schurz)
+scmick	ʃmˈɪk	check	likely typo: Schmick
+screvin	skɹˈɛvɪn	check	Bronx; SKREV-in, also SKREE-vin
+seabring	sˈibɹɪŋ	sure	SEE-bring
+seafoam	sˈifˌOm	sure	plain reading
+seba	sˈibə	check	SEE-buh or SAY-buh
+seguine	səɡwˈIn	check	suh-GWINE locally; also suh-GWEEN
+selmoff	sˈɛlmɔf	sure	plain reading
+selvin	sˈɛlvɪn	sure	plain reading
+sembrar	sɛmbɹˈɑɹ	sure	Spanish, sem-BRAR
+septuagesimo	sˌɛptwɑhˈɛsimO	check	Spanish séptuagésimo; Septuagesimo Uno garden
+seravalli	sˌɛɹəvˈɑli	sure	Italian, ser-uh-VAH-lee
+serrell	sˈɛɹəl	check	SER-el; maybe suh-REL
+sh'ma	ʃəmˈɑ	sure	Hebrew, shuh-MAH
+shaina	ʃˈAnə	sure	plain reading
+sharrott	ʃˈæɹət	sure	SHARE-ut
+sharrotts	ʃˈæɹəts	sure	SHARE-uts
+shemal	ʃəmˈɑl	check	surname; unsure
+sheraden	ʃˈɛɹədən	sure	SHER-a-den
+shevchenko	ʃɛvʧˈɛŋkO	sure	Taras Shevchenko, Ukrainian poet
+shirra	ʃˈɪɹə	check	SHEER-uh or SHUR-uh
+shrady	ʃɹˈAdi	sure	plain reading
+sicklen	sˈɪklən	sure	Van SICK-len
+siempre	sjˈɛmpɹA	sure	Spanish, SYEM-preh
+sinderen	sˈɪndəɹən	sure	Van SIN-der-en
+siwanoy	sˈIwənˌY	sure	SY-wa-noy
+slaight	slˈAt	sure	plain reading
+slosson	slˈɑsən	sure	SLAH-sun
+sneden	snˈidən	sure	SNEE-den, as in Sneden's Landing
+snediker	snˈɛdɪkəɹ	check	SNED-i-ker; also SNEE-di-ker
+sohncke	sˈɑŋki	check	German surname; SONK-ee guess
+sonsire	sɑnsˈɪɹ	check	surname; unsure
+soren	sˈɔɹən	sure	plain reading
+sorrentino	sˌɔɹəntˈinO	sure	Italian, sor-en-TEE-no
+sota	sˈOtə	sure	De Sota (De Soto)
+southrn	sˈʌðəɹn	sure	abbreviation: Southern
+sperandeo	spˌɛɹəndˈAO	check	Italian, sper-an-DAY-oh
+st.non	stɹˈit nˈɑn	sure	abbreviation: Street, non(-public)
+st.nonpublic	stɹˈit nɑnpˈʌblɪk	sure	abbreviation: Street, non-public
+stalie	stˈAli	check	STAY-lee or STAH-lee
+stanwich	stˈænwɪʧ	check	like Stanwich, Connecticut; maybe STAN-ij
+stanwix	stˈænwɪks	sure	like Fort Stanwix
+stobe	stˈOb	sure	rhymes with robe
+strippoli	stɹˈɪpəli	check	Italian, STRIP-uh-lee
+sunbury	sˈʌnbˌɛɹi	sure	plain reading
+sunners	sˈʌnəɹz	check	surname, plain reading
+sunnymeade	sˈʌnimˌid	sure	plain reading
+sweetgum	swˈitɡˌʌm	sure	plain English
+swinburne	swˈɪnbəɹn	sure	Swinburne Island
+swinnerton	swˈɪnəɹtən	sure	plain reading
+synergi	sˈɪnəɹʤi	sure	synergy
+szold	zˈOld	sure	after Henrietta Szold, ZOLD
+tanahey	tˈænəhˌA	check	Irish surname; TAN-uh-hay
+tandt	tˈænt	check	unclear; maybe T and T
+taqwa	tˈɑkwə	sure	Arabic, TAHK-wah
+targee	tˈɑɹɡi	sure	TAR-ghee
+tarlee	tˈɑɹli	sure	plain reading
+taxter	tˈækstəɹ	sure	plain reading
+tce	tˈɛɹəs	sure	abbreviation: Terrace
+teepee	tˈipˌi	sure	tepee
+tehama	təhˈAmə	check	like Tehama County, tuh-HAY-muh
+tenafly	tˈɛnəflˌI	sure	TEN-a-fly
+tenbroeck	tɛnbɹˈʊk	check	Dutch Ten Broeck, ten-BROOK
+teunissen	tˈunɪsən	check	Dutch; TOO-nis-sen
+thelonious	θəlˈOniəs	sure	Thelonious Monk
+thieriot	θˈɪɹiət	check	THEER-ee-ut; maybe TEER-ee-oh
+thollen	tˈɑlən	check	TH likely said as T
+thrilla	θɹˈɪlə	sure	Thrilla in Manila
+tiebout	tˈIbˌWt	check	TIE-bout locally; also TEE-bow
+tillary	tˈɪləɹi	sure	TILL-uh-ree
+tilyou	tˈɪljˌu	sure	Tilyou (Steeplechase), TILL-you
+tioga	tIˈOɡə	sure	tie-OH-ga
+tonking	tˈɑŋkɪŋ	sure	plain reading
+tonsor	tˈɑnsəɹ	sure	plain reading
+torrice	təɹˈis	check	tor-EES, also TOR-is
+torsney	tˈɔɹzni	check	Irish surname, TORZ-nee
+trantor	tɹˈæntəɹ	sure	TRAN-tor
+tratman	tɹˈætmən	sure	plain reading
+treetz	tɹˈits	sure	plain reading
+trina	tɹˈinə	sure	plain reading
+trioka	tɹiˈOkə	check	maybe misspelt troika; said as written
+trossach	tɹˈɑsək	sure	like the Trossachs, Scotland
+truxton	tɹˈʌkstən	sure	TRUCKS-tun
+trwy	θɹˈuwˌA	sure	abbreviation: Thruway
+tulfan	tˈʌlfən	check	unclear coined name
+turneur	tɜɹnˈɜɹ	check	French-looking; tur-NUR, also TUR-ner
+turpike	tˈɜɹnpˌIk	sure	typo: Turnpike
+tuyl	tˈIl	check	Dutch Van Tuyl, van-TILE
+tyndale	tˈɪndᵊl	check	like William Tyndale, TIN-dl; also TIN-dale
+tyrellan	tɪɹˈɛlən	check	unclear coined name
+tysen	tˈIsən	check	TIE-sen
+tysens	tˈIsənz	check	TIE-sens
+ubs	jˌubˌiˈɛs	sure	abbreviation: U B S (letters)
+ucfp	ˌjuˌsiˌɛfpˈi	sure	abbreviation: letters U C F P
+umoja	umˈOʤə	sure	Swahili, oo-MOH-jah
+unanue	ˌunɑnˈuA	check	Spanish, oo-nah-NOO-eh
+unido	unˈidO	sure	Spanish, oo-NEE-doh
+unidos	unˈidOs	sure	Spanish, oo-NEE-dohs
+unisphere	jˈunɪsfˌɪɹ	sure	YOO-ni-sphere
+unp	ˈʌndəɹpˌæs	sure	abbreviation: underpass
+ursina	əɹsˈinə	sure	plain reading
+uxbridge	ˈʌksbɹɪʤ	sure	plain reading
+va	ˌviˈA	sure	abbreviation: V A (Veterans Affairs)
+vandalia	vændˈAljə	sure	van-DAY-lya
+varet	vəɹˈɛt	check	va-RET, also VAIR-et
+vark	vˈɑɹk	sure	plain reading
+varkens	vˈɑɹkənz	sure	Dutch for hogs, Varkens Hook
+vartan	vɑɹtˈɑn	check	Armenian, var-TAHN; also VAR-tan
+vaswani	vɑswˈɑni	sure	plain reading
+verandah	vəɹˈændə	sure	plain reading
+verizon	vəɹˈIzən	sure	brand
+vernam	vˈɜɹnəm	sure	VER-num
+verveelen	vəɹvˈilən	check	Dutch surname; ver-VEE-len assumed
+vesuvio	vəsˈuviO	sure	Italian, veh-SOO-vee-oh
+vierno	viˈɛɹnO	check	Italian surname, vee-AIR-no
+vleigh	vlˈI	check	Dutch; VLY, also VLAY
+volky	vˈɑlki	check	unknown; VOLL-kee
+vorst	vˈɔɹst	sure	Van Vorst
+vwe	vˌæn wˈIk ɪkspɹˈɛswˌA	sure	abbreviation: Van Wyck Expressway
+vyse	vˈIs	sure	VICE
+waimer	wˈIməɹ	check	WY-mer or WAY-mer
+walbrooke	wˈɔlbɹˌʊk	sure	plain English
+warsoff	wˈɔɹsɔf	sure	plain reading
+washngtn	wˈɑʃɪŋtən	sure	abbreviation: Washington
+watchogue	wˈɑʧɔɡ	check	WATCH-awg; second syllable not "gwa"
+watjean	wˈɑtʤin	check	unclear coined name
+wayanda	wAˈændə	check	Queens; way-AN-duh guess
+wenlock	wˈɛnlɑk	sure	plain reading
+weprin	wˈɛpɹɪn	sure	Saul Weprin, WEP-rin
+westbourne	wˈɛstbɔɹn	sure	WEST-borne
+westchtr	wˈɛsʧɛstəɹ	sure	abbreviation: Westchester
+westerleigh	wˈɛstəɹlˌi	sure	plain reading
+wetherole	wˈɛðəɹˌOl	check	WETHER-ole assumed
+whe	wˈItstˌOn ɛkspɹˈɛswA	check	abbreviation: Whitestone Expressway (likely)
+wicklen	wˈɪklən	sure	plain reading
+wiederer	wˈidəɹəɹ	check	German; WEE-der-er
+willamsbridge	wˈɪljəmzbɹˌɪʤ	sure	typo: Williamsbridge
+willamsburg	wˈɪljəmzbˌɜɹɡ	sure	typo: Williamsburg
+willmohr	wˈɪlmɔɹ	sure	WILL-more
+windemere	wˈɪndəmˌɪɹ	sure	like Windermere
+witthoff	wˈɪthɔf	check	WIT-hoff
+wlimsbridge	wˈɪljəmzbɹˌɪʤ	sure	abbreviation: Williamsbridge
+wnyc	ˌdʌbəljuˌɛnwˌIsˈi	sure	abbreviation: W N Y C letters
+woodhavn	wˈʊdhˌAvən	sure	abbreviation: Woodhaven
+wyona	wIˈOnə	check	why-OH-na
+yadira	jədˈɪɹə	sure	Spanish, yah-DEE-rah
+yafa	jˈɑfə	sure	plain reading
+yd	jˈɑɹd	sure	abbreviation: Yard (Navy Yard)
+yeomalt	jˈOmˌɔlt	check	YO-malt
+yisrael	jˌɪsɹəˈɛl	sure	Hebrew, yis-ruh-EL; only one primary
+yrkvlle	jˈɔɹkvˌɪl	sure	abbreviation: Yorkville
+yznaga	ɪznˈɑɡə	check	Spanish/Cuban surname; iz-NAH-ga
+zarelli	zəɹˈɛli	sure	plain reading
+zerega	zəɹˈiɡə	check	zuh-REE-ga; also ZER-eh-ga
+zulette	zulˈɛt	check	zoo-LET assumed

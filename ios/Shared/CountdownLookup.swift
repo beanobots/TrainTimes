@@ -13,6 +13,9 @@ enum CountdownLookup {
     /// copies do.
     private static let timeout: TimeInterval = 3
 
+    /// Seconds a local copy's state is new enough not to ask the push server.
+    private static let localFresh: TimeInterval = 20
+
     /// The countdown's state for `trainID` (a `Selection.trainID`), not yet moved on to `now`;
     /// nil if no countdown for it is running. With `localOnly`, without asking the push server, for
     /// a draw that can't wait for the network.
@@ -25,7 +28,10 @@ enum CountdownLookup {
             [.active, .stale].contains($0.activityState) && $0.attributes.selection.trainID == trainID
         }
         var states = [activity?.content.state, posted?.state].compactMap { $0 }
-        if !localOnly, let token = activity?.pushToken.map(hex) ?? posted?.pushToken, let pushed = await pushedState(token: token) {
+        // A copy here updated in the last `localFresh` is as new as the server's would be
+        let fresh = states.contains { $0.updated.isWithin(localFresh, before: .now) }
+        if !localOnly, !fresh, let token = activity?.pushToken.map(hex) ?? posted?.pushToken,
+           let pushed = await pushedState(token: token) {
             states.append(pushed)
         }
         return states.max { $0.updated < $1.updated }

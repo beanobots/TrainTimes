@@ -25,8 +25,20 @@ final class Connectivity {
         let old = path
         path = new
         guard new.status == .satisfied, let old,
-              old.status != .satisfied || old.availableInterfaces.map(\.name) != new.availableInterfaces.map(\.name)
+              old.status != .satisfied || old.availableInterfaces.map(\.name) != new.availableInterfaces.map(\.name),
+              !ForcedOffline.isOn
         else { return }
+        wakeAll()
+    }
+
+    /// The Prototyping card's Force Offline: on, no path counts as back; off, as if one just came
+    /// back, if there is one.
+    func forceOffline(_ isOn: Bool) {
+        ForcedOffline.isOn = isOn
+        if !isOn, path?.status == .satisfied { wakeAll() }
+    }
+
+    private func wakeAll() {
         let woken = waiters.values
         waiters = [:]
         for waiter in woken {

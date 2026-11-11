@@ -211,21 +211,56 @@ func testRegistration(token: String = sampleToken, owner: String = "key", starte
         #expect(pusher.pushes.count == 2)
         #expect(pusher.widgetReloads.count == 1)
 
-        // Moving on to the next train between passes: they show that too
+        // Moving on to the next train between passes: the widgets move on by themselves
+        // (`CountdownSync.aligned`), so no reload
         await poller.pushDue(at: now.addingTimeInterval(6 * 60 + AtStation.seconds))
-        #expect(pusher.widgetReloads.count == 2)
+        #expect(pusher.pushes.count == 3)
+        #expect(pusher.widgetReloads.count == 1)
     }
 
-    @Test func reloadsOnlyWhenTheTimesMovedAtAll() throws {
+    @Test func reloadsOnlyWhenTheMinutesShownMove() throws {
         let last = state(train: 4)
         var new = last
         new.updated = now.addingTimeInterval(30)
         new.notice = "Delays"
         #expect(!ActivityState.changesWidgets(new, from: last))
-        // However little: they'd otherwise show other times from the Lock Screen
+        // Seconds within the minute (the train's at :20 past): the widgets show the same
         new.train = last.train.addingTimeInterval(5)
+        #expect(!ActivityState.changesWidgets(new, from: last))
+        new.following[1] = last.following[1].addingTimeInterval(-15)
+        #expect(!ActivityState.changesWidgets(new, from: last))
+        // Into the next minute, however little
+        new.train = last.train.addingTimeInterval(45)
+        #expect(ActivityState.changesWidgets(new, from: last))
+        new.train = last.train
+        // A train after it into another minute by a few seconds: not worth waking the widgets
+        new.following[0] = last.following[0].addingTimeInterval(-25)
+        #expect(!ActivityState.changesWidgets(new, from: last))
+        // As far as an update takes, it is
+        new.following[0] = last.following[0].addingTimeInterval(-60)
+        #expect(ActivityState.changesWidgets(new, from: last))
+        new.following = Array(last.following.prefix(1))
+        #expect(ActivityState.changesWidgets(new, from: last))
+        // Live or not shows
+        new = last
+        new.isLive = false
         #expect(ActivityState.changesWidgets(new, from: last))
         #expect(ActivityState.changesWidgets(last, from: nil))
+    }
+
+    @Test func onlyLaterTrainsMovingIsPushedAtPriority5() {
+        let last = state(train: 4)
+        // Only the train after it moved: worth pushing, but not at once
+        let later = state(train: 4, following: [8, 9])
+        #expect(ActivityState.push(later, last: last, lastPush: now, now: now.addingTimeInterval(20)) == .update)
+        #expect(ActivityState.priority(of: .update, later, last: last) == 5)
+        // The train counted down to moved, or another notice: at once
+        #expect(ActivityState.priority(of: .update, state(train: 6), last: last) == 10)
+        #expect(ActivityState.priority(of: .update, state(train: 4, notice: "Delays"), last: last) == 10)
+        #expect(ActivityState.priority(of: .update, state(train: 4, trip: "b"), last: last) == 10)
+        // The first push, and refreshes
+        #expect(ActivityState.priority(of: .update, later, last: nil) == 10)
+        #expect(ActivityState.priority(of: .refresh, state(train: 6), last: last) == 5)
     }
 
     @Test func reloadsEachPhoneOnceAndNotWithoutAToken() async throws {
@@ -708,17 +743,18 @@ extension PollerTests {
         let movedAt = now.addingTimeInterval(6 * 60 + AtStation.seconds)
         await poller.pushDue(at: movedAt)
         #expect(pusher.pushes.count == 2)
-        #expect(pusher.widgetReloads.count == 2)
+        // The widgets move on by themselves
+        #expect(pusher.widgetReloads.count == 1)
         #expect(pusher.pushes.last?.state.trip == "")
         // The feeds name its trip and terminal, nothing else changed: neither a push nor a reload
         await poller.pass(at: movedAt.addingTimeInterval(10))
         #expect(pusher.pushes.count == 2)
-        #expect(pusher.widgetReloads.count == 2)
+        #expect(pusher.widgetReloads.count == 1)
         // Its trip kept with the next refresh, still without a reload
         await poller.pass(at: movedAt.addingTimeInterval(60))
         #expect(pusher.pushes.count == 3)
         #expect(pusher.pushes.last?.priority == 5)
         #expect(await store.registration(for: sampleToken)?.lastState?.trip == "c")
-        #expect(pusher.widgetReloads.count == 2)
+        #expect(pusher.widgetReloads.count == 1)
     }
 }

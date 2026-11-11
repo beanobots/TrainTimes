@@ -52,9 +52,9 @@ struct BusBadge: View {
     }
 }
 
-/// A trip's bus ride, as Google's route gives it (`ServerRoutes`).
+/// A trip's bus ride, as a planned route gives it (`ServerRoutes`).
 struct BusRide: Codable, Hashable, Sendable {
-    /// Google's name for the line: "B63", "M86-SBS".
+    /// The line's name: "B63", "M86+".
     var line: String
     var from: Place
     var to: Place
@@ -62,9 +62,9 @@ struct BusRide: Codable, Hashable, Sendable {
     var headsign: String?
     /// Stops ridden, counting the last.
     var stops: Int?
-    /// How long the ride takes by Google's timetable, for timing what comes after it.
+    /// How long the ride takes by the timetable, for timing what comes after it.
     var seconds: Int?
-    /// When it leaves by Google's timetable, for timing the trip in New Trip.
+    /// When it leaves by the timetable, for timing the trip in New Trip.
     var leaves: Date? = nil
 
     struct Place: Codable, Hashable, Sendable {
@@ -95,7 +95,7 @@ struct BusTrip: Codable, Hashable, Sendable {
 
     /// The least a change between the bus and the train takes.
     private static let leastWalk: TimeInterval = 60
-    /// The wait counted for a bus where Google's timetable doesn't say when it leaves, or it
+    /// The wait counted for a bus where the timetable doesn't say when it leaves, or it
     /// leaves before you can be there: about half the time between buses on most lines.
     static let wait: TimeInterval = 5 * 60
 
@@ -120,8 +120,8 @@ struct BusTrip: Codable, Hashable, Sendable {
     }
 
     /// About when it gets from `start` to `end` leaving at `now`, walks included, for ranking
-    /// it with the train trips: each bus when Google's timetable has it leave, or `wait` after
-    /// you're at its stop, for Google's time for the ride (`BusRide.duration`); the train by the
+    /// it with the train trips: each bus when the timetable has it leave, or `wait` after
+    /// you're at its stop, for the timetable's time for the ride (`BusRide.duration`); the train by the
     /// timetable (`TripPlanner.arrival`). Only an estimate, as Bus Time isn't asked; nil without a
     /// timetable to time its train by.
     func arrival(from start: CLLocation, to end: CLLocation, at now: Date, timetable: Timetable?) -> Date? {
@@ -153,6 +153,29 @@ struct BusTrip: Codable, Hashable, Sendable {
     /// `arrival`'s minutes from `now`, as New Trip shows a trip's.
     func minutes(from start: CLLocation, to end: CLLocation, at now: Date, timetable: Timetable?) -> Int? {
         arrival(from: start, to: end, at: now, timetable: timetable).map { Int($0.timeIntervalSince(now) / 60) }
+    }
+
+    /// What counts against it in ranking beside other trips, on top of its minutes, in seconds:
+    /// the whole wait for a first bus (buses bunch and run late, so standing at the stop counts
+    /// in full), a change on foot for changing to the train or second bus, and
+    /// `TripPlanner.walkWeight` of the walks at the ends.
+    func penalty(from start: CLLocation, to end: CLLocation, at now: Date, timetable: Timetable?) -> TimeInterval {
+        let changing = train != nil || onward != nil ? TripPlanner.changeCost(across: false) : 0
+        func walked(_ a: CLLocation, _ b: CLLocation) -> TimeInterval {
+            TripPlanner.walkSeconds(a.distance(from: b)) * TripPlanner.walkWeight
+        }
+        guard busFirst else {
+            // The train first: its penalty has the walk to it; then the bus's walk off
+            let walkOff = walked(bus.to.location, end)
+            guard let train, let timetable, let last = train.endStation else { return changing + walkOff }
+            let trip = TripPlanner.Trip(selection: train.selection, destination: last)
+            return changing + walkOff + (TripPlanner.penalty(of: trip, from: start, to: last.location, at: now,
+                                                             timetable: timetable) ?? 0)
+        }
+        let atStop = now.addingTimeInterval(TripPlanner.walkSeconds(start.distance(from: bus.from.location)))
+        let wait = bus.leaves.flatMap { $0 >= atStop ? $0.timeIntervalSince(atStop) : nil } ?? Self.wait
+        let lastStop = train?.endStation?.location ?? onward?.to.location ?? bus.to.location
+        return changing + wait + walked(start, bus.from.location) + walked(lastStop, end)
     }
 }
 
@@ -232,16 +255,26 @@ struct NearbyBusPick: Codable, Hashable, Sendable {
 
     /// The lines at `ways`' stops, soonest first, up to `limit`: each once, with its buses each way.
     static func lines(at ways: [(stop: BusStopTimes.Stop, arrivals: [BusArrival])], date: Date, limit: Int = 3) -> [NearbyBusPick] {
-        let key = { (line: String) in BusBadge.label(line).uppercased() }
+        // Each line's label worked out once, not for every bus against every line: Nearby asks
+        // this many times each time it's drawn
+        var labels: [String: String] = [:]
+        func key(_ line: String) -> String {
+            if let label = labels[line] { return label }
+            let label = BusBadge.label(line).uppercased()
+            labels[line] = label
+            return label
+        }
         let coming = ways.flatMap { way in way.arrivals.filter { ($0.time ?? .distantPast) > date } }
             .sorted { ($0.time ?? .distantFuture) < ($1.time ?? .distantFuture) }
         var lines: [String] = []
-        for bus in coming where !lines.map(key).contains(key(bus.line)) {
+        var seen: Set<String> = []
+        for bus in coming where seen.insert(key(bus.line)).inserted {
             lines.append(bus.line)
         }
         return lines.prefix(limit).map { line in
-            NearbyBusPick(line: line, ways: ways.compactMap { way in
-                let buses = way.arrivals.filter { key($0.line) == key(line) && ($0.time ?? .distantPast) > date }
+            let lineKey = key(line)
+            return NearbyBusPick(line: line, ways: ways.compactMap { way in
+                let buses = way.arrivals.filter { key($0.line) == lineKey && ($0.time ?? .distantPast) > date }
                 guard let first = buses.first else { return nil }
                 return Way(stop: way.stop, destination: first.destination, arrivals: Array(buses.prefix(3)))
             })
@@ -302,6 +335,32 @@ struct BusArrival: Codable, Hashable, Sendable {
     var time: Date? { expected ?? aimed }
     /// A prediction from where the bus is, rather than the timetable's.
     var isLive: Bool { expected != nil }
+
+    /// Seconds apart two of the same line's buses going the same way can be and still be one
+    /// bus listed twice: Bus Time lists one now and then twice, and a line asked for under two
+    /// names ("Q6", "Q06") comes back twice.
+    static let sameBus: TimeInterval = 5
+
+    /// `arrivals` (soonest first) without a bus listed again: the same line (`BusRoutes.key`),
+    /// destination and live or not, due within `sameBus` of it. Bus Time gives no vehicle to tell
+    /// them by; two real buses that close are the same bus.
+    static func withoutRepeats(_ arrivals: [BusArrival]) -> [BusArrival] {
+        var kept: [BusArrival] = []
+        var keys: [String] = []
+        for bus in arrivals {
+            let key = BusRoutes.key(bus.line) + "|" + (bus.destination ?? "") + (bus.isLive ? "|live" : "")
+            // Only those kept within `sameBus` before it, as they're soonest first
+            let repeated = bus.time.map { time in
+                kept.indices.reversed()
+                    .prefix { kept[$0].time.map { time.timeIntervalSince($0) <= sameBus } ?? true }
+                    .contains { keys[$0] == key && kept[$0].time.map { abs($0.timeIntervalSince(time)) <= sameBus } == true }
+            } ?? false
+            if repeated { continue }
+            kept.append(bus)
+            keys.append(key)
+        }
+        return kept
+    }
 }
 
 enum BusTimes {
@@ -310,7 +369,7 @@ enum BusTimes {
     /// lines found at that stop, not one whose nearest stop is across the street (as the push
     /// server counts down at the chosen stop alone).
     static func arrivals(lines: [String], at place: BusRide.Place, onlyAt stopID: String? = nil,
-                         now: Date = .now) async -> BusStopTimes? {
+                         now: Date = AppClock.now) async -> BusStopTimes? {
         let atStop = { (times: BusStopTimes) in stopID.map { $0 == times.stop.id } ?? true }
         if lines.count < 2 {
             guard let line = lines.first, let times = await arrivals(line: line, at: place, now: now),
@@ -327,12 +386,20 @@ enum BusTimes {
         }
         guard let stop = found.first?.stop else { return nil }
         let merged = found.flatMap(\.arrivals).sorted { ($0.time ?? .distantFuture) < ($1.time ?? .distantFuture) }
-        return BusStopTimes(stop: stop, arrivals: merged)
+        return BusStopTimes(stop: stop, arrivals: BusArrival.withoutRepeats(merged))
     }
 
     /// The next buses on `line` at its stop where `place` is, soonest first, those still to come
-    /// at `now`; nil if the server can't be reached, has no Bus Time key, or finds no stop.
-    static func arrivals(line: String, at place: BusRide.Place, now: Date = .now) async -> BusStopTimes? {
+    /// at `now`; nil if the server can't be reached, has no Bus Time key, or finds no stop. Without
+    /// the server, the timetable's (`BusSchedule`).
+    static func arrivals(line: String, at place: BusRide.Place, now: Date = AppClock.now) async -> BusStopTimes? {
+        // Not Bus Time's real buses while Pretend Time is on (`AppClock`)
+        if !AppClock.isPretending, let live = await liveArrivals(line: line, at: place, now: now) { return live }
+        return BusSchedule.times(line: line, at: place, now: now)
+    }
+
+    /// Bus Time's, through the server.
+    private static func liveArrivals(line: String, at place: BusRide.Place, now: Date) async -> BusStopTimes? {
         guard let baseURL = ServerRoutes.baseURL else { return nil }
         // "+" escaped too, which the server would read as a space ("M15+" as the M15)
         let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~,")
@@ -341,13 +408,38 @@ enum BusTimes {
         var components = URLComponents(url: baseURL.appendingPathComponent("buses"), resolvingAgainstBaseURL: false)
         components?.percentEncodedQuery = "line=\(escape(line))&stop=\(escape(stop))"
         guard let url = components?.url else { return nil }
-        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 8)
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        guard var times = await ServerRoutes.fetch(BusStopTimes.self, with: request) else { return nil }
-        times.arrivals = times.arrivals
+        guard var times = await asked.times(from: url) else { return nil }
+        times.arrivals = BusArrival.withoutRepeats(times.arrivals
             .filter { ($0.time ?? .distantPast) > now }
-            .sorted { ($0.time ?? .distantFuture) < ($1.time ?? .distantFuture) }
+            .sorted { ($0.time ?? .distantFuture) < ($1.time ?? .distantFuture) })
         return times
+    }
+
+    /// How long the push server keeps Bus Time's answer, so asking again sooner gets the same.
+    static let reuse: TimeInterval = 30
+
+    private static let asked = Asked()
+
+    /// The server's answers this process has had, each kept `reuse`, and those on their way: a
+    /// stop and line asked twice at once (a widget and its other way, or Nearby's) is asked once.
+    private actor Asked {
+        private var answers: [URL: (asked: Date, task: Task<BusStopTimes?, Never>)] = [:]
+
+        func times(from url: URL) async -> BusStopTimes? {
+            let now = Date.now
+            answers = answers.filter { $0.value.asked.isWithin(BusTimes.reuse, before: now) }
+            if let kept = answers[url] { return await kept.task.value }
+            let task = Task { () -> BusStopTimes? in
+                var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 8)
+                request.setValue("application/json", forHTTPHeaderField: "Accept")
+                return await ServerRoutes.fetch(BusStopTimes.self, with: request)
+            }
+            answers[url] = (now, task)
+            let times = await task.value
+            // A failure isn't kept: the next ask tries again
+            if times == nil, answers[url]?.asked == now { answers[url] = nil }
+            return times
+        }
     }
 }
 
@@ -425,8 +517,15 @@ enum NearbyBuses {
     /// The bus places near `location`, nearest first: none with no stop within a quarter mile;
     /// nil if the server can't be reached or has no Bus Time key. From a server that predates
     /// places, its one place's ways. Waits `wait` for the server, which for a place it hasn't
-    /// kept the stops of asks Bus Time twice in turn.
+    /// kept the stops of asks Bus Time twice in turn. Without the server, the timetable's
+    /// (`BusSchedule`).
     static func places(near location: CLLocation, wait: TimeInterval = wait) async -> [NearbyBusPlace]? {
+        if !AppClock.isPretending, let live = await livePlaces(near: location, wait: wait) { return live }
+        return BusSchedule.places(near: location)
+    }
+
+    /// Bus Time's, through the server.
+    private static func livePlaces(near location: CLLocation, wait: TimeInterval) async -> [NearbyBusPlace]? {
         guard let baseURL = ServerRoutes.baseURL,
               var components = URLComponents(url: baseURL.appendingPathComponent("buses/nearby"),
                                              resolvingAgainstBaseURL: false) else { return nil }

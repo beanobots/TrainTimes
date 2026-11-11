@@ -3,6 +3,8 @@
 ios/App/Info.plist
 ios/Widget/Info.plist
 ios/Share/Info.plist
+ios/VoiceDownloader/Info.plist
+ios/Kokoro/Info.plist
 ios/build/
 ios/Payload/
 *.ipa
@@ -13,3 +15,9 @@ __pycache__/
 mac/build/
 # Finder
 .DS_Store
+# The walking voice's asset pack, built by tools/make_voice_pack.py (Kokoro's model is 86 MB);
+# words.json, the city's words, is kept
+ios/VoicePack/*
+!ios/VoicePack/words.json
+!ios/VoicePack/review.tsv
+ios/VoicePack.aar

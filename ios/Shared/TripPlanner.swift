@@ -30,13 +30,13 @@ enum TripPlanner {
     /// there, with the downloaded timetable (`plan(from:to:at:timetable:)`); without one, by
     /// least walking (`plannedByWalking(from:to:)`), as also when the timetable runs out before they'd
     /// get there (`runsOut`) and it has none. In step-free mode, only those `stepFree(_:)` keeps.
-    static func plan(from start: CLLocation, to end: CLLocation, at now: Date = .now,
+    static func plan(from start: CLLocation, to end: CLLocation, at now: Date = AppClock.now,
                      walkRange: Double = walkRange) -> [Trip] {
         planned(from: start, to: end, at: now, walkRange: walkRange).trips
     }
 
     /// `plan`'s trips, and where there are none, why not, as the planner that ran decided.
-    static func planned(from start: CLLocation, to end: CLLocation, at now: Date = .now,
+    static func planned(from start: CLLocation, to end: CLLocation, at now: Date = AppClock.now,
                         walkRange: Double = walkRange) -> (trips: [Trip], none: NoTrip?) {
         if let timetable = TimetableStore.load(now: now) {
             let planned = planned(from: start, to: end, at: now, timetable: timetable, walkRange: walkRange)
@@ -350,7 +350,7 @@ extension TripPlanner {
     /// to the same end that changes elsewhere, or to other lines, becomes more stations of the
     /// first one's change (`joining(_:into:)`). Then each change also gets your train's stops
     /// either side where a line across the platform goes to the end (`changingNearby(_:)`).
-    static func joiningChanges(_ trips: [Trip], at now: Date = .now) -> [Trip] {
+    static func joiningChanges(_ trips: [Trip], at now: Date = AppClock.now) -> [Trip] {
         var joined: [Trip] = []
         for trip in trips {
             if let index = joined.indices.first(where: { joining(trip, into: joined[$0]) != nil }),
@@ -404,7 +404,7 @@ extension TripPlanner {
     /// Manhattan changing to the D or N at Atlantic Av-Barclays Ctr for 34 St-Herald Sq, the Q at
     /// DeKalb Av.
     static func changingNearby(_ trip: Trip) -> Trip {
-        changingNearby(trip, at: .now)
+        changingNearby(trip, at: AppClock.now)
     }
 
     /// `changingNearby(_:)` leaving at `now`: lines the timetable has no trains of there then
@@ -434,7 +434,7 @@ extension TripPlanner {
     /// at Atlantic Av-Barclays Ctr for 34 St-Herald Sq, the B or Q there. Leaving at `now`, not
     /// lines the timetable has no trains of there then (`running(_:for:at:)`), nor in step-free
     /// mode changes that aren't step-free (`stepFree(_:)`).
-    static func otherChanges(for trip: Trip, at now: Date = .now) -> [Change] {
+    static func otherChanges(for trip: Trip, at now: Date = AppClock.now) -> [Change] {
         guard let change = trip.change else { return [] }
         var others: [Change] = []
         var complexes = Set<String>()
@@ -468,7 +468,7 @@ extension TripPlanner {
     /// the platform or between step-free ones, each to lines that get off at a step-free platform
     /// at the end. Not at Lexington Av/59 St for the N, R or W, whose platform has no elevator, nor
     /// to an E toward Queens at Court Sq-23 St, step-free toward Manhattan only. Nil if none are
-    /// left. For trips from elsewhere (Google's) and without the timetable; the timed planner
+    /// left. For trips from elsewhere (`ServerRoutes`) and without the timetable; the timed planner
     /// keeps to them itself.
     static func stepFree(_ trip: Trip) -> Trip? {
         guard let station = trip.selection.station else { return nil }

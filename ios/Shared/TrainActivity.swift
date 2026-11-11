@@ -179,6 +179,33 @@ struct ToggleBusCountdownIntent: LiveActivityIntent {
     }
 }
 
+/// A Saved Route's button, where the route goes somewhere (`SavedWidget.hasEnd`): opens the app
+/// on New Trip, planned from where you are to the route's end, showing only the route's ways.
+struct PlanRouteTripIntent: AppIntent {
+    static let title: LocalizedStringResource = "Start navigation using this route"
+    static let isDiscoverable = false
+    static let supportedModes: IntentModes = .foreground
+
+    /// A `SavedWidget.id`.
+    @Parameter(title: "Route", default: "")
+    var routeID: String
+
+    init() {}
+
+    init(routeID: UUID) {
+        self.routeID = routeID.uuidString
+    }
+
+    func perform() async throws -> some IntentResult {
+        #if APP
+        if let id = UUID(uuidString: routeID) {
+            await MainActor.run { StationOpening.shared.route = id }
+        }
+        #endif
+        return .result()
+    }
+}
+
 extension BusChoice {
     /// What `SharedStore.Countdown.trainID` holds while this bus is counted down to:
     /// "bus:B63,B103@308209".

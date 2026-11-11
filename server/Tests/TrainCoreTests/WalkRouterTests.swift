@@ -103,6 +103,91 @@ import Testing
         #expect(corridor > 10_000)
     }
 
+    /// The night data's in the graph: crime over the neighbours' on blocks and corners at each
+    /// part of the day, shops along streets, dark and park paths.
+    @Test func nightDataIsThere() throws {
+        let g = try router().graph
+        let blocks = WalkGraph.Band.allCases.map { band in g.blockCrime[band.rawValue].filter { $0 > 0 }.count }
+        let corners = WalkGraph.Band.allCases.map { band in g.nodeCrime[band.rawValue].filter { $0 > 0 }.count }
+        let shops = g.blockShops.filter { $0 > 0 }.count
+        let dark = (0..<g.blockCount).filter { g.night(of: $0).contains(.dark) }.count
+        let parks = (0..<g.blockCount).filter { g.night(of: $0).contains(.park) }.count
+        print("night: blocks over \(blocks), corners over \(corners), \(shops) with shops, \(dark) dark, \(parks) in parks")
+        #expect(blocks.allSatisfy { $0 > 30_000 })
+        #expect(corners.allSatisfy { $0 > 3_000 })
+        #expect(shops > 50_000)
+        #expect(dark > 10_000)
+        #expect(parks > 10_000)
+    }
+
+    /// The parts of the day, by the hour in New York; parks shut 1–6.
+    @Test func walkTimesByTheHour() throws {
+        typealias Time = WalkRouter.Options.Time
+        #expect(Time(hour: 7).band == .day && Time(hour: 17).band == .day)
+        #expect(Time(hour: 18).band == .evening && Time(hour: 22).band == .evening)
+        #expect(Time(hour: 23).band == .late && !Time(hour: 23).parksClosed)
+        #expect(Time(hour: 2).band == .late && Time(hour: 2).parksClosed)
+        #expect(Time(hour: 5).parksClosed && !Time(hour: 6).parksClosed)
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try #require(TimeZone(identifier: "America/New_York"))
+        let night = try #require(calendar.date(from: DateComponents(year: 2026, month: 11, day: 9, hour: 2)))
+        #expect(Time(night) == Time(hour: 2))
+    }
+
+    /// A crossing's night risk adds to its cost as it is, whatever its light or refuge.
+    @Test func nightRiskAddsToACrossing() throws {
+        let router = try router()
+        let plain = WalkRouter.Crossing(width: 10, lanes: 1, speed: 25, twoWay: false, flags: [], signal: .signal, fixed: WalkCosts.fixed)
+        var refuge = plain
+        refuge.refuge = true
+        var night = refuge
+        night.night = 12
+        #expect(abs(router.cost(of: night, weight: 1) - router.cost(of: refuge, weight: 1) - 12) < 0.01)
+        // After dark, one with no light costs more; one at a light the same
+        var unlit = plain
+        unlit.signal = []
+        var unlitDark = unlit
+        unlitDark.dark = true
+        var litDark = plain
+        litDark.dark = true
+        #expect(router.cost(of: unlitDark, weight: 1) > router.cost(of: unlit, weight: 1))
+        #expect(router.cost(of: litDark, weight: 1) == router.cost(of: plain, weight: 1))
+    }
+
+    /// Night costs leave Fastest as it is, keep Balanced and Safest within their budgets, and
+    /// keep a walk out of Prospect Park while it's shut: Grand Army Plaza to Parkside Av.
+    @Test func nightKeepsToTheBudgetAndOutOfShutParks() throws {
+        let router = try router()
+        let start = Walk.Point(lat: 40.6735, lon: -73.9701), end = Walk.Point(lat: 40.6551, lon: -73.9614)
+        func walk(_ preference: WalkPreference, hour: Int) throws -> WalkRouter.Route {
+            var options = WalkRouter.Options(preference: preference)
+            options.time = .init(hour: hour)
+            return try #require(router.route(from: start, to: end, options: options))
+        }
+        func inPark(_ route: WalkRouter.Route) -> Double {
+            route.legs.reduce(0) { total, leg in
+                guard case let .side(block, _, from, to, _, _) = leg, router.graph.night(of: block).contains(.park) else { return total }
+                return total + from.metres(to: to)
+            }
+        }
+        // The same time and risk: a walk with ties (either side of a block) may take either
+        let fastLate = try walk(.fastest, hour: 2), fastNoon = try walk(.fastest, hour: 12)
+        #expect(abs(fastLate.stats.seconds - fastNoon.stats.seconds) < 0.01)
+        #expect(abs(fastLate.stats.risk - fastNoon.stats.risk) < 0.01)
+        for preference in [WalkPreference.balanced, .safest] {
+            let noon = try walk(preference, hour: 12), late = try walk(preference, hour: 2)
+            print(describe("\(preference) noon, \(Int(inPark(noon))) m in the park", noon, router))
+            print(describe("\(preference) 2 am, \(Int(inPark(late))) m in the park", late, router))
+            #expect(late.stats.seconds <= WalkCosts.budget(preference, fastest: late.stats.fastestSeconds) + 1)
+            #expect(inPark(late) < 50)
+            // Said only after dark, and only where the night took it another way
+            #expect(!noon.stats.saferAtNight)
+            if preference == .safest { #expect(late.stats.saferAtNight) }
+        }
+        #expect(try !walk(.fastest, hour: 2).stats.saferAtNight)
+        #expect(try !walk(.balanced, hour: 2).stats.saferAtNight)
+    }
+
 
     /// Walking from `start` to `end` with `preference`.
     func route(_ router: WalkRouter, _ start: (Double, Double), _ end: (Double, Double),

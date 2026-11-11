@@ -56,6 +56,10 @@ enum WidgetLook: String, CaseIterable, Identifiable {
 struct WidgetPreview: View {
     let widget: SavedWidget
     var look: WidgetLook = .medium
+    /// Drawn instead of fetched times, for a canvas preview with none.
+    var sample: TrainEntry?
+    /// Routes' shared feeds, for its first load as the tab opens.
+    var firstLoads: FirstLoads?
     @Environment(SettingsStore.self) private var settingsStore
     @State private var board: SharedStore.SavedBoard?
     /// Showing both directions: the other way's times.
@@ -76,33 +80,50 @@ struct WidgetPreview: View {
     /// What the widget shows now, with commuting hours.
     private var shown: SavedWidget { widget.shown(at: minute) }
     /// Medium and large show the change.
-    private var change: Change? { look == .small ? nil : shown.change }
+    private var change: Change? { trip.change }
     /// Drawn with its ways on, with a change.
     private var transfers: Bool { change != nil }
     /// Timed to a destination without a change.
-    private var destination: Station? { shown.directDestination }
+    private var destination: Station? { trip.destination }
     /// Medium and large without a change show both directions.
-    private var bothWays: Bool { look != .small && change == nil && shown.bothWays }
+    private var bothWays: Bool { trip.bothWays }
 
     /// What decides the times fetched; not walking time, which only decides which are catchable.
-    private struct Trip: Equatable {
+    struct Trip: Equatable, Sendable {
         var selection: Selection
         var change: Change?
         var destination: Station?
         var settings: AppSettings
         var bothWays: Bool
+
+        /// `widget`'s, drawn as `look` at `date`.
+        init(_ widget: SavedWidget, look: WidgetLook, settings: AppSettings, at date: Date) {
+            let shown = widget.shown(at: date)
+            selection = shown.selection
+            selection.walkMinutes = 0
+            change = look == .small ? nil : shown.change
+            destination = shown.directDestination
+            self.settings = settings
+            bothWays = look != .small && change == nil && shown.bothWays
+        }
+
+        /// The stops its feeds are fetched for: both ways', showing both.
+        var feedStops: Set<String> {
+            var stops = TrainService.routeFeedStops(for: selection, change: change, destination: destination)
+            if bothWays {
+                stops.formUnion(TrainService.feedStops(for: selection.otherWay, change: nil, destination: nil))
+            }
+            return stops
+        }
     }
 
     private var trip: Trip {
-        var selection = shown.selection
-        selection.walkMinutes = 0
-        return Trip(selection: selection, change: change, destination: destination, settings: settingsStore.settings,
-                    bothWays: bothWays)
+        Trip(widget, look: look, settings: settingsStore.settings, at: minute)
     }
 
     var body: some View {
         TimelineView(.everyMinute) { context in
-            TrainWidgetView(entry: entry(at: context.date))
+            TrainWidgetView(entry: sample ?? planning(entry(at: context.date)))
                 // Into commuting hours or out, the other trip's times fetched for it
                 .onChange(of: context.date, initial: true) { _, date in minute = date }
         }
@@ -117,21 +138,19 @@ struct WidgetPreview: View {
         .clipShape(Self.shape)
         .allowsHitTesting(false)
         .accessibilityElement(children: .combine)
-        // Its toggles don't take taps here, so it's not a switch; what it's in decides
-        .accessibilityRemoveTraits(.isToggle)
-        .task(id: trip) { if widget.kind == .subway { await load(trip) } }
+        // Its toggles and buttons don't take taps here, so it's neither; what it's in decides
+        .accessibilityRemoveTraits([.isToggle, .isButton])
+        .task(id: trip) { if widget.kind == .subway, sample == nil { await load(trip) } }
         .task(id: routeTrip) { await loadRoute(routeTrip) }
     }
 
-    /// A bus or dock widget's: what decides its fetch.
+    /// A bus widget's: what decides its fetch.
     private struct RouteTrip: Equatable {
         var bus: BusChoice?
-        var dock: DockChoice?
-        var kinds: SharedBikeKinds
     }
 
     private var routeTrip: RouteTrip {
-        RouteTrip(bus: widget.bus, dock: widget.dock, kinds: settingsStore.settings.bikeKinds)
+        RouteTrip(bus: widget.bus)
     }
 
     /// As the widget's timeline entry at `date`: the trains still to catch.
@@ -161,16 +180,21 @@ struct WidgetPreview: View {
                           otherWay: otherWay(at: date))
     }
 
-    /// A bus or dock widget's entry: its times or counts, or until they're fetched, saying so.
+    /// `entry` with the New Trip button in the countdown's place, where the route goes
+    /// somewhere, as the widget has it (`TrainEntry.plansRoute`).
+    private func planning(_ entry: TrainEntry) -> TrainEntry {
+        var entry = entry
+        entry.plansRoute = shown.hasEnd ? widget.id : nil
+        return entry
+    }
+
+    /// A bus widget's entry: its times, or until they're fetched, saying so.
     private func routeEntry(at date: Date) -> TrainEntry {
         var entry = TrainEntry(date: date, selection: widget.selection, trains: [], settings: settingsStore.settings)
         if let route {
             entry.route = route
         } else if let bus = widget.bus {
             entry.route = .bus(SavedBusBoard(choice: bus, buses: [], problem: "Getting times…"))
-        } else if let dock = widget.dock {
-            entry.route = .dock(SavedDockBoard(dock: dock, kinds: settingsStore.settings.bikeKinds, fetched: date,
-                                               problem: "Getting counts…"))
         }
         return entry
     }
@@ -182,8 +206,6 @@ struct WidgetPreview: View {
         guard !Task.isCancelled else { return }
         let fetched: RouteTimes? = if widget.kind == .bus, let bus = trip.bus {
             .bus(await SavedBusBoard.fetch(bus, now: .now))
-        } else if let dock = trip.dock {
-            .dock(await SavedDockBoard.fetch(dock, kinds: trip.kinds, now: .now))
         } else {
             nil
         }
@@ -211,22 +233,14 @@ struct WidgetPreview: View {
         failed = false
         try? await Task.sleep(for: .seconds(0.4))
         guard !Task.isCancelled else { return }
-        let alerts = selection.mentionsAlerts(with: trip.settings)
-        // Alongside its own: just its trains, as the widget shows of it
-        async let otherWay = Self.otherBoard(for: selection, if: trip.bothWays)
         do {
-            let fetched = if let change {
-                await TrainService.addingBuses(
-                    to: try await TrainService.board(for: selection, change: change, includingAlerts: alerts,
-                                                     includingOutages: selection.elevatorAlerts),
-                    change: change)
-            } else {
-                try await TrainService.board(for: selection, arrivingAt: trip.destination, includingAlerts: alerts,
-                                             includingOutages: selection.elevatorAlerts)
-            }
-            let other = try await otherWay
+            let (fetched, other) = try await Self.boards(for: selection, trip: trip,
+                                                         sharing: firstLoads?.take(for: widget.id))
             guard !Task.isCancelled else { return }
-            otherBoard = other.map { SharedStore.SavedBoard(fetched: .now, trains: $0.trains, notice: nil) }
+            // Saved as the widget saves them, so its reload after an edit draws these, not fetches again
+            SharedStore.saveBoard(fetched, for: selection, change: change, destinationID: trip.destination?.id,
+                                  fetched: .now)
+            otherBoard = other.map { SharedStore.saveBoard($0, for: selection.otherWay, fetched: .now) }
             board = SharedStore.SavedBoard(fetched: .now, trains: fetched.trains,
                                            notice: fetched.notice(for: selection, settings: trip.settings),
                                            connections: change == nil ? nil : fetched.connections,
@@ -237,25 +251,77 @@ struct WidgetPreview: View {
         }
     }
 
-    /// `selection` going the other way, fetched, when showing both directions.
-    private static func otherBoard(for selection: Selection, if bothWays: Bool) async throws -> Board? {
+    /// `selection`'s board for `trip`, and the other way's showing both. Both ways' feeds
+    /// downloaded once for the two (`TrainService.sharingFeeds`), or in `shared` with other routes'.
+    static func boards(for selection: Selection, trip: Trip, sharing shared: TrainService.FeedBatch? = nil,
+                       now: Date = AppClock.now) async throws -> (Board, Board?) {
+        let alerts = selection.mentionsAlerts(with: trip.settings)
+        let change = trip.change
+        return try await TrainService.sharingFeeds(atStops: trip.feedStops, joining: shared) {
+            // Alongside its own, as the widget fetches it
+            async let otherWay = Self.otherBoard(for: selection, if: trip.bothWays, settings: trip.settings, now: now)
+            let fetched = if let change {
+                try await TrainService.routeBoard(for: selection, change: change, includingAlerts: alerts,
+                                                  includingOutages: selection.elevatorAlerts, now: now)
+            } else {
+                try await TrainService.board(for: selection, arrivingAt: trip.destination, includingAlerts: alerts,
+                                             includingOutages: selection.elevatorAlerts, now: now)
+            }
+            return (fetched, try await otherWay)
+        }
+    }
+
+    /// `selection` going the other way, fetched, when showing both directions. With the alerts
+    /// the widget fetches it with, as it's saved for it.
+    private static func otherBoard(for selection: Selection, if bothWays: Bool, settings: AppSettings,
+                                   now: Date) async throws -> Board? {
         guard bothWays else { return nil }
-        return try await TrainService.board(for: selection.otherWay, arrivingAt: nil, includingAlerts: false,
-                                            includingOutages: false)
+        let other = selection.otherWay
+        return try await TrainService.board(for: other, arrivingAt: nil,
+                                            includingAlerts: other.mentionsAlerts(with: settings),
+                                            includingOutages: other.elevatorAlerts, now: now)
     }
 }
 
-/// A stand-in for a Home Screen wallpaper, behind the Widgets tab's widgets.
-struct WallpaperBackdrop: View {
-    var body: some View {
-        LinearGradient(colors: [Color(red: 0.16, green: 0.29, blue: 0.62), Color(red: 0.55, green: 0.33, blue: 0.68),
-                                Color(red: 0.95, green: 0.55, blue: 0.45)],
-                       startPoint: .topLeading, endPoint: .bottomTrailing)
+/// Routes' first loads as the tab opens, in one `TrainService.FeedBatch` for every route's
+/// stops: each feed downloaded once for them all, not once a route. Each route takes it for its
+/// first load only, and only for moments, so a refresh or edit fetches its own as before and
+/// is never shown older times than a fetch would.
+@MainActor final class FirstLoads {
+    private var batch: TrainService.FeedBatch?
+    /// The routes yet to take it; it's let go once they all have.
+    private var waiting: Set<UUID> = []
+    private var started = Date.distantPast
+    /// As long as the app reuses a feed fetched moments ago anyway (`TrainService`).
+    static let life: TimeInterval = 15
+
+    /// A new batch for `widgets`' first loads, each as `look` draws it.
+    func start(_ widgets: [SavedWidget], look: (UUID) -> WidgetLook, settings: AppSettings, at date: Date = .now) {
+        let subway = widgets.filter { $0.kind == .subway }
+        let stops = subway.reduce(into: Set<String>()) {
+            $0.formUnion(WidgetPreview.Trip($1, look: look($1.id), settings: settings, at: date).feedStops)
+        }
+        batch = subway.isEmpty ? nil : TrainService.FeedBatch(stops: stops)
+        waiting = Set(subway.map(\.id))
+        started = date
+    }
+
+    /// The batch for route `id`'s first load since `start`; nil after, or once it's old.
+    func take(for id: UUID, now: Date = .now) -> TrainService.FeedBatch? {
+        guard waiting.remove(id) != nil else { return nil }
+        guard now.timeIntervalSince(started) < Self.life else {
+            batch = nil
+            return nil
+        }
+        let taken = batch
+        // Kept by the loads using it till they're done
+        if waiting.isEmpty { batch = nil }
+        return taken
     }
 }
 
 #Preview {
-    let widget = SharedStore.firstWidgets.widgets[0]
+    let widget = SharedStore.firstWidgets.widgets.first ?? .default(.fallback)
     VStack(spacing: 20) {
         ForEach(WidgetLook.allCases) { look in
             WidgetPreview(widget: widget, look: look)

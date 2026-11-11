@@ -19,8 +19,21 @@ enum PlannedTrips {
     /// How a bus boarded at a stop is found among the times.
     static func busKey(_ leg: BusLeg) -> String { "\(BusRoutes.key(leg.line)) \(leg.stop.id)" }
 
+    /// Every ride, the fallback's too: its trains and buses are fetched alongside, for when
+    /// the main first train or bus isn't coming.
     private static func allRides(_ trip: PlannedTrip) -> [PlannedRide] {
-        trip.ways.flatMap { $0.rides.joined() }
+        (trip.ways + (trip.fallback?.ways ?? [])).flatMap { $0.rides.joined() }
+    }
+
+    /// The trip as followed now: its own ways, or with none of their first trains or buses
+    /// coming, its fallback's (with the fallback); the trip itself if the fallback's aren't
+    /// coming either.
+    static func following(_ trip: PlannedTrip, times: Times, now: Date) -> (trip: PlannedTrip, fallback: PlannedTrip.Fallback?) {
+        guard let fallback = trip.fallback, firsts(trip, times: times, now: now).isEmpty else { return (trip, nil) }
+        var instead = trip
+        instead.ways = fallback.ways
+        instead.fallback = nil
+        return firsts(instead, times: times, now: now).isEmpty ? (trip, nil) : (instead, fallback)
     }
 
     /// Every train line ridden.
@@ -43,7 +56,7 @@ enum PlannedTrips {
 
     /// The trains and buses `trip` needs, from the feeds and Bus Time; nil if no train feed could
     /// be reached where trains are ridden.
-    static func fetch(_ trip: PlannedTrip, now: Date = .now) async -> Times? {
+    static func fetch(_ trip: PlannedTrip, now: Date = AppClock.now) async -> Times? {
         let routes = trainRoutes(trip)
         let stops = trainStops(trip)
         let buses = Array(Set(allRides(trip).compactMap(\.bus)))
@@ -62,22 +75,27 @@ enum PlannedTrips {
         var trains: [Arrival] = []
         if !routes.isEmpty {
             let feeds = Lines.feedURLs(sharingTracksWith: routes)
-            let part = FeedPart(stops: stops)
-            let own = await withTaskGroup(of: Data?.self) { group in
-                for url in feeds.own { group.addTask { await TrainService.optionalData(from: url, part: part) } }
-                var all: [Data] = []
-                for await data in group { if let data { all.append(data) } }
+            let part = TrainService.FeedPart(stops: stops)
+            // Its own lines' feeds, and those sharing their tracks for other lines' trains
+            // running on them (the D on the R's stops), as `TrainService.board`
+            let fetched = await withTaskGroup(of: (URL, Data?).self) { group in
+                for url in feeds.own + feeds.others {
+                    group.addTask { (url, await TrainService.optionalData(from: url, part: part)) }
+                }
+                var all: [URL: Data] = [:]
+                for await (url, data) in group { if let data { all[url] = data } }
                 return all
             }
+            let own = feeds.own.compactMap { fetched[$0] }
             guard !own.isEmpty else { return nil }
-            trains = ((try? TrainService.arrivals(at: stops, own: own, others: [], now: now)) ?? [])
+            trains = ((try? TrainService.arrivals(at: stops, own: own, others: feeds.others.compactMap { fetched[$0] }, now: now)) ?? [])
                 .sorted { $0.time < $1.time }
         }
         return Times(trains: trains, buses: await busTimes)
     }
 
     /// `trip`'s trains from `timetable`, for when the feeds can't be reached; no buses.
-    static func times(_ trip: PlannedTrip, from timetable: Timetable, now: Date = .now) -> Times {
+    static func times(_ trip: PlannedTrip, from timetable: Timetable, now: Date = AppClock.now) -> Times {
         let trains = timetable.arrivals(at: trainStops(trip), from: now, to: now.addingTimeInterval(3 * 3600))
             .sorted { $0.time < $1.time }
         return Times(trains: trains, buses: [:])
@@ -102,16 +120,26 @@ enum PlannedTrips {
         selection.routes = Array(lines)
         let stops = Set(selection.stopIDs)
         return times.trains.filter {
-            stops.contains($0.stop) && lines.contains($0.route) && $0.leaves > now && !$0.endsHere
+            stops.contains($0.stop) && takes($0, lines: lines) && $0.leaves > now && !$0.endsHere
         }.oncePerTrip()
     }
 
+    /// Whether `train` is one of `lines`, or another line's running on their track: stopping at a
+    /// platform it usually doesn't (the N or D at Prospect Av), as the planner counts it with them.
+    static func takes(_ train: Arrival, lines: Set<String>) -> Bool {
+        if lines.contains(train.route) { return true }
+        guard let platform = StationDirectory.platform(forStop: train.stop) else { return false }
+        return !platform.routes.contains(train.route) && !lines.isDisjoint(with: platform.routes)
+    }
+
     /// Each of `trip`'s first rides with its ways on, each way's soonest there (`Way`, with its
-    /// second change as `Way.then`); the connection is its soonest way's.
+    /// second change as `Way.then`); the connection is its soonest way's. The fallback's, if
+    /// it's followed now (`following`).
     static func connections(_ trip: PlannedTrip, times: Times, now: Date) -> [Connection] {
-        firsts(trip, times: times, now: now).prefix(8).map { first in
+        let trip = following(trip, times: times, now: now).trip
+        return firsts(trip, times: times, now: now).prefix(8).map { first in
             var ways: [Way] = []
-            for way in trip.ways where way.rides.first?.first?.routes.contains(first.route) == true {
+            for way in trip.ways where way.rides.first?.first.map({ takes(first, lines: Set($0.routes)) }) == true {
                 if let found = follow(way, from: first, times: times) { ways.append(found) }
             }
             ways.sort { ($0.arrival?.time ?? .distantFuture) < ($1.arrival?.time ?? .distantFuture) }
@@ -177,7 +205,7 @@ enum PlannedTrips {
     /// station it's left at; a bus at the stop it's left at, by the timetable's minutes there.
     private static func alight(_ spec: PlannedRide, boarded: Arrival, toward next: PlannedRide, times: Times) -> Arrival? {
         if let bus = spec.bus {
-            guard let off = next.offStop, let minutes = busMinutes(bus, to: off) else { return nil }
+            guard let off = next.offStop, let minutes = busMinutes(spec, bus, to: off) else { return nil }
             return Arrival(route: bus.route, time: boarded.time.addingTimeInterval(minutes * 60),
                            stop: BusLeg.prefix + off.id, lastStop: "", isLive: boarded.isLive)
         }
@@ -204,7 +232,7 @@ enum PlannedTrips {
         let stops = Set(train.stopIDs)
         let lines = Set(train.routes)
         let offTrain = BusLeg.line(of: off.route) == nil
-        for departure in times.trains where stops.contains(departure.stop) && lines.contains(departure.route)
+        for departure in times.trains where stops.contains(departure.stop) && takes(departure, lines: lines)
             && departure.trip != off.trip && !departure.endsHere {
             if offTrain, Change.isAcross(off: off.route, at: off.stop, on: departure.route, at: departure.stop) {
                 if Change.canCatchAcross(departure, off: off) { return (departure, 0) }
@@ -222,7 +250,7 @@ enum PlannedTrips {
     /// stop near it by the timetable's minutes, then the walk on.
     private static func end(of way: PlannedWay, spec: PlannedRide, boarded: Arrival, times: Times) -> Arrival? {
         if let bus = spec.bus {
-            guard let stop = way.endStop, let minutes = busMinutes(bus, to: stop) else { return nil }
+            guard let stop = way.endStop, let minutes = busMinutes(spec, bus, to: stop) else { return nil }
             return Arrival(route: bus.route,
                            time: boarded.time.addingTimeInterval(minutes * 60 + TimeInterval(way.endWalk * 60)),
                            stop: BusLeg.prefix + stop.id, lastStop: "", isLive: boarded.isLive)
@@ -234,9 +262,48 @@ enum PlannedTrips {
             && $0.time >= boarded.time }
     }
 
-    /// The timetable's minutes on `bus` from where it's boarded to `stop`; nil if it doesn't get there.
-    static func busMinutes(_ bus: BusLeg, to stop: BusStop) -> Double? {
-        BusRoutes.ahead(on: bus.line, from: bus.stop.id, toward: bus.destination).first { $0.stop.code == stop.id }?.minutes
+    /// The timetable's minutes on `bus` (ride `spec`'s) from where it's boarded to `stop`: as
+    /// planned, else from `BusRoutes` (saves from before), which loads every route; nil if it
+    /// doesn't get there.
+    private static func busMinutes(_ spec: PlannedRide, _ bus: BusLeg, to stop: BusStop) -> Double? {
+        // Planned: one it doesn't get to isn't worth looking up again
+        if let planned = spec.busMinutes { return planned[stop.id] }
+        return busMinutes(bus, to: [stop])[stop.id]
+    }
+
+    /// The timetable's minutes on `bus` from where it's boarded to each of `stops` it gets to,
+    /// by stop code.
+    static func busMinutes(_ bus: BusLeg, to stops: [BusStop]) -> [String: Double] {
+        let codes = Set(stops.map(\.id))
+        guard !codes.isEmpty else { return [:] }
+        var found: [String: Double] = [:]
+        for ahead in BusRoutes.ahead(on: bus.line, from: bus.stop.id, toward: bus.destination)
+            where codes.contains(ahead.stop.code) && found[ahead.stop.code] == nil {
+            found[ahead.stop.code] = ahead.minutes
+        }
+        return found
+    }
+}
+
+extension PlannedTrip {
+    /// With each bus ride's minutes to the stops it's left at (`PlannedRide.busMinutes`), from
+    /// `BusRoutes`, so the widgets have them without loading it. Done in the app when planned.
+    func timingBuses() -> PlannedTrip {
+        var trip = self
+        for w in trip.ways.indices {
+            let way = trip.ways[w]
+            for r in way.rides.indices {
+                // Left at the next ride's stop, or at the end's
+                let stops = r + 1 < way.rides.count ? way.rides[r + 1].compactMap(\.offStop) : way.endStop.map { [$0] } ?? []
+                for o in way.rides[r].indices {
+                    // None found (no bus routes to hand): left for the widget to work out
+                    guard let bus = way.rides[r][o].bus, case let minutes = PlannedTrips.busMinutes(bus, to: stops),
+                          !minutes.isEmpty else { continue }
+                    trip.ways[w].rides[r][o].busMinutes = minutes
+                }
+            }
+        }
+        return trip
     }
 }
 
@@ -247,10 +314,88 @@ extension PlannedWay {
 }
 
 extension PlannedRide {
-    /// Where it's changed to: the stop's name off a bus or onto one, else the station's.
+    /// Where it's changed to: onto a bus, its stop's name; onto a train, the station's.
     var changePlace: String {
         if let bus { return bus.stopName }
-        if let stop = offStop { return BusNames.readable(stop.name) }
+        // Onto a train: the station it's boarded at (off a bus, not the stop left)
+        if offStop != nil { return placeName }
         return (offStationID ?? train?.stationID).flatMap(StationDirectory.station(id:))?.name ?? placeName
+    }
+}
+
+extension PlannedTrips {
+    /// `trip` as a change board: its first rides, each with its ways on.
+    static func board(_ trip: PlannedTrip, times: Times, now: Date) -> Board {
+        let connections = connections(trip, times: times, now: now)
+        var board = Board(trains: connections.map(\.first), connections: connections)
+        // Following the fallback: why, first on the board
+        if let fallback = following(trip, times: times, now: now).fallback {
+            board.fallbackNote = "\(fallback.when) · \(fallback.takes)"
+        }
+        return board
+    }
+}
+
+extension TrainService {
+    /// As `feedStops(for:change:destination:)`, for `routeBoard`: a planned trip's own stops
+    /// (`PlannedTrips.fetch`), which a change's plan doesn't have.
+    static func routeFeedStops(for selection: Selection, change: Change?, destination: Station?) -> Set<String> {
+        if let trip = change?.planned { return PlannedTrips.trainStops(trip) }
+        return feedStops(for: selection, change: change, destination: destination)
+    }
+
+    /// A route's change board: for a planned trip (`Change.planned`), its ways followed through
+    /// every ride, train or bus, with the alerts of every line it rides; otherwise the change's
+    /// (`board(for:change:)`) with its buses (`addingBuses`).
+    static func routeBoard(for selection: Selection, change: Change, includingAlerts: Bool = true,
+                           includingOutages: Bool = true, waitingAfterOwnLines grace: TimeInterval? = nil,
+                           now: Date = AppClock.now) async throws -> Board {
+        guard let trip = change.planned else {
+            return await addingBuses(to: try await board(for: selection, change: change, includingAlerts: includingAlerts,
+                                                         includingOutages: includingOutages,
+                                                         waitingAfterOwnLines: grace, now: now),
+                                     change: change, now: now)
+        }
+        let routes = Set(PlannedTrips.trainRoutes(trip))
+        let rides = trip.ways.flatMap { $0.rides.joined() }.compactMap(\.train)
+        async let entries = alertEntries(if: includingAlerts, routes: routes, now: now)
+        async let outages = plannedOutages(for: [selection] + rides, if: includingOutages)
+        guard let times = await PlannedTrips.fetch(trip, now: now) else { throw URLError(.cannotLoadFromNetwork) }
+        var board = PlannedTrips.board(trip, times: times, now: now)
+        board.alerts = await entries.map { AlertsFeed.alerts(for: [selection] + rides, in: $0, now: now) }
+        board.ownAlerts = await entries.map { AlertsFeed.alerts(for: selection, in: $0, now: now) }
+        board.outages = await outages
+        return board
+    }
+
+    /// Outages serving any of `selections`' platforms (a planned trip's trains, where they're
+    /// boarded), each once, from one fetch of the feed; nil if not wanted or it can't be read, as
+    /// `board`'s.
+    private static func plannedOutages(for selections: [Selection], if wanted: Bool) async -> [Outage]? {
+        guard wanted else { return nil }
+        let served = selections.filter { EquipmentDirectory.hasEquipment(serving: $0.platforms) }
+        // No equipment serves their platforms: nothing to fetch
+        guard !served.isEmpty else { return [] }
+        let data = await optionalData(from: OutagesFeed.url, priority: URLSessionTask.lowPriority)
+        var found: [Outage] = []
+        for selection in served {
+            guard let outages = outages(for: selection, in: data) else { return nil }
+            for outage in outages where !found.contains(where: { $0.id == outage.id }) { found.append(outage) }
+        }
+        return found
+    }
+
+    /// `routeBoard(for:change:)` from `timetable`: trains only, no buses.
+    static func routeBoard(for selection: Selection, change: Change, from timetable: Timetable, now: Date = AppClock.now) -> Board {
+        guard let trip = change.planned else { return board(for: selection, change: change, from: timetable, now: now) }
+        return PlannedTrips.board(trip, times: PlannedTrips.times(trip, from: timetable, now: now), now: now)
+    }
+}
+
+extension SharedTrip.Option {
+    /// The stops its board asks its feeds for, a planned trip's its own (`routeFeedStops`): for
+    /// fetching several together (`TrainService.sharingFeeds`).
+    var feedStops: Set<String> {
+        TrainService.routeFeedStops(for: selection, change: change, destination: directDestination)
     }
 }

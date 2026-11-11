@@ -154,7 +154,7 @@ import Testing
         otherLine.route = "N"
         #expect(ActivityState.isMeaningful(otherLine, comparedTo: movedOn))
         #expect(ActivityState.isMeaningful(state(train: 7, trip: "c"), comparedTo: movedOn))
-        #expect(ActivityState.changesWidgets(state(train: 5.5, trip: "c"), from: movedOn))
+        #expect(ActivityState.changesWidgets(state(train: 6, trip: "c"), from: movedOn))
         // With its trip known, another is another train, as before
         #expect(ActivityState.isMeaningful(state(train: 5, trip: "c"), comparedTo: state(train: 5, trip: "b")))
         #expect(ActivityState.changesWidgets(state(train: 5, trip: "c"), from: state(train: 5, trip: "b")))

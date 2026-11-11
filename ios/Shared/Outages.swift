@@ -34,6 +34,12 @@ enum EquipmentDirectory {
         let alternative: String
         /// GTFS stops of the platforms it serves, e.g. ["718", "R09"]; nil in older lists.
         var stops: [String]? = nil
+
+        /// Its own complex, and those of the platforms it serves: Dey St's EL728X is the MTA's
+        /// at Fulton St, but serves Cortlandt St's R too.
+        var complexes: Set<String> {
+            Set([complex] + (stops ?? []).compactMap { StationDirectory.platform(forStop: $0)?.complex })
+        }
     }
 
     static let all: [String: Machine] = {
@@ -48,7 +54,9 @@ enum EquipmentDirectory {
 
     /// `all` by complex: asked of from views as they redraw, not every machine looked through
     /// each time.
-    private static let byComplex: [String: [Machine]] = Dictionary(grouping: all.values, by: \.complex)
+    private static let byComplex: [String: [Machine]] = all.values.reduce(into: [:]) { byComplex, machine in
+        for complex in machine.complexes { byComplex[complex, default: []].append(machine) }
+    }
 
     static func hasEquipment(atComplex complex: String) -> Bool {
         byComplex[complex] != nil
@@ -73,7 +81,7 @@ enum OutagesFeed {
     static func outages(atComplex complex: String, in data: Data, equipment: [String: EquipmentDirectory.Machine] = EquipmentDirectory.all) throws -> [Outage] {
         let rows = try JSONDecoder().decode([MaybeRow].self, from: data).compactMap(\.row)
         let outages: [Outage] = rows.compactMap { row in
-            guard let machine = equipment[row.equipment], machine.complex == complex else { return nil }
+            guard let machine = equipment[row.equipment], machine.complexes.contains(complex) else { return nil }
             return Outage(
                 id: row.equipment + (row.outagedate ?? ""),
                 isElevator: machine.elevator,

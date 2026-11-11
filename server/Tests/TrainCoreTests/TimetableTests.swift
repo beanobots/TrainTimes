@@ -71,12 +71,87 @@ private let gtfs = [
 
 private let today = newYork(2026, 10, 22, 7)
 
+/// Two bus feeds, as Brooklyn's and MTA Bus's, each with a "Weekday" service: Brooklyn's runs
+/// on weekdays, MTA Bus's only on Saturday the 24th. Both call at stop 300000, the same stop;
+/// both have a trip "T1". The B63 runs each way, and its trips' headsigns tell them apart.
+private let brooklyn = [
+    "calendar.txt": """
+        service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date
+        Weekday,1,1,1,1,1,0,0,20261001,20261231
+        """,
+    "calendar_dates.txt": "service_id,date,exception_type\n",
+    "routes.txt": """
+        route_id,agency_id,route_short_name,route_long_name,route_type
+        B63,MTA NYCT,B63,Cobble Hill - Bay Ridge,3
+        B82+,MTA NYCT,B82-SBS,Coney Island - Spring Creek,3
+        """,
+    "trips.txt": """
+        route_id,service_id,trip_id,trip_headsign,direction_id
+        B63,Weekday,T1,BAY RIDGE 95 ST,0
+        B63,Weekday,T2,COBBLE HILL,1
+        B82+,Weekday,T3,"SELECT BUS SPRING CRK, SEAVIEW",0
+        """,
+    "stop_times.txt": """
+        trip_id,arrival_time,departure_time,stop_id,stop_sequence
+        T1,08:00:00,08:00:00,300000,1
+        T1,08:05:00,08:05:00,300001,2
+        T2,09:00:00,09:00:00,300001,1
+        T2,09:05:00,09:05:00,300000,2
+        T3,10:00:00,10:00:00,300002,1
+        T3,10:09:00,10:09:00,300003,2
+        """,
+    "stops.txt": """
+        stop_id,stop_name,stop_desc,stop_lat,stop_lon
+        300000,"5 AV/9 ST",,  40.668000, -73.988000
+        300001,"5 AV/95 ST",,  40.616000, -74.031000
+        300002,"FLATLANDS AV/E 80 ST",,  40.630000, -73.910000
+        300003,"SEAVIEW AV/E 98 ST",,  40.640000, -73.890000
+        399999,"NOT CALLED AT",,  40.600000, -73.900000
+        """,
+]
+
+private let mtaBus = [
+    "calendar.txt": """
+        service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date
+        Weekday,0,0,0,0,0,0,0,20261001,20261231
+        """,
+    "calendar_dates.txt": """
+        service_id,date,exception_type
+        Weekday,20261024,1
+        """,
+    "routes.txt": """
+        route_id,agency_id,route_short_name,route_long_name,route_type
+        Q53+,MTA NYCT,Q53-SBS,Woodside - Rockaway Park,3
+        """,
+    "trips.txt": """
+        route_id,service_id,trip_id,trip_headsign,direction_id
+        Q53+,Weekday,T1,ROCKAWAY PARK,0
+        """,
+    "stop_times.txt": """
+        trip_id,arrival_time,departure_time,stop_id,stop_sequence
+        T1,12:00:00,12:00:00,300000,1
+        T1,12:30:00,12:30:00,550000,2
+        """,
+    "stops.txt": """
+        stop_id,stop_name,stop_desc,stop_lat,stop_lon
+        300000,"ELSEWHERE",,  1.000000, 1.000000
+        550000,"BEACH 116 ST/ROCKAWAY BEACH BL",,  40.580000, -73.837000
+        """,
+]
+
 @Suite struct TimetableTests {
     @Test func coversYesterdaysServiceDayToAWeekOn() {
         let days = TimetableBuilder.serviceDays(around: today)
         #expect(days.map(\.date) == ["20261021", "20261022", "20261023", "20261024", "20261025", "20261026",
                                      "20261027", "20261028", "20261029"])
         #expect(days[1].start == newYork(2026, 10, 22, 0))
+    }
+
+    @Test func coversAMonthWhenAsked() {
+        let days = TimetableBuilder.serviceDays(around: today, days: 30)
+        #expect(days.count == 32)
+        #expect(days.first?.date == "20261021")
+        #expect(days.last?.date == "20261121")
     }
 
     @Test func countsADaysTimesFromNoonLessTwelveHours() {
@@ -210,6 +285,79 @@ private let today = newYork(2026, 10, 22, 7)
             == Set(timetable.arrivals(at: ["R44N", "627N"], from: from, to: to)))
     }
 
+    @Test func writesTheSubwaysAsVersionOne() throws {
+        let timetable = try withGTFS(gtfs) { try TimetableBuilder.build(from: $0, now: today) }
+        // For apps that read only version 1
+        let raw = try (try timetable.encoded() as NSData).decompressed(using: .zlib) as Data
+        #expect(Array(raw.prefix(5)) == [0x4C, 0x57, 0x54, 0x54, 1])
+        // A month's is too
+        let month = try withGTFS(gtfs) { try TimetableBuilder.build(from: [$0], days: 30, now: today) }
+        let monthRaw = try (try month.encoded() as NSData).decompressed(using: .zlib) as Data
+        #expect(monthRaw[4] == 1)
+        #expect(month.covers(newYork(2026, 11, 19, 8)))
+        #expect(!timetable.covers(newYork(2026, 11, 19, 8)))
+    }
+
+    @Test func roundTripsManyRoutesAndPlacesAsVersionTwo() throws {
+        let stops = ["300000", "300001"]
+        let places = [Timetable.Place(latitude: 40.668, longitude: -73.988, name: "5 AV/9 ST"),
+                      Timetable.Place(latitude: 40.616123, longitude: -74.031456, name: "5 AV/95 ST")]
+        let routes = (0..<300).map { "B\($0)\tSOMEWHERE" }
+        let patterns = routes.indices.map { route in
+            Timetable.Pattern(route: UInt16(route), calls: [Timetable.Call(stop: 0, arrives: 0, waits: 0),
+                                                            Timetable.Call(stop: 1, arrives: 300, waits: 10)])
+        }
+        let starts = routes.indices.map { [UInt32($0 * 60), UInt32($0 * 60 + 3600)] }
+        let timetable = Timetable(made: today, base: newYork(2026, 10, 21, 0), stops: stops, routes: routes,
+                                  patterns: patterns, starts: starts, places: places)
+        let data = try timetable.encoded()
+        let raw = try (data as NSData).decompressed(using: .zlib) as Data
+        #expect(raw[4] == 2)
+        let read = try Timetable(data: data)
+        #expect(read.routes == routes)
+        #expect(read.patterns == patterns)
+        #expect(read.patterns.last?.route == 299)
+        #expect(read.starts == starts)
+        #expect(read.places == places)
+        // Places alone make it version 2 too
+        let few = Timetable(made: today, base: timetable.base, stops: stops, routes: ["B63\tBAY RIDGE"],
+                            patterns: [Timetable.Pattern(route: 0, calls: patterns[0].calls)], starts: [[0]],
+                            places: places)
+        let fewRaw = try (try few.encoded() as NSData).decompressed(using: .zlib) as Data
+        #expect(fewRaw[4] == 2)
+        #expect(try Timetable(data: try few.encoded()).places == places)
+    }
+
+    @Test func buildsTheBusesFromSeveralFeeds() throws {
+        let timetable = try withGTFS(brooklyn) { first in
+            try withGTFS(mtaBus) { second in
+                try TimetableBuilder.build(from: [first, second], kind: .buses, now: today)
+            }
+        }
+        // A route each way, by line and headsign; SBS lines as Bus Time names them
+        #expect(Set(timetable.routes) == ["B63\tBAY RIDGE 95 ST", "B63\tCOBBLE HILL",
+                                          "B82+\tSELECT BUS SPRING CRK, SEAVIEW", "Q53+\tROCKAWAY PARK"])
+        // MTA Bus's "Weekday" runs only on the 24th, and Brooklyn's T1 is still Brooklyn's: their
+        // trips on the 21st to 23rd and 26th to 29th, and MTA Bus's on the 24th
+        #expect(timetable.patterns.count == 4)
+        #expect(timetable.starts.reduce(0) { $0 + $1.count } == 3 * 7 + 1)
+        let q53 = try #require(timetable.routes.firstIndex(of: "Q53+\tROCKAWAY PARK"))
+        let q53Starts = zip(timetable.patterns, timetable.starts).filter { Int($0.0.route) == q53 }.flatMap(\.1)
+        #expect(q53Starts.map { timetable.base.addingTimeInterval(TimeInterval($0)) } == [newYork(2026, 10, 24, 12)])
+        // One stop 300000, placed by the first feed to call at it; only stops called at
+        #expect(Set(timetable.stops) == ["300000", "300001", "300002", "300003", "550000"])
+        let places = try #require(timetable.places)
+        let place = { (id: String) in places[timetable.stops.firstIndex(of: id)!] }
+        #expect(place("300000") == Timetable.Place(latitude: 40.668, longitude: -73.988, name: "5 AV/9 ST"))
+        #expect(place("550000").name == "BEACH 116 ST/ROCKAWAY BEACH BL")
+        // And through its file
+        let read = try Timetable(data: try timetable.encoded())
+        #expect(read.places == places)
+        #expect(read.routes == timetable.routes)
+        let at = read.arrivals(at: ["300000"], from: newYork(2026, 10, 22, 7), to: newYork(2026, 10, 22, 10))
+        #expect(at.map(\.time).sorted() == [newYork(2026, 10, 22, 8), newYork(2026, 10, 22, 9, 5)])
+    }
+
     @Test func refusesWhatIsntOne() throws {
         #expect(throws: Timetable.Problem.self) { try Timetable(data: Data("not a timetable".utf8)) }
         let timetable = try withGTFS(gtfs) { try TimetableBuilder.build(from: $0, now: today) }
@@ -222,6 +370,10 @@ private let today = newYork(2026, 10, 22, 7)
     @Test func buildsAtFourInTheMorningNewYorkTime() {
         #expect(TimetableMaker.nextBuild(after: newYork(2026, 10, 22, 4, 5), hour: 4) == newYork(2026, 10, 23, 4))
         #expect(TimetableMaker.nextBuild(after: newYork(2026, 10, 22, 3), hour: 4) == newYork(2026, 10, 22, 4))
+        #expect(TimetableMaker.nextBuild(after: newYork(2026, 10, 22, 4, 5), hour: 4, minute: 30)
+            == newYork(2026, 10, 22, 4, 30))
+        #expect(TimetableMaker.nextBuild(after: newYork(2026, 10, 22, 4, 30, 20), hour: 4, minute: 30)
+            == newYork(2026, 10, 23, 4, 30))
     }
 
     @Test func savesWhatItBuildsAndKeepsItWhenABuildFails() async throws {
@@ -245,6 +397,19 @@ private let today = newYork(2026, 10, 22, 7)
         #expect(await failing.rebuild() == nil)
         #expect(await copy.data == saved)
         #expect(await copy.etag == etag)
+    }
+
+    @Test func savesEachUnderItsOwnName() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("maker-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let timetable = try withGTFS(gtfs) { try TimetableBuilder.build(from: $0, now: today) }
+        let copy = TimetableCopy()
+        let maker = TimetableMaker(copy: copy, directory: folder, file: "bus-timetable.bin", name: "bus timetable",
+                                   hour: 5) { _ in timetable }
+        #expect(await maker.rebuild() == today)
+        #expect(await copy.data == (try Data(contentsOf: folder.appendingPathComponent("bus-timetable.bin"))))
+        #expect(!FileManager.default.fileExists(atPath: folder.appendingPathComponent("timetable.bin").path))
     }
 
     @Test func servesWhatItBuildsThoughItCantSaveIt() async throws {
@@ -310,6 +475,28 @@ private let today = newYork(2026, 10, 22, 7)
         #expect(TimelinePlan.filling([arrival(-5, trip: "gone")], from: timetable, selection: prospect, now: now)
             .map(\.trip) == ["t1", "t2"])
         #expect(TimelinePlan.filling([], from: timetable, selection: prospect, now: now).map(\.trip) == ["t1", "t2"])
+    }
+
+    /// The MTA's bus GTFS, each feed unzipped into a folder in BUS_TIMETABLE_GTFS, to see how big
+    /// and quick it is.
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["BUS_TIMETABLE_GTFS"] != nil))
+    func buildsTheMTAsBusTimetable() throws {
+        let root = URL(fileURLWithPath: try #require(ProcessInfo.processInfo.environment["BUS_TIMETABLE_GTFS"]))
+        let folders = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey])
+            .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+            .sorted { $0.path < $1.path }
+        let clock = ContinuousClock()
+        let start = clock.now
+        let timetable = try TimetableBuilder.build(from: folders, kind: .buses)
+        let built = clock.now
+        let data = try timetable.encoded()
+        let read = try Timetable(data: data)
+        let decoded = clock.now
+        print("bus timetable: \(folders.count) feeds, \(timetable.patterns.count) patterns, "
+            + "\(timetable.starts.reduce(0) { $0 + $1.count }) trips, \(timetable.stops.count) stops, "
+            + "\(timetable.routes.count) routes, \(data.count / 1024) KB; built in \(built - start), read in \(decoded - built)")
+        #expect(read.covers(.now))
+        #expect(read.places?.count == read.stops.count)
     }
 
     /// The MTA's own GTFS, unzipped into TIMETABLE_GTFS, to see how big and quick it is.

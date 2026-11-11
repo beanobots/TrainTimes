@@ -13,9 +13,19 @@ struct WalkingView: View {
     @State private var camera = MapCameraPosition.userLocation(fallback: .automatic)
     @State private var following = true
     @State private var turn = MapTurn.north
-    /// Which north `turn`'s north is: Settings' NY Special.
+    /// Which north `turn`'s north is: Settings' Grid North.
     @AppStorage(MapNorth.key) private var nyNorth = false
     @State private var compass = CompassHeading()
+    @AppStorage(WalkVoice.speaksKey) private var speaks = true
+    @AppStorage(WalkSession.vibratesKey) private var vibrates = true
+    /// The sound button opened into its Speak / Vibrate / Silent pill, and the closing a moment
+    /// after a pick, put off by another.
+    @State private var soundOpen = false
+    @State private var soundClosing: Task<Void, Never>?
+    /// The option under the finger while sliding on the pill, shown as picked until let go.
+    @State private var soundHover: WalkSound?
+    /// Whether the pill was already open when the touch on it began; nil between touches.
+    @State private var soundTouchStartedOpen: Bool?
     /// The heading the map's turned to while following yours, smoothed from the compass's.
     @State private var shownHeading: Double?
     /// A big turn of yours under way, the map keeping up (`MapHeading.smoothed`).
@@ -88,6 +98,8 @@ struct WalkingView: View {
     private static let stillSpeed: Double = 0.3
     /// Metres a second at most for the guess: a brisk walk or jog, not GPS's odd leap.
     private static let fastestWalk: Double = 3
+    /// The same on a bike: a quick e-bike's.
+    private static let fastestRide: Double = 9
     /// The share of the gap to where you're guessed to be closed each tick: corrections from a
     /// new fix taken in over a second or so, rather than jumped.
     private static let easing: Double = 0.5
@@ -116,9 +128,10 @@ struct WalkingView: View {
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { topHeight = $0 }
             }
             .overlay(alignment: .bottom) {
-                // Countdowns tick over, often enough for a train's moment at the station
-                TimelineView(.periodic(from: .now, by: 5)) { context in
-                    bottomCard(now: context.date)
+                // Countdowns tick over: each minute, and often enough near a train's time for
+                // its moment at the station, or the moment it's one you'll miss
+                TimelineView(cardTick) { context in
+                    bottomCard(now: AppClock.pretend(context.date))
                 }
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { bottomHeight = $0 }
             }
@@ -132,6 +145,7 @@ struct WalkingView: View {
 
     private var map: some View {
         Map(position: $camera, scope: mapScope) {
+            DebugOverlays(on: .walking)
             // On the train, where the train is by its times: GPS can't tell underground
             if isRiding, let ride = session.ride, ride.path.count > 1 {
                 // The ride's line under the train, as the trip map draws it, its stations on it
@@ -161,8 +175,9 @@ struct WalkingView: View {
                     walker
                         .accessibilityLabel("You")
                 }
-            } else if !isRiding {
-                // Until the walk's first fix, MapKit's own
+            } else if isWalking || session.stage == .atStation {
+                // Until the walk's first fix, MapKit's own; not at a change, underground, where
+                // it'd keep GPS hunting for a fix
                 UserAnnotation()
             }
             if session.walk != nil {
@@ -194,10 +209,23 @@ struct WalkingView: View {
                         .mapOverlayLevel(level: .aboveLabels)
                 }
             }
+            // Where a bike's taken and left, ahead
+            if isWalking {
+                ForEach(docksAhead, id: \.self) { dock in
+                    Annotation("", coordinate: dock.coordinate, anchor: .bottom) {
+                        TurnSign(label: dock.name) {
+                            BikeBullet(size: 24, own: dock.own)
+                        }
+                        .accessibilityLabel(dock.label)
+                    }
+                }
+            }
             // The next turn, as a sign standing at its corner
             if isWalking, let turn = nextTurn {
                 Annotation("", coordinate: turn.coordinate, anchor: .bottom) {
                     TurnSign(icon: turn.step.turn.systemImage, label: turn.street)
+                        // The arrow's hidden, so say the turn itself: "Take a left onto 4th Ave"
+                        .accessibilityLabel(turn.step.instruction)
                 }
             }
             // The streets still to cross, each named on a green sign at its near curb, as the
@@ -236,12 +264,14 @@ struct WalkingView: View {
         // Its own buttons, not MapKit's: its compass only turns it north
         .mapControls {}
         .overlay(alignment: .topTrailing) {
-            VStack(spacing: 8) {
-                if !isRiding {
-                    MapUserLocationButton(scope: mapScope)
-                }
+            // Trailing, so the sound pill's name tag stands out to its left without moving the rest
+            VStack(alignment: .trailing, spacing: 8) {
+                if !isRiding { locationButton }
                 turnButton
+                // Walking, speaking and vibrating; not on the train, where it's quiet anyway
+                if !isRiding { soundButton }
             }
+            .animation(.snappy, value: soundOpen)
             .padding(.trailing, 12)
             .padding(.top, 8)
         }
@@ -278,32 +308,42 @@ struct WalkingView: View {
         .onAppear {
             // Not shown in the background (a walk restored as iOS relaunches the app for your
             // location): the compass waits until it's opened
-            if scenePhase == .background {
-                wasInBackground = true
-            } else {
-                compass.start()
-            }
+            if scenePhase == .background { wasInBackground = true }
+            if wantsCompass { compass.start() }
             startOver()
         }
         .onDisappear { compass.stop() }
+        .onChange(of: wantsCompass) { _, wants in
+            if wants { compass.start() } else { compass.stop() }
+        }
         .onChange(of: scenePhase) { _, phase in
             switch phase {
             case .background:
                 wasInBackground = true
-                compass.stop()
             case .active where wasInBackground:
                 wasInBackground = false
-                compass.start()
                 // Caught up at once, not eased across the blocks walked meanwhile
                 if following { startOver() }
             default:
                 break
             }
         }
+        // At the station, no gliding: your dot as the rough fixes come, the map on it
+        .onChange(of: session.location) {
+            guard isOnScreen, !isWalking, !isRiding else { return }
+            followStill()
+        }
         // Following you: turned a little at a time, so a phone glanced at as you walk doesn't
-        // swing the map about. Not four times a second with the screen off
-        .task(id: isOnScreen) {
+        // swing the map about. Only walking, and not four times a second with the screen off:
+        // on the train the train's loop follows it, at the station and the change it's still
+        .task(id: FollowLoop(onScreen: isOnScreen, walking: isWalking)) {
             guard isOnScreen else { return }
+            guard isWalking else {
+                if shownSpot != nil { shownSpot = nil }
+                ahead = 0
+                if !isRiding { followStill() }
+                return
+            }
             while !Task.isCancelled {
                 // Walking a route, the way it runs, so the street you're on is up the screen
                 // and its turns are left and right on it; the compass otherwise
@@ -316,8 +356,8 @@ struct WalkingView: View {
                 }
                 // Any fix, however old: standing still, none come. Off the train there's none
                 // until the next (`WalkSession.location`), not the station you got on at
-                if !isRiding { glide() } else if shownSpot != nil { shownSpot = nil }
-                if following, !gesturing, !isRiding, let here = shownSpot ?? youOnMap {
+                glide()
+                if following, !gesturing, let here = shownSpot ?? youOnMap {
                     follow(here, distance: walkDistance, over: Self.followTick)
                 }
                 try? await Task.sleep(for: .seconds(Self.followTick))
@@ -338,6 +378,7 @@ struct WalkingView: View {
                 try? await Task.sleep(for: .seconds(Self.trainTick))
             }
         }
+        .feedsOverlays(.walking)
         // Being moved by hand: left to the fingers, not pulled back mid-pinch
         .onMapCameraChange(frequency: .continuous) {
             if camera.positionedByUser { gesturing = true }
@@ -367,6 +408,15 @@ struct WalkingView: View {
                 following = false
             }
         }
+        // Re-routed: a new walk, starting where you are. The map back on you and turned the new
+        // way at once, not left as it was (moved off you, or still easing round from the old)
+        .onChange(of: session.walk?.points.first) {
+            guard isWalking else { return }
+            following = true
+            turning = false
+            if let along = routeHeading { shownHeading = along }
+            if let here = youOnMap { follow(here, distance: walkDistance, over: Self.settle) }
+        }
         // The location button
         .onChange(of: camera.followsUserLocation) { _, follows in
             if follows { following = true }
@@ -375,12 +425,55 @@ struct WalkingView: View {
         .onChange(of: isRiding) {
             following = true
         }
+        // Each new instruction said aloud for VoiceOver, as it reaches the turn card
+        .onChange(of: topInstruction) { _, instruction in
+            if let instruction { AccessibilityNotification.Announcement(instruction).post() }
+        }
+    }
+
+    /// The turn card's instruction, as `topCard` has it.
+    private var topInstruction: String? {
+        switch session.stage {
+        case .toTrain, .fromTrain: session.nextStep.map(session.instruction(of:))
+        case .atStation: session.walks?.boarding.down.instruction
+        case .riding, .ridingOn: session.rideInstruction
+        case .changing: session.changeInstruction
+        case .arrived: nil
+        }
     }
 
     private var isRiding: Bool { session.stage == .riding || session.stage == .ridingOn }
 
     /// Walking a route, to the train or from it: the map turned the way you go, you low on it.
     private var isWalking: Bool { session.stage == .toTrain || session.stage == .fromTrain }
+
+    /// The compass runs on screen while you're shown on the map, walking or at the station: for
+    /// the map turned your way and your facing cone. Not on the train, at a change, or there.
+    private var wantsCompass: Bool { isOnScreen && (isWalking || session.stage == .atStation) }
+
+    /// The map back on you, not walking (at the station): no gliding, just where the fix is.
+    private func followStill() {
+        guard following, !gesturing, let here = youOnMap else { return }
+        follow(here, distance: walkDistance, over: Self.settle)
+    }
+
+    /// The bottom card's ticks (`CardTick`): near the times of the trains counted down to, as
+    /// each is due and as it's the last you can make.
+    private var cardTick: CardTick {
+        guard session.stage == .toTrain || session.stage == .atStation || session.stage == .changing else {
+            return CardTick(near: [], minutes: [])
+        }
+        let now = AppClock.now
+        // How long until you're on the platform: a train's no longer one to make that long before it goes
+        let lead = session.onPlatform(now: now).timeIntervalSince(now)
+        let trains = (session.isOnward ? session.onwardTrains : session.trains).prefix(4)
+        // The train counted down to: its minutes, and its minutes to spare, turn over on its own
+        // time's seconds, not the clock's
+        let counted = session.catchable(now: now).map { [$0.time, $0.leaves.addingTimeInterval(-lead)] } ?? []
+        // On the real clock, which `TimelineView` ticks by (`AppClock`)
+        return CardTick(near: trains.flatMap { [$0.time, $0.leaves.addingTimeInterval(-lead)] }.map(AppClock.real),
+                        minutes: counted.map(AppClock.real))
+    }
 
     /// Where you're shown and followed: walking a route, your place along it while GPS puts you
     /// near enough (it drifts off by tall buildings), so the camera behind you stays over the
@@ -427,7 +520,8 @@ struct WalkingView: View {
         }
         var target = fix
         if isOnPath, let location = session.location {
-            let speed = location.speed >= Self.stillSpeed ? min(location.speed, Self.fastestWalk) : 0
+            let fastest = session.nextStep?.isRidden == true ? Self.fastestRide : Self.fastestWalk
+            let speed = location.speed >= Self.stillSpeed ? min(location.speed, fastest) : 0
             let guessed = speed * max(0, Date.now.timeIntervalSince(location.timestamp))
             // Held at the limit a moment for the next fix, then back to the last: stopped
             let next = guessed <= Self.guessAhead ? guessed
@@ -484,15 +578,49 @@ struct WalkingView: View {
     private var nextTurn: (step: Walk.Step, coordinate: CLLocationCoordinate2D, street: String?)? {
         guard let step = session.nextStep, let end = step.points.last else { return nil }
         switch step.turn {
-        case .stairsDown, .stairsUp, .elevatorDown, .elevatorUp, .arrive, .straight: return nil
+        case .stairsDown, .stairsUp, .elevatorDown, .elevatorUp, .arrive, .straight, .takeBike, .leaveBike: return nil
         case .cross: return (step, end.coordinate, nil)
         default: return (step, end.coordinate, Walk.street(in: step.instruction))
         }
     }
 
-    /// Degrees from north the way left to walk runs from where you are, while walking it.
+    /// A bike's dock ahead on the walk you're on, where it's taken or left.
+    private struct DockMark: Hashable {
+        let coordinate: CLLocationCoordinate2D
+        let name: String?
+        let label: String
+        let own: Bool
+
+        static func == (a: DockMark, b: DockMark) -> Bool {
+            a.coordinate.latitude == b.coordinate.latitude && a.coordinate.longitude == b.coordinate.longitude && a.label == b.label
+        }
+
+        func hash(into hasher: inout Hasher) {
+            hasher.combine(coordinate.latitude)
+            hasher.combine(coordinate.longitude)
+            hasher.combine(label)
+        }
+    }
+
+    /// The walk's docks still ahead (`Walk.Turn.takeBike`, `.leaveBike`), named by the dock.
+    private var docksAhead: [DockMark] {
+        guard let walk = session.walk else { return [] }
+        let at = session.progress?.step ?? 0
+        return walk.steps.indices.filter { $0 >= at && walk.steps[$0].turn.isBikeDock }.compactMap { index in
+            let step = walk.steps[index]
+            guard let point = step.points.last else { return nil }
+            // A Citi Bike dock's name after its "at"; your own bike's lock-up has none to show
+            let own = step.instruction.hasPrefix("Lock your bike")
+            let name = step.instruction.range(of: " at ").map { String(step.instruction[$0.upperBound...]) }
+            return DockMark(coordinate: point.coordinate, name: own ? nil : name, label: step.instruction, own: own)
+        }
+    }
+
+    /// Degrees from north the way left to walk runs from where you are, while walking it. None
+    /// once you've gone off it: the old way's no longer yours, so the map turns as you face
+    /// until the re-route's walk comes, not held along the street you left.
     private var routeHeading: Double? {
-        guard session.stage == .toTrain || session.stage == .fromTrain else { return nil }
+        guard isOnPath else { return nil }
         // Read four times a second: points as they are, not every one made a `CLLocation`
         let path = drawnPath
         guard let start = path.first else { return nil }
@@ -554,7 +682,25 @@ struct WalkingView: View {
             longitude: coordinate.longitude + meters * sin(angle) / (Earth.metresPerDegree * cos(coordinate.latitude * .pi / 180)))
     }
 
-    /// The compass button: your heading, or north up (NY North, if Settings says), back again. Following you (or the
+    /// Back on you, following again: MapKit's own location button, but as big as the others.
+    private var locationButton: some View {
+        Button {
+            following = true
+            if let here = youOnMap { follow(here, distance: walkDistance, over: Self.settle) }
+        } label: {
+            Image(systemName: following ? "location.fill" : "location")
+                .font(.system(size: MapButton.icon, weight: .semibold))
+                .foregroundStyle(.tint)
+                .contentTransition(.symbolEffect(.replace))
+                .frame(width: MapButton.size, height: MapButton.size)
+                .glassEffect(.regular.interactive(), in: Circle())
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(following ? "Following your location" : "Show your location")
+    }
+
+    /// The compass button: your heading, or north up (Grid North, if Settings says), back again. Following you (or the
     /// train) again too, if the map's been moved off.
     private var turnButton: some View {
         Button {
@@ -564,29 +710,144 @@ struct WalkingView: View {
             Group {
                 switch turn {
                 case .heading:
-                    // Pointing north as the map's turned
-                    Image(systemName: "location.north.line.fill")
-                        .rotationEffect(.degrees(-heading))
-                        .foregroundStyle(.red)
+                    // Pointing north as the map's turned, or Manhattan as it lies with Grid North on
+                    CompassNeedle(heading: heading, ny: nyNorth)
                 case .north where nyNorth:
-                    VStack(spacing: -2) {
-                        Image(systemName: "arrow.up")
-                            .font(.system(size: 11, weight: .bold))
-                        Text("NY")
-                            .font(.system(size: 12, weight: .heavy))
-                    }
+                    // Grid North: Manhattan upright, as Settings' icon
+                    ManhattanIcon()
+                        .fill(.primary)
+                        .frame(width: 10, height: 26)
                 case .north:
                     Text("N")
-                        .font(.system(size: 17, weight: .bold))
+                        .font(.system(size: 22, weight: .bold))
                 }
             }
-            .frame(width: 30, height: 30)
+            .font(.system(size: MapButton.icon, weight: .semibold))
+            .frame(width: MapButton.size, height: MapButton.size)
+            .glassEffect(.regular.interactive(), in: Circle())
+            .contentShape(Circle())
         }
-        .buttonStyle(.glass)
-        .buttonBorderShape(.circle)
+        .buttonStyle(.plain)
         .accessibilityLabel("Map direction")
         .accessibilityValue(turn.label(ny: nyNorth))
         .accessibilityHint("Changes which way up the map is")
+    }
+
+    /// How the walk tells you its turns, kept for the next walk: one button showing which, growing
+    /// into a pill of all three, Spoken Directions at the top. Tapped open, or slid down from and
+    /// let go on one, like a menu. The pick's named beside it while open, and it shuts half a
+    /// second after.
+    private var sound: WalkSound { WalkSound(speaks: speaks, vibrates: vibrates) }
+
+    /// The closed button's size, and each option's height on the open pill with the gap below it.
+    private static let soundClosed: CGFloat = MapButton.size
+    private static let soundOption: CGFloat = MapButton.size - 8
+    private static let soundRow: CGFloat = soundOption + 4
+
+    private var soundButton: some View {
+        let options = WalkSound.allCases
+        let shown = soundHover ?? sound
+        let row = { (option: WalkSound) in CGFloat(options.firstIndex(of: option) ?? 0) * Self.soundRow }
+        let openHeight = 8 + CGFloat(options.count) * Self.soundRow - 4
+        return HStack(alignment: .top, spacing: 8) {
+            if soundOpen {
+                Text(shown.label)
+                    .font(.subheadline.weight(.semibold))
+                    .padding(.horizontal, 12)
+                    .frame(height: 36)
+                    .glassEffect(.regular, in: Capsule())
+                    // Level with the pick on the pill
+                    .padding(.top, 4 + (Self.soundOption - 36) / 2 + row(shown))
+                    .contentTransition(.opacity)
+                    .transition(.scale(scale: 0.6, anchor: .trailing).combined(with: .opacity))
+                    .accessibilityHidden(true)
+            }
+            // One capsule throughout, so opening and closing is it growing down from the button
+            // and the icons spreading out of it, not one view swapped for another
+            ZStack(alignment: .top) {
+                if soundOpen {
+                    Circle()
+                        .fill(.tint)
+                        .frame(width: Self.soundOption, height: Self.soundOption)
+                        .offset(y: 4 + row(shown))
+                        .transition(.opacity)
+                }
+                ForEach(options, id: \.self) { option in
+                    Image(systemName: option.symbol)
+                        .font(.system(size: MapButton.icon, weight: .semibold))
+                        .foregroundStyle(soundOpen
+                            ? (option == shown ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
+                            : (sound == .silent ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tint)))
+                        .frame(width: Self.soundOption, height: Self.soundOption)
+                        .offset(y: 4 + (soundOpen ? row(option) : 0))
+                        .opacity(soundOpen || option == sound ? 1 : 0)
+                }
+            }
+            .frame(width: Self.soundClosed, height: soundOpen ? openHeight : Self.soundClosed, alignment: .top)
+            .glassEffect(.regular.interactive(), in: Capsule())
+            .contentShape(Capsule())
+            .gesture(soundDrag)
+            .sensoryFeedback(.selection, trigger: soundHover) { old, new in old != nil && new != nil }
+            .accessibilityElement()
+            .accessibilityLabel("Directions sound")
+            .accessibilityValue(sound.label)
+            .accessibilityAdjustableAction { direction in
+                let index = options.firstIndex(of: sound) ?? 0
+                let next = direction == .increment ? index + 1 : index - 1
+                if options.indices.contains(next) { pick(options[next]) }
+            }
+        }
+    }
+
+    /// The option at a height down the pill, the nearest one above or below it.
+    private func soundOption(at y: CGFloat) -> WalkSound {
+        let options = WalkSound.allCases
+        let index = Int(((y - 4) / Self.soundRow).rounded(.down))
+        return options[min(max(index, 0), options.count - 1)]
+    }
+
+    /// A touch on the sound control: opens it if shut; slid, the option under the finger follows
+    /// it and is picked on letting go; a tap on the open pill picks what's under it. Let go well
+    /// off to the side, nothing's picked.
+    private var soundDrag: some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                soundClosing?.cancel()
+                if soundTouchStartedOpen == nil {
+                    soundTouchStartedOpen = soundOpen
+                    if !soundOpen { withAnimation(.snappy) { soundOpen = true } }
+                }
+                let slid = abs(value.translation.height) > 8 || abs(value.translation.width) > 8
+                if slid || soundTouchStartedOpen == true {
+                    withAnimation(.snappy) { soundHover = soundOption(at: value.location.y) }
+                }
+            }
+            .onEnded { value in
+                let startedOpen = soundTouchStartedOpen ?? false
+                soundTouchStartedOpen = nil
+                let slid = abs(value.translation.height) > 8 || abs(value.translation.width) > 8
+                let offSide = value.location.x < -60 || value.location.x > Self.soundClosed + 60
+                withAnimation(.snappy) { soundHover = nil }
+                if (slid || startedOpen) && !offSide {
+                    pick(soundOption(at: value.location.y))
+                }
+            }
+    }
+
+    /// Picks how turns are told, quietening the voice at once if it's no longer wanted, and shuts
+    /// the pill half a second on, unless picked again meanwhile.
+    private func pick(_ option: WalkSound) {
+        withAnimation(.snappy) {
+            speaks = option.speaks
+            vibrates = option.vibrates
+        }
+        if option.speaks { VoicePack.ensure() } else { WalkVoice.shared.stop() }
+        soundClosing?.cancel()
+        soundClosing = Task {
+            try? await Task.sleep(for: .seconds(0.5))
+            guard !Task.isCancelled else { return }
+            withAnimation(.snappy) { soundOpen = false }
+        }
     }
 
     /// The train you're on, in its line's colour.
@@ -614,7 +875,7 @@ struct WalkingView: View {
                     .scaleEffect(x: 1, y: cos(Self.walkPitch * .pi / 180))
                     .allowsHitTesting(false)
             }
-            Image(systemName: "figure.walk")
+            Image(systemName: session.nextStep?.isRidden == true ? "bicycle" : "figure.walk")
                 .font(.system(size: 17, weight: .bold))
                 .foregroundStyle(.white)
                 .frame(width: 34, height: 34)
@@ -658,7 +919,7 @@ struct WalkingView: View {
                 // The step after, and how far it is from the turn
                 let later = session.laterSteps.first
                 TurnCard(icon: step.turn.systemImage,
-                         distance: up ? "Now" : Walk.distance(session.progress?.toTurn ?? step.meters),
+                         distance: up ? "Now" : WalkSession.turnDistance(session.progress?.toTurn ?? step.meters),
                          instruction: session.instruction(of: step),
                          isCrossing: step.turn == .cross,
                          light: step.light,
@@ -794,12 +1055,13 @@ struct WalkingView: View {
                         .font(.footnote).foregroundStyle(.secondary)
                 }
             }
+            .accessibilityAddTraits(.updatesFrequently)
             Spacer(minLength: 0)
             endButton
         }
     }
 
-    /// "You'll be on the platform in 4 · 2 min to spare", or the train you'll miss.
+    /// "You can make it in 4 minutes, giving you 2 minutes of leeway", or the train you'll miss.
     @ViewBuilder private func spare(for train: Arrival, now: Date) -> some View {
         let ready = session.onPlatform(now: now)
         let spare = Int(train.leaves.timeIntervalSince(ready) / 60)
@@ -807,7 +1069,9 @@ struct WalkingView: View {
             Text("You'll miss the \(missed.leaves.formatted(date: .omitted, time: .shortened)) · next \(train.leaves.formatted(date: .omitted, time: .shortened))")
                 .font(.footnote).foregroundStyle(.orange)
         } else if session.stage == .toTrain || (session.stage == .changing && ready > now) {
-            Text("On the platform in \(Self.minutes(until: ready, now: now)) · \(spare) min to spare")
+            let walk = max(1, Int((ready.timeIntervalSince(now) / 60).rounded(.up)))
+            Text("You can make it in \(walk) \(walk == 1 ? "minute" : "minutes"), "
+                 + (spare >= 1 ? "giving you \(Leeway.label(spare))" : "with no leeway"))
                 .font(.footnote).foregroundStyle(spare >= 1 ? Color.liveText : .orange)
         } else {
             Text(session.platformName).font(.footnote).foregroundStyle(.secondary)
@@ -843,6 +1107,10 @@ struct WalkingView: View {
                 } else {
                     Text("\(Self.minutes(until: now.addingTimeInterval(session.secondsLeft), now: now)) · Arrive \(now.addingTimeInterval(session.secondsLeft).formatted(date: .omitted, time: .shortened))")
                         .font(.footnote).foregroundStyle(.secondary)
+                    // After dark, where the night costs took it another way (`Walk.saferAtNight`)
+                    if session.walk?.saferAtNight == true {
+                        Text("Via safer streets").font(.footnote).foregroundStyle(.secondary)
+                    }
                 }
             }
             Spacer(minLength: 0)
@@ -863,8 +1131,11 @@ struct WalkingView: View {
     /// The walk at the other end, to come.
     private var endWalk: some View {
         HStack(spacing: 10) {
-            Image(systemName: "figure.walk").foregroundStyle(.tint).frame(width: 20)
-            Text("Then a \(Self.minutes(seconds: session.walks?.fromTrain.seconds ?? 0)) walk to \(session.endName)")
+            let out = session.walks?.fromTrain
+            let biked = out?.hasRide == true
+            Image(systemName: biked ? "bicycle" : "figure.walk").foregroundStyle(.tint).frame(width: 20)
+            Text(biked ? "Then \(Self.minutes(seconds: out?.seconds ?? 0)) by bike to \(session.endName)"
+                 : "Then a \(Self.minutes(seconds: out?.seconds ?? 0)) walk to \(session.endName)")
             Spacer()
             if let arrives = session.arrives {
                 Text(arrives.formatted(date: .omitted, time: .shortened)).foregroundStyle(.secondary)
@@ -897,6 +1168,50 @@ struct WalkingView: View {
 private struct TrainLoop: Equatable {
     var ride: ObjectIdentifier?
     var onScreen: Bool
+}
+
+/// What restarts the walking map's follow loop: whether it's on screen, and you're walking.
+private struct FollowLoop: Equatable {
+    var onScreen: Bool
+    var walking: Bool
+}
+
+/// When the walking screen's bottom card redraws: once a minute, as each of `minutes` (the
+/// train counted down to's time, and the last moment to make it) is a whole number of minutes
+/// off, so its counts turn over on time; and every few seconds around each of `near` (each
+/// train's, for its "now", its moment at the station, and "You'll miss").
+private struct CardTick: TimelineSchedule {
+    var near: [Date]
+    var minutes: [Date]
+
+    /// Seconds between ticks near a train's time, and otherwise.
+    private static let fast: TimeInterval = 5
+    private static let slow: TimeInterval = 60
+    /// Seconds before and after each of `near` ticked fast.
+    private static let before: TimeInterval = 90
+    private static let after: TimeInterval = AtStation.seconds + 10
+
+    func entries(from startDate: Date, mode: TimelineScheduleMode) -> AnySequence<Date> {
+        let near = near.sorted()
+        return AnySequence(sequence(first: startDate) { date in
+            // The always-on screen only once a minute
+            if mode == .lowFrequency { return date.addingTimeInterval(Self.slow) }
+            if near.contains(where: { date >= $0.addingTimeInterval(-Self.before) && date < $0.addingTimeInterval(Self.after) }) {
+                return date.addingTimeInterval(Self.fast)
+            }
+            // The next whole minute off one of `minutes`, else a minute on; sooner where that's
+            // the next one's fast ticks starting
+            var next = date.addingTimeInterval(Self.slow)
+            for time in minutes {
+                // Half a second past it, as the count truncates: on it, it's still the last minute's
+                let whole = time.addingTimeInterval(-((time.timeIntervalSince(date) / Self.slow).rounded(.down)) * Self.slow + 0.5)
+                let turn = whole > date ? whole : whole.addingTimeInterval(Self.slow)
+                if turn < next { next = turn }
+            }
+            let starts = near.map { $0.addingTimeInterval(-Self.before) }.first { $0 > date && $0 < next }
+            return starts ?? next
+        })
+    }
 }
 
 /// A sign on a pole, standing on the map where something is: the next turn ("↰ 4th Ave"), or
@@ -1007,6 +1322,37 @@ private struct WalkLight: View {
 }
 
 /// A turn's arrow in the tint, for its sign.
+/// How a walk tells you its turns, from the walking map's sound button: spoken and buzzed, buzzed
+/// only, or neither. Kept as Speak Directions (`WalkVoice.speaksKey`) and Vibrate During
+/// Navigation (`WalkSession.vibratesKey`); speaking without buzzing, left from when Settings had
+/// both, counts as Speak.
+enum WalkSound: CaseIterable {
+    case speak, vibrate, silent
+
+    init(speaks: Bool, vibrates: Bool) {
+        self = speaks ? .speak : vibrates ? .vibrate : .silent
+    }
+
+    var speaks: Bool { self == .speak }
+    var vibrates: Bool { self != .silent }
+
+    var symbol: String {
+        switch self {
+        case .speak: "speaker.wave.2.fill"
+        case .vibrate: "iphone.radiowaves.left.and.right"
+        case .silent: "speaker.slash.fill"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .speak: "Spoken Directions"
+        case .vibrate: "Vibrate"
+        case .silent: "Silent"
+        }
+    }
+}
+
 private struct TurnArrow: View {
     let icon: String
 
@@ -1075,6 +1421,7 @@ private struct TurnCard: View {
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
         .padding(.horizontal, 12)
         .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.updatesFrequently)
     }
 }
 

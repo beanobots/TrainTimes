@@ -2,6 +2,9 @@ import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
+#if APP
+import Synchronization
+#endif
 
 extension Way {
     /// Whether this gets there before `other`: none predicted last, the shorter walk on a tie.
@@ -59,6 +62,10 @@ struct Board: Sendable {
     /// Lines whose own feed couldn't be had, so their trains are the timetable's (`TrainService.board`'s
     /// `fillingFrom`).
     var scheduledRoutes: [String] = []
+    /// A planned trip following its fallback, as no first train of its own is coming: why, and
+    /// what it takes instead ("No Manhattan-bound R trains · R to 36 St, back on the D or N").
+    /// Always the board's notice.
+    var fallbackNote: String? = nil
 
     /// Step-free access elevators out now, as mentioned by widgets, the countdown and the alerts
     /// sheet.
@@ -80,6 +87,11 @@ struct Board: Sendable {
     func notice(includingElevators: Bool, includingAlerts: Bool = true,
                 kinds: Set<ServiceAlert.Kind> = Set(ServiceAlert.Kind.allCases)) -> Notice? {
         var notices: [Notice] = []
+        // Following a fallback says so first, whatever alerts are chosen: the trains shown aren't
+        // the usual ones
+        if let fallbackNote {
+            notices.append(Notice(kind: .alert(.notice), label: fallbackNote, text: "", others: 0))
+        }
         if includingElevators, let elevators = Notice(elevatorsOut: elevatorsOut) {
             notices.append(elevators)
         }
@@ -181,13 +193,13 @@ enum TrainService {
     static func board(for selection: Selection, arrivingAt destination: Station? = nil, includingAlerts: Bool = true,
                       includingOutages: Bool = true, includingOtherLines: Bool = true,
                       waitingAfterOwnLines grace: TimeInterval? = nil,
-                      fillingFrom timetable: (@Sendable () -> Timetable?)? = nil, now: Date = Date()) async throws -> Board {
+                      fillingFrom timetable: (@Sendable () -> Timetable?)? = nil, now: Date = AppClock.now) async throws -> Board {
         let feeds = Lines.feedURLs(sharingTracksWith: selection.routes)
         let stops = Set(selection.stopIDs).union(destination.map(StationDirectory.stops(inComplexOf:)) ?? [])
         let own = Task { await optionalData(fromEach: feeds.own, part: FeedPart(stops: stops), priority: URLSessionTask.highPriority) }
         let extras = Extras(for: selection, otherFeeds: includingOtherLines ? feeds.others : [], stops: stops,
                             alertRoutes: Set(selection.routes), alerts: includingAlerts, outages: includingOutages,
-                            after: own)
+                            now: now, after: own)
         let fetched = await own.value
         let unfetched = feeds.own.filter { fetched[$0] == nil }
         // Without some lines' feeds, only the timetable can fill them in, around the others'
@@ -232,7 +244,7 @@ enum TrainService {
 
     /// `board`'s trains from `timetable`, for when the MTA can't be reached: no alerts or outages.
     static func board(for selection: Selection, arrivingAt destination: Station? = nil, from timetable: Timetable,
-                      now: Date = Date()) -> Board {
+                      now: Date = AppClock.now) -> Board {
         board(for: selection, arrivingAt: destination, now: now) {
             timetable.arrivals(at: $0, from: now, to: now.addingTimeInterval(timetableAhead))
         }
@@ -266,14 +278,14 @@ enum TrainService {
     /// rest are waited for as in `board`.
     static func board(for selection: Selection, change: Change, includingAlerts: Bool = true,
                       includingOutages: Bool = true, waitingAfterOwnLines grace: TimeInterval? = nil,
-                      now: Date = Date()) async throws -> Board {
-        let routes = selection.routes + change.allRoutes.filter { !selection.routes.contains($0) }
+                      now: Date = AppClock.now) async throws -> Board {
+        let routes = selection.routes + change.everyRoute.filter { !selection.routes.contains($0) }
         let feeds = Lines.feedURLs(sharingTracksWith: routes)
         let plan = ChangePlan(for: selection, change: change)
         let alertRoutes = Set(routes + change.alertSelections(for: selection).flatMap(\.routes))
         let fetching = Task { await optionalData(fromEach: feeds.own, part: FeedPart(stops: plan.stops), priority: URLSessionTask.highPriority) }
         let extras = Extras(for: selection, otherFeeds: feeds.others, stops: plan.stops, alertRoutes: alertRoutes,
-                            alerts: includingAlerts, outages: includingOutages, after: fetching)
+                            alerts: includingAlerts, outages: includingOutages, now: now, after: fetching)
         let fetched = await fetching.value
         guard feeds.own.allSatisfy({ fetched[$0] != nil }) else { throw URLError(.cannotLoadFromNetwork) }
         let own = feeds.own.compactMap { fetched[$0] }
@@ -293,14 +305,14 @@ enum TrainService {
     }
 
     /// `board(for:change:)` from `timetable`, as `board(for:arrivingAt:from:now:)`.
-    static func board(for selection: Selection, change: Change, from timetable: Timetable, now: Date = Date()) -> Board {
+    static func board(for selection: Selection, change: Change, from timetable: Timetable, now: Date = AppClock.now) -> Board {
         board(for: selection, change: change, now: now) {
             timetable.arrivals(at: $0, from: now, to: now.addingTimeInterval(timetableAhead))
         }
     }
 
     /// The stops a board for `selection` asks its feeds for: with `change`, as `board(for:change:)`
-    /// does; otherwise as `board(for:arrivingAt:)` does. For `sharingFeeds(atStops:_:)`.
+    /// does; otherwise as `board(for:arrivingAt:)` does. For `sharingFeeds(atStops:joining:_:)`.
     static func feedStops(for selection: Selection, change: Change?, destination: Station?) -> Set<String> {
         if let change { return ChangePlan(for: selection, change: change).stops }
         return Set(selection.stopIDs).union(destination.map(StationDirectory.stops(inComplexOf:)) ?? [])
@@ -319,7 +331,12 @@ enum TrainService {
         /// Where the changed-to lines pass the change's own station, to compare stations by.
         let passing: Set<String>
         let destination: Set<String>
-        var stops: Set<String> { origin.union(arriving.joined()).union(leaving).union(passing).union(destination) }
+        /// Where the trains changed to get to a second change (`Change.then`), and where its lines
+        /// leave from.
+        let onward: Set<String>
+        var stops: Set<String> {
+            origin.union(arriving.joined()).union(leaving).union(passing).union(destination).union(onward)
+        }
 
         init(for selection: Selection, change: Change) {
             parts = change.smartChanges(for: selection).map { (change: $0.change, lines: $0.lines,
@@ -331,7 +348,19 @@ enum TrainService {
             main.routes = change.allRoutes
             passing = Set(parts.count > 1 ? main.departureStops(for: selection) : [])
             destination = change.destinationStops
+            onward = Set(parts.flatMap { part in
+                part.change.routes.flatMap { TrainService.thenParts(part.change, route: $0, from: part.selection) }
+                    .flatMap { $0.change.arrivalStops(for: $0.selection) + $0.change.departureStops(for: $0.selection) }
+            })
         }
+    }
+
+    /// The second changes (`Change.then`) after changing to `route` at `change`, each with the
+    /// train you're on by then as just the line it's for; none without one.
+    static func thenParts(_ change: Change, route: String, from selection: Selection)
+        -> [(change: Change, selection: Selection)] {
+        guard let then = change.then, let onward = change.onward(route, from: selection) else { return [] }
+        return then.smartChanges(for: onward).map { ($0.change, onward.only($0.lines)) }
     }
 
     /// `board(for:change:)`'s trains and connections, from `arrivals` at the stops asked for.
@@ -363,7 +392,8 @@ enum TrainService {
         let there = Dictionary(grouping: arrivals.filter { destination.contains($0.stop) && !$0.trip.isEmpty }, by: \.trip)
         let connections = Connection.best(of: options, for: trains, passing: passed).map { connection in
             var connection = connection
-            connection.ways = ways(for: connection.first, legs: legs, change: change, selection: selection, there: there)
+            connection.ways = ways(for: connection.first, legs: legs, change: change, selection: selection, there: there,
+                                   arrivals: arrivals, now: now)
             return connection
         }
         return Board(trains: trains, connections: connections)
@@ -375,7 +405,8 @@ enum TrainService {
     /// its first train that's predicted to get there; `there` has the trips at the destination.
     static func ways(for train: Arrival, legs: [(part: (change: Change, lines: [String], selection: Selection),
                                                  departures: [Arrival], atChange: [Arrival])],
-                     change: Change, selection: Selection, there: [String: [Arrival]]) -> [Way] {
+                     change: Change, selection: Selection, there: [String: [Arrival]],
+                     arrivals: [Arrival] = [], now: Date = AppClock.now) -> [Way] {
         let timed = change.destinationID != nil
         // A trip at the destination after `train` was at its stop
         let atDestination = { (train: Arrival) in
@@ -383,16 +414,31 @@ enum TrainService {
         }
         var ways: [Way] = []
         for leg in legs where leg.part.lines.contains(train.route) || !selection.routes.contains(train.route) {
-            for route in leg.part.change.routes where !timed || change.reachesDestination(route) {
-                let departures = leg.departures.filter { $0.route == route && (!timed || atDestination($0) != nil) }
+            let changesAgain = leg.part.change.then != nil
+            for route in leg.part.change.routes where !timed || changesAgain || change.reachesDestination(route) {
+                // Changing again, the train changed to needn't get there itself
+                let departures = leg.departures.filter {
+                    $0.route == route && (!timed || changesAgain || atDestination($0) != nil)
+                }
                 guard let connection = leg.part.change.connections(for: [train], atChange: leg.atChange,
                                                                    departures: departures, selection: leg.part.selection).first,
                       // Continuing as another changed-to line is that line's way
                       !connection.staysOn || connection.next?.route == route else { continue }
-                let arrival = timed ? connection.next.flatMap(atDestination) : connection.next
-                let way = Way(route: route, connection: connection.trimmed, arrival: arrival?.trimmed)
+                var way: Way
+                if changesAgain {
+                    guard let next = connection.next, let then = thenConnection(after: next, at: leg.part.change, route: route,
+                                                                               from: leg.part.selection, arrivals: arrivals,
+                                                                               timed: timed, atDestination: atDestination,
+                                                                               now: now) else { continue }
+                    let arrival = timed ? then.next.flatMap(atDestination) : then.next
+                    way = Way(route: route, connection: connection.trimmed, arrival: arrival?.trimmed)
+                    way.then = then.trimmed
+                } else {
+                    let arrival = timed ? connection.next.flatMap(atDestination) : connection.next
+                    way = Way(route: route, connection: connection.trimmed, arrival: arrival?.trimmed)
+                }
                 // A line at two of the change's stations: the sooner there
-                if let index = ways.firstIndex(where: { $0.route == route }) {
+                if let index = ways.firstIndex(where: { $0.route == route && $0.then?.next?.route == way.then?.next?.route }) {
                     if way.isSooner(than: ways[index]) { ways[index] = way }
                 } else {
                     ways.append(way)
@@ -403,6 +449,29 @@ enum TrainService {
             ways.append(Way(route: train.route, arrival: arrival.trimmed))
         }
         return ways.sorted { $0.isSooner(than: $1) }
+    }
+
+    /// The second change of a way (`Change.then`): `train`, the one changed to at `change` as
+    /// `route`, met by the first train of the next lines it can catch, at whichever of the second
+    /// change's stations gets there soonest (with `timed`, only trains that get there).
+    private static func thenConnection(after train: Arrival, at change: Change, route: String, from selection: Selection,
+                                       arrivals: [Arrival], timed: Bool, atDestination: @escaping (Arrival) -> Arrival?,
+                                       now: Date) -> Connection? {
+        let options = thenParts(change, route: route, from: selection).compactMap { part -> Connection? in
+            let arriving = Set(part.change.arrivalStops(for: part.selection))
+            let departures = arrivals.filter {
+                part.change.departs($0, for: part.selection) && !$0.endsHere && $0.leaves > now
+                    && (!timed || atDestination($0) != nil)
+            }.oncePerTrip()
+            return part.change.connections(for: [train], atChange: arrivals.filter { arriving.contains($0.stop) },
+                                           departures: departures, selection: part.selection).first
+        }
+        // Soonest there, else soonest on
+        func rank(_ connection: Connection) -> Date {
+            let next = connection.next
+            return (timed ? next.flatMap(atDestination)?.time : next?.time) ?? .distantFuture
+        }
+        return options.filter { $0.next != nil }.min { rank($0) < rank($1) }
     }
 
     /// How long the own-line feeds have to themselves before the extras start: on a connection
@@ -419,7 +488,7 @@ enum TrainService {
         let outages: Task<[Outage]?, Never>
 
         init<T: Sendable>(for selection: Selection, otherFeeds: [URL], stops: Set<String>, alertRoutes: Set<String>,
-                          alerts wanted: Bool, outages wantedOutages: Bool, after own: Task<T, Never>) {
+                          alerts wanted: Bool, outages wantedOutages: Bool, now: Date, after own: Task<T, Never>) {
             let headStart = Task { _ = await TrainService.value(of: own, by: Date.now.addingTimeInterval(ownHeadStart)) }
             let low = URLSessionTask.lowPriority
             others = Task {
@@ -428,7 +497,7 @@ enum TrainService {
             }
             alerts = Task {
                 await headStart.value
-                return await TrainService.alertEntries(if: wanted, routes: alertRoutes)
+                return await TrainService.alertEntries(if: wanted, routes: alertRoutes, now: now)
             }
             outages = Task {
                 await headStart.value
@@ -567,8 +636,8 @@ enum TrainService {
     /// Alerts and outages only, as in `board`, for the alerts sheet, so it needn't fail when a
     /// train feed does.
     static func notices(for selection: Selection, includingAlerts: Bool = true, includingOutages: Bool = true,
-                        now: Date = Date()) async -> Board {
-        async let alertEntries = alertEntries(if: includingAlerts, routes: Set(selection.routes))
+                        now: Date = AppClock.now) async -> Board {
+        async let alertEntries = alertEntries(if: includingAlerts, routes: Set(selection.routes), now: now)
         async let outages = outages(for: selection, if: includingOutages)
         let alerts = await alertEntries.map { AlertsFeed.alerts(for: selection, in: $0, now: now) }
         return Board(trains: [], alerts: alerts, outages: await outages)
@@ -597,7 +666,7 @@ enum TrainService {
     /// whose own feeds are missing or stale are omitted. `includingOtherLines: false` fetches only
     /// own feeds; `ownLinesOnly` lists `Selection.trainID`s that need only their own.
     static func trains(for selections: [Selection], includingOtherLines: Bool = true, ownLinesOnly: Set<String> = [],
-                       now: Date = Date()) async -> [String: [Arrival]] {
+                       now: Date = AppClock.now) async -> [String: [Arrival]] {
         // Dedupe: the push server has thousands of countdowns, many for the same train
         let unique = Array(Dictionary(selections.map { ($0.trainID, $0) }, uniquingKeysWith: { first, _ in first }).values)
         let feeds = unique.map { feedURLs(for: $0, includingOtherLines: includingOtherLines, ownLinesOnly: ownLinesOnly) }
@@ -620,7 +689,7 @@ enum TrainService {
 
     /// As `trains(for:includingOtherLines:ownLinesOnly:now:)`, from `timetable`, for when the MTA
     /// can't be reached.
-    static func trains(for selections: [Selection], from timetable: Timetable, now: Date = Date()) -> [String: [Arrival]] {
+    static func trains(for selections: [Selection], from timetable: Timetable, now: Date = AppClock.now) -> [String: [Arrival]] {
         var trains: [String: [Arrival]] = [:]
         for selection in selections where trains[selection.trainID] == nil {
             let arrivals = timetable.arrivals(at: Set(selection.stopIDs), from: now, to: now.addingTimeInterval(timetableAhead))
@@ -688,21 +757,31 @@ enum TrainService {
     }
 
     private static let feeds = InFlight<FeedKey, Data>()
-    private static let alertLists = InFlight<FeedKey, [AlertsFeed.Entry]>()
-    /// Seconds `alertEntries(if:routes:)` shares decoded alerts for.
+    private static let alertLists = InFlight<AlertsKey, [AlertsFeed.Entry]>()
+    /// Seconds `alertEntries(if:routes:now:)` shares decoded alerts for.
     private static let alertsReuseWindow: TimeInterval = 30
 
     /// MTA alerts, decoded once and shared by every request within `alertsReuseWindow`, so widgets
     /// don't each decode the feed. Only entries in effect around now are kept, and with
     /// `routes`, only those that can be for them (all `alerts(for:in:now:)` needs for
     /// selections of those routes): the push server then sends a fraction of the ~1 MB feed.
-    /// Nil if not wanted or unavailable.
-    static func alertEntries(if wanted: Bool = true, routes: Set<String>? = nil) async -> [AlertsFeed.Entry]? {
+    /// In effect around `now`, the board's (Pretend Time's, a test's), not the clock's. Nil if
+    /// not wanted or unavailable.
+    static func alertEntries(if wanted: Bool = true, routes: Set<String>? = nil,
+                             now: Date = AppClock.now) async -> [AlertsFeed.Entry]? {
         guard wanted else { return nil }
         let part = FeedPart(routes: routes)
-        return try? await alertLists.value(for: FeedKey(url: AlertsFeed.url, part: part), reusingFor: alertsReuseWindow) {
-            try AlertsFeed.entries(in: try await data(from: AlertsFeed.url, part: part, priority: URLSessionTask.lowPriority))
+        let key = AlertsKey(feed: FeedKey(url: AlertsFeed.url, part: part), minute: Int(now.timeIntervalSince1970 / 60))
+        return try? await alertLists.value(for: key, reusingFor: alertsReuseWindow) {
+            try AlertsFeed.entries(in: try await data(from: AlertsFeed.url, part: part, priority: URLSessionTask.lowPriority),
+                                   now: now)
         }
+    }
+
+    /// Decoded alerts shared: the same part of the feed, kept for around the same minute.
+    private struct AlertsKey: Hashable, Sendable {
+        let feed: FeedKey
+        let minute: Int
     }
 
     /// How long the app reuses a fetched feed: foregrounding, refresh and the countdown can request
@@ -727,7 +806,7 @@ enum TrainService {
     }
 
     /// A fetch, for joining one in flight: the same feed, for the same part of it.
-    private struct FeedKey: Hashable, Sendable {
+    fileprivate struct FeedKey: Hashable, Sendable {
         let url: URL
         let part: FeedPart
 
@@ -781,12 +860,21 @@ enum TrainService {
                 let shared = sharedFeeds.contains(url) ? sharedCache : nil
                 if let shared, let data = shared.data(for: key.name, within: sharedFor) { return data }
                 let data: Data
-                if let serverURL, let relayed = relayed(url, via: serverURL, for: part) {
-                    data = try await hedged(relayed, mta: url, priority: priority)
-                } else {
-                    data = try await fetch(url, in: .shared, timeout: 15, priority: priority)
-                    // A failed read, not a board with no trains, kept and shared with widgets
-                    guard isUsable(data, from: url) else { throw URLError(.cannotParseResponse) }
+                do {
+                    if let serverURL, let relayed = relayed(url, via: serverURL, for: part) {
+                        data = try await hedged(relayed, mta: url, priority: priority)
+                    } else {
+                        data = try await fetch(url, in: .shared, timeout: 15, priority: priority)
+                        // A failed read, not a board with no trains, kept and shared with widgets
+                        guard isUsable(data, from: url) else { throw URLError(.cannotParseResponse) }
+                    }
+                } catch {
+                    // Without signal, the last saved, kept past an hour where it's kept longer
+                    // (`FeedCaching.keeps`): planned work's alerts hold for days
+                    if let shared, shared.keeps > 60 * 60, let saved = shared.data(for: key.name, within: shared.keeps) {
+                        return saved
+                    }
+                    throw error
                 }
                 shared?.save(data, for: key.name)
                 return data
@@ -798,13 +886,14 @@ enum TrainService {
     }
 
     /// Boards fetched together, as Transit Directions' Trip preloads its journeys: each feed
-    /// downloaded once for them all (`sharingFeeds(atStops:_:)`).
-    private final class FeedBatch: Sendable {
+    /// downloaded once for them all (`sharingFeeds(atStops:joining:_:)`). Kept by whoever made
+    /// it to share with boards fetched apart, as Routes' first loads (`FirstLoads`).
+    final class FeedBatch: Sendable {
         /// Every stop the boards ask for.
         let stops: Set<String>
-        let feeds = InFlight<FeedKey, Data>()
+        fileprivate let feeds = InFlight<FeedKey, Data>()
         /// Longer than any batch, which ends with its boards.
-        static let life: TimeInterval = 5 * 60
+        fileprivate static let life: TimeInterval = 5 * 60
 
         init(stops: Set<String>) {
             self.stops = stops
@@ -816,9 +905,12 @@ enum TrainService {
     /// Runs `body`, whose boards' feeds are fetched once each for them all: a train feed for its
     /// trips at all of `stops` (`feedStops(for:change:destination:)` of each board), which a fetch
     /// for some of them shares. One asking for any other stops is fetched on its own. What's
-    /// fetched is let go when `body` ends.
-    static func sharingFeeds<T>(atStops stops: Set<String>, _ body: () async throws -> T) async rethrows -> T {
-        try await $batch.withValue(FeedBatch(stops: stops)) { try await body() }
+    /// fetched is let go when `body` ends. In `shared` instead if it has all of `stops`, so
+    /// boards fetched apart share it too; it keeps what it's fetched while it's kept.
+    static func sharingFeeds<T>(atStops stops: Set<String>, joining shared: FeedBatch? = nil,
+                                _ body: () async throws -> T) async rethrows -> T {
+        let batch = shared.flatMap { stops.isSubset(of: $0.stops) ? $0 : nil } ?? FeedBatch(stops: stops)
+        return try await $batch.withValue(batch) { try await body() }
     }
 
     /// How long the push server's copy has before the MTA is asked too. Below ground a request
@@ -931,8 +1023,39 @@ enum TrainService {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 30
         configuration.waitsForConnectivity = false
+        #if APP
+        // Does nothing unless the Prototyping card's Force Offline is on
+        configuration.protocolClasses = [ForcedOffline.self] + (configuration.protocolClasses ?? [])
+        #if DEBUG
+        // Does nothing unless a test turns it on
+        configuration.protocolClasses = [TestNetwork.self] + (configuration.protocolClasses ?? [])
+        #endif
+        #endif
+        #if canImport(FoundationNetworking)
         return URLSession(configuration: configuration)
+        #else
+        return URLSession(configuration: configuration, delegate: SameHostRedirects(), delegateQueue: nil)
+        #endif
     }()
+
+    #if !canImport(FoundationNetworking)
+    /// `serverSession`'s delegate: follows a redirect only over HTTPS to the same host, so the push
+    /// server's requests, and the App Attest headers on them, never go anywhere else. Refused, the
+    /// 3xx itself is the answer, which `fetch` and `ServerRoutes.fetched` take as a failure.
+    /// A task's own delegate (`Prioritizing`) leaves this to the session's, not implementing it.
+    final class SameHostRedirects: NSObject, URLSessionTaskDelegate, Sendable {
+        func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+            completionHandler(Self.allows(from: response.url ?? task.currentRequest?.url, to: request.url) ? request : nil)
+        }
+
+        /// Whether a redirect from `old` to `new` stays on HTTPS at the same host.
+        static func allows(from old: URL?, to new: URL?) -> Bool {
+            guard let old, let new, new.scheme?.lowercased() == "https", let host = new.host?.lowercased() else { return false }
+            return host == old.host?.lowercased()
+        }
+    }
+    #endif
 
     /// Where the MTA's feeds are; each one's name follows ("nyct%2Fgtfs-nqrw").
     static let mtaFeeds = "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/"
@@ -976,7 +1099,7 @@ enum TrainService {
     }
 
     /// In-flight and recently finished fetches, by `Key`.
-    private actor InFlight<Key: Hashable & Sendable, Value: Sendable> {
+    fileprivate actor InFlight<Key: Hashable & Sendable, Value: Sendable> {
         private var fetches: [Key: (task: Task<Value, Error>, priority: Float)] = [:]
         private var recent: [Key: (value: Value, fetched: Date)] = [:]
 
@@ -1053,9 +1176,11 @@ protocol FeedCaching: Sendable {
     /// `name`'s data if saved under `age` seconds ago.
     func data(for name: String, within age: TimeInterval) -> Data?
     func save(_ data: Data, for name: String)
+    /// How long saved data's kept, and fallen back on past `sharedFor` when it can't be fetched.
+    var keeps: TimeInterval { get }
 }
 
-private extension [Arrival] {
+extension [Arrival] {
     /// Keeps each trip's first arrival (a trip can call at several of a station's platforms).
     /// Trips without an id are all kept.
     func oncePerTrip() -> [Arrival] {
@@ -1072,3 +1197,106 @@ extension Date {
         return age >= 0 && age < interval
     }
 }
+
+/// The time the app shows and plans trips by: the real time, or Pretend Time's (the Prototyping
+/// card) running on from another, for this run of the app only. Always the real time in widgets
+/// and the share sheet. Live trains and buses are the real time's, so while pretending they're
+/// left out for the timetables' (`SubwayFeed.isStale`, `BusTimes`, `NearbyBuses`). Durations,
+/// cache ages and anything saved for widgets keep to `Date.now`.
+enum AppClock {
+    #if APP
+    /// How far it's moved from the real time; never saved.
+    nonisolated(unsafe) static var offset: TimeInterval = 0
+    #else
+    static let offset: TimeInterval = 0
+    #endif
+
+    static var now: Date { Date.now.addingTimeInterval(offset) }
+
+    /// The real time when it reads `date`: for what counts by the real clock, such as
+    /// `Text(timerInterval:)` and `TimelineView`'s dates (`pretend(_:)` the other way).
+    static func real(_ date: Date) -> Date { date.addingTimeInterval(-offset) }
+
+    /// What it reads at the real time `date`.
+    static func pretend(_ date: Date) -> Date { date.addingTimeInterval(offset) }
+
+    /// Whether it's moved (by more than a second).
+    static var isPretending: Bool { abs(offset) >= 1 }
+
+    #if APP && DEBUG
+    /// The feeds were read at the pretend time, not now, so their trains count as live for it:
+    /// UI tests' saved feeds, with the clock set back to when they were read (`UITestLaunch`).
+    nonisolated(unsafe) static var feedsAreAtPretendTime = false
+    #else
+    static let feedsAreAtPretendTime = false
+    #endif
+}
+
+#if APP
+/// The Prototyping card's Force Offline: while `isOn`, every request on `serverSession` and
+/// URLSession.shared fails as with no signal; with a `delay`, each waits that long first, and
+/// goes ahead if not offline. Off at every launch, and never turned on in the widgets.
+/// MapKit (tiles, search, geocoding, directions) doesn't go through either, so isn't stopped.
+final class ForcedOffline: URLProtocol, @unchecked Sendable {
+    private struct Settings { var isOn = false; var delay: Duration = .zero }
+    private static let settings = Mutex(Settings())
+
+    static var isOn: Bool {
+        get { settings.withLock { $0.isOn } }
+        set { _ = registered; settings.withLock { $0.isOn = newValue } }
+    }
+
+    /// How long each request waits before failing or going ahead ("slow network").
+    static var delay: Duration {
+        get { settings.withLock { $0.delay } }
+        set { _ = registered; settings.withLock { $0.delay = newValue } }
+    }
+
+    /// URLSession.shared asks the registered protocols; `serverSession` has this in its own.
+    private static let registered: Void = { URLProtocol.registerClass(ForcedOffline.self) }()
+
+    /// Marks a delayed request going ahead, so it isn't caught again.
+    private static let passed = "ForcedOffline.passed"
+
+    /// The session a delayed request goes ahead on.
+    private static let passSession = URLSession(configuration: .ephemeral)
+
+    private let state = Mutex<(stopped: Bool, task: URLSessionDataTask?)>((false, nil))
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        guard property(forKey: passed, in: request) == nil else { return false }
+        return settings.withLock { $0.isOn || $0.delay > .zero }
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let delay = Self.delay
+        let seconds = Double(delay.components.seconds) + Double(delay.components.attoseconds) / 1e18
+        DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { [self] in
+            guard !state.withLock({ $0.stopped }) else { return }
+            guard !Self.isOn else {
+                return client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet)) ?? ()
+            }
+            let marked = (request as NSURLRequest).mutableCopy() as! NSMutableURLRequest
+            URLProtocol.setProperty(true, forKey: Self.passed, in: marked)
+            let task = Self.passSession.dataTask(with: marked as URLRequest) { [self] data, response, error in
+                guard !state.withLock({ $0.stopped }) else { return }
+                if let error { return client?.urlProtocol(self, didFailWithError: error) ?? () }
+                if let response { client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed) }
+                if let data { client?.urlProtocol(self, didLoad: data) }
+                client?.urlProtocolDidFinishLoading(self)
+            }
+            state.withLock { $0.task = task }
+            task.resume()
+        }
+    }
+
+    override func stopLoading() {
+        state.withLock {
+            $0.stopped = true
+            $0.task?.cancel()
+        }
+    }
+}
+#endif

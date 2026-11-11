@@ -25,12 +25,12 @@ enum MapTurn {
     func label(ny: Bool) -> String {
         switch self {
         case .heading: "The way you're going"
-        case .north: ny ? "NY North, the avenues up" : "North up"
+        case .north: ny ? "Grid North, the avenues up" : "North up"
         }
     }
 }
 
-/// Which way up every map is: north, or with Settings' NY Special on, NY North, Manhattan's
+/// Which way up every map is: north, or with Settings' Grid North on, Grid North, Manhattan's
 /// avenues up the screen as New Yorkers think of uptown.
 enum MapNorth {
     static let key = "nyNorth"
@@ -87,12 +87,116 @@ enum MapNorth {
         return context.camera.distance * metresTallPerDistance
             * MKMapPointsPerMeterAtLatitude(context.camera.centerCoordinate.latitude) / Double(height)
     }
+
+    /// The same, measured off the map itself: the map points between two screen points 100 apart
+    /// at its middle. Turned, the camera's distance gave about twice what it is on a phone, and
+    /// bus stems ran twice as far, through their tags and out the other side. Nil till it's laid out.
+    static func mapPointsPerPoint(_ proxy: MapProxy, middle: CGPoint) -> Double? {
+        guard let top = proxy.convert(middle, from: .local),
+              let bottom = proxy.convert(CGPoint(x: middle.x, y: middle.y + 100), from: .local) else { return nil }
+        let a = MKMapPoint(top), b = MKMapPoint(bottom)
+        let scale = hypot(b.x - a.x, b.y - a.y) / 100
+        return scale > 0 ? scale : nil
+    }
+}
+
+/// The round glass buttons down a map's side, on every page: their size, and their icons'.
+enum MapButton {
+    static let size: CGFloat = 54
+    static let icon: CGFloat = 20
+}
+
+/// A map's compass, always on it, as MapKit's is only once it's turned: its needle pointing
+/// north as the map's turned. Tapped, the map's put north up; with Settings' Grid North on,
+/// between North and Grid North, Grid North from any other way.
+struct NorthButton: View {
+    /// Which way the map's turned, degrees from north.
+    let heading: Double
+    /// Turns the map to the heading given.
+    let turn: (Double) -> Void
+    @AppStorage(MapNorth.key) private var nyNorth = false
+
+    var body: some View {
+        Button { turn(Self.next(from: heading, ny: nyNorth)) } label: {
+            CompassNeedle(heading: heading, ny: nyNorth)
+                .animation(.smooth, value: heading)
+                .frame(width: MapButton.size, height: MapButton.size)
+                .glassEffect(.regular.interactive(), in: Circle())
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Map direction")
+        .accessibilityValue(value)
+        .accessibilityHint(nyNorth ? "Switches between North and Grid North" : "Turns the map north up")
+    }
+
+    /// Where a tap turns a map turned `heading`.
+    static func next(from heading: Double, ny: Bool) -> Double {
+        ny && !MapNorth.isOff(heading, from: MapTurn.manhattanNorth) ? 0 : MapNorth.heading(ny: ny)
+    }
+
+    private var value: String {
+        if !MapNorth.isOff(heading, from: 0) { return "North up" }
+        if !MapNorth.isOff(heading, from: MapTurn.manhattanNorth) { return "Grid North, the avenues up" }
+        return "Turned"
+    }
+}
+
+/// A compass button's needle for a map turned `heading`: north's arrow; with Grid North on and
+/// the map within `gridSnap` of it, Manhattan (`ManhattanIcon`) as the island lies on the map.
+/// The two blur and scale into each other as the map crosses `gridSnap`.
+struct CompassNeedle: View {
+    let heading: Double
+    let ny: Bool
+
+    /// How near Grid North the map's to be turned for Manhattan to show, degrees either way.
+    static let gridSnap: Double = 5
+
+    /// Whether the map's turned near enough Grid North for Manhattan.
+    private var atGrid: Bool {
+        ny && abs(Self.turn(heading - MapTurn.manhattanNorth)) < Self.gridSnap
+    }
+
+    var body: some View {
+        ZStack {
+            Image(systemName: "location.north.line.fill")
+                .font(.system(size: MapButton.icon, weight: .semibold))
+                .foregroundStyle(.red)
+                .rotationEffect(.degrees(Self.turn(heading)))
+                .opacity(atGrid ? 0 : 1)
+                .scaleEffect(atGrid ? 0.6 : 1)
+                .blur(radius: atGrid ? 3 : 0)
+            ManhattanIcon()
+                .fill(.red)
+                .frame(width: 10, height: 26)
+                .rotationEffect(.degrees(Self.turn(heading - MapTurn.manhattanNorth)))
+                .opacity(atGrid ? 1 : 0)
+                .scaleEffect(atGrid ? 1 : 0.6)
+                .blur(radius: atGrid ? 0 : 3)
+        }
+        .animation(.smooth(duration: 0.35), value: atGrid)
+    }
+
+    /// -`degrees` put between -180 and 180, so it doesn't spin the long way round past upright.
+    static func turn(_ degrees: Double) -> Double {
+        -((degrees + 540).truncatingRemainder(dividingBy: 360) - 180)
+    }
 }
 
 /// A map's size and the safe area MapKit frames in, for `MapNorth.position(fitting:)`.
 struct MapRoom: Equatable {
     var size: CGSize = .zero
     var insets = EdgeInsets()
+}
+
+extension GeometryProxy {
+    /// The whole view's size, its safe area too: `size` is only what's inside the safe area, so
+    /// taking it for the map's whole size took the safe area off twice, and with the cards up
+    /// framed the trips in a few points, zoomed right out.
+    var wholeSize: CGSize {
+        CGSize(width: size.width + safeAreaInsets.leading + safeAreaInsets.trailing,
+               height: size.height + safeAreaInsets.top + safeAreaInsets.bottom)
+    }
 }
 
 extension MKMapRect {
@@ -110,22 +214,24 @@ extension View {
     /// The map's size and safe area, kept in `room`. On the `Map` itself, inside any
     /// `safeAreaPadding`, to see it.
     func measuresRoom(_ room: Binding<MapRoom>) -> some View {
-        onGeometryChange(for: MapRoom.self) { MapRoom(size: $0.size, insets: $0.safeAreaInsets) } action: {
+        onGeometryChange(for: MapRoom.self) { MapRoom(size: $0.wholeSize, insets: $0.safeAreaInsets) } action: {
             room.wrappedValue = $0
         }
     }
 
     /// Keeps a map turned as Settings has it (`MapNorth`): put north up by `.region`, `.rect`,
     /// `.automatic` or following you, it's turned where it rests, `widening` times as far out;
-    /// and turned where it is as the setting changes. Not once you've moved or turned it.
-    func turnsNorth(_ position: Binding<MapCameraPosition>, widening: Double = 1) -> some View {
-        modifier(TurnsNorth(position: position, widening: widening))
+    /// and turned where it is as the setting changes. Not once you've moved or turned it, nor
+    /// where it rests while `kept`, the page keeping it the way you turned it.
+    func turnsNorth(_ position: Binding<MapCameraPosition>, widening: Double = 1, unless kept: Bool = false) -> some View {
+        modifier(TurnsNorth(position: position, widening: widening, kept: kept))
     }
 }
 
 private struct TurnsNorth: ViewModifier {
     @Binding var position: MapCameraPosition
     let widening: Double
+    let kept: Bool
     @AppStorage(MapNorth.key) private var nyNorth = false
     /// Where the map last came to rest.
     @State private var shown: MapCamera?
@@ -135,7 +241,7 @@ private struct TurnsNorth: ViewModifier {
             .onMapCameraChange(frequency: .onEnd) { context in
                 shown = context.camera
                 let north = MapNorth.heading(ny: nyNorth)
-                guard !position.positionedByUser, MapNorth.isOff(context.camera.heading, from: north) else { return }
+                guard !kept, !position.positionedByUser, MapNorth.isOff(context.camera.heading, from: north) else { return }
                 position = .camera(turned(context.camera, widening: widening))
             }
             .onChange(of: nyNorth) {

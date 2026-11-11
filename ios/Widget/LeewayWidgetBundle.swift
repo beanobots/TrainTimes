@@ -11,6 +11,7 @@ struct LeewayWidgetBundle: WidgetBundle {
     var body: some Widget {
         DirectionsWidget()
         LeewayWidget()
+        CitiBikeWidget()
         NearbyWidget()
         TrainLiveActivity()
     }

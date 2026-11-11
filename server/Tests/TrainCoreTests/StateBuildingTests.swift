@@ -307,4 +307,27 @@ import Testing
                                      now: minutes(6).addingTimeInterval(AtStation.seconds))
         #expect(gone.trip == "c")
     }
+
+    @Test func aRefreshKeepsTheTrainAtTheStationThoughTheBoardHasLetItGo() throws {
+        // Boards list only trains still to leave, so 10 s after b is due it's gone from them
+        var selection = prospect
+        selection.walkMinutes = 5
+        let started = try #require(ContentState(for: selection, board: fixtureBoard(), settings: all, now: now,
+                                                following: nil, after: nil))
+        #expect(started.trip == "b")
+        let atStation = minutes(6).addingTimeInterval(10)
+        var board = fixtureBoard()
+        board.trains.removeAll { $0.time <= atStation }
+        let held = started.refreshed(for: selection, board: board, settings: all, now: atStation)
+        #expect(held.trip == "b")
+        #expect(held.train == minutes(6))
+        #expect(held.following == [minutes(9), minutes(15)])
+        #expect(held.followingRoutes == ["N", "R"])
+        #expect(held.notice == "Service change")
+        #expect(held.updated == atStation)
+        // Once it's been there, on to the next
+        let gone = started.refreshed(for: selection, board: board, settings: all,
+                                     now: minutes(6).addingTimeInterval(AtStation.seconds))
+        #expect(gone.trip == "c")
+    }
 }

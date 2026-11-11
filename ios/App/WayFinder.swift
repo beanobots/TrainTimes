@@ -39,6 +39,18 @@ struct WayFinder: Sendable {
     private let calling: [String: [(run: Int, index: Int)]]
     /// Each timetable pattern's calls as complexes, for timing.
     private let patternComplexes: [[String]]
+    /// Per timetable pattern running on another line's stops (the N on the R's local stops late
+    /// nights, the D there on weekends): that line, and the stretch of calls along its stops
+    /// where the pattern's trains count as it, "R and trains running on the local track".
+    private let standIns: [Int: [(line: String, calls: ClosedRange<Int>)]]
+
+    /// Express buses (SIM, X, BM, QM, BxM): left out of planning, as their stops in the
+    /// boroughs only pick up toward Manhattan and only let off away from it, which the bus data
+    /// doesn't say, so they'd seem to run between any two of their stops.
+    static func isExpress(_ line: String) -> Bool {
+        let name = BusRoutes.key(line)
+        return ["SIM", "BXM", "BM", "QM", "X"].contains { name.hasPrefix($0) && name.dropFirst($0.count).first?.isNumber == true }
+    }
 
     /// A bus stop as a place.
     static func stopPlace(_ code: String) -> String { "b:" + code }
@@ -52,26 +64,82 @@ struct WayFinder: Sendable {
         var runs: [Run] = []
         let stopComplexes = timetable.stops.map { StationDirectory.station(forStop: $0)?.complex ?? $0 }
         patternComplexes = timetable.patterns.map { $0.calls.map { stopComplexes[Int($0.stop)] } }
-        for pattern in timetable.patterns {
+        var standIns: [Int: [(line: String, calls: ClosedRange<Int>)]] = [:]
+        for (index, pattern) in timetable.patterns.enumerated() {
             let route = Lines.normalized(timetable.routes[Int(pattern.route)])
             let stops = pattern.calls.map { timetable.stops[Int($0.stop)] }
-            let key = route + " " + stops.joined(separator: ",")
+            var places = patternComplexes[index]
+            let seconds = pattern.calls.map { Int($0.arrives) }
+            let stretches = Self.standInStretches(route: route, stops: stops)
+            if !stretches.isEmpty {
+                standIns[index] = stretches
+                // Along another line's stops it's that line: its own isn't boarded or left there,
+                // only ridden through
+                for (call, stop) in stops.enumerated() where stretches.contains(where: { $0.calls.contains(call) }) {
+                    if let platform = StationDirectory.platform(forStop: stop), !platform.routes.contains(route) {
+                        places[call] = ""
+                    }
+                }
+                let complexes = patternComplexes[index]
+                for stretch in stretches {
+                    let calls = Array(stretch.calls)
+                    let key = stretch.line + " " + calls.map { stops[$0] }.joined(separator: ",")
+                    guard seen.insert(key).inserted else { continue }
+                    runs.append(Run(route: stretch.line, headsign: nil, stops: calls.map { stops[$0] },
+                                    places: calls.map { complexes[$0] }, seconds: calls.map { seconds[$0] }))
+                }
+            }
+            let key = route + " " + stops.joined(separator: ",") + (stretches.isEmpty ? "" : " via")
             guard seen.insert(key).inserted else { continue }
-            runs.append(Run(route: route, headsign: nil, stops: stops, places: pattern.calls.map { stopComplexes[Int($0.stop)] },
-                            seconds: pattern.calls.map { Int($0.arrives) }))
+            runs.append(Run(route: route, headsign: nil, stops: stops, places: places, seconds: seconds))
         }
-        for (line, way) in BusRoutes.everyWay where way.stops.count > 1 {
+        self.standIns = standIns
+        for (line, way) in BusRoutes.everyWay where way.stops.count > 1 && !Self.isExpress(line) {
             runs.append(Run(route: BusLeg.prefix + line, headsign: way.to, stops: way.stops.map(\.code),
                             places: way.stops.map { Self.stopPlace($0.code) }, seconds: way.minutes.map { Int($0 * 60) }))
         }
         self.runs = runs
         var calling: [String: [(run: Int, index: Int)]] = [:]
         for (index, run) in runs.enumerated() {
-            for (position, place) in run.places.enumerated() {
+            for (position, place) in run.places.enumerated() where !place.isEmpty {
                 calling[place, default: []].append((index, position))
             }
         }
         self.calling = calling
+    }
+
+    /// Where a `route` train calling at `stops` runs on another line's stops, as that line: each
+    /// run of stops `route` doesn't usually make (as `Platform.routes` has it: a Q on the D N R's
+    /// platform at Atlantic Av is off its own, though it stops in the station), widened along the
+    /// line usually making them all to as far as that line's stops go on. The line is the one
+    /// making most of the pattern's stops (R over W).
+    private static func standInStretches(route: String, stops: [String]) -> [(line: String, calls: ClosedRange<Int>)] {
+        let stations = stops.map(StationDirectory.platform(forStop:))
+        let unusual = stations.indices.filter { stations[$0].map { !$0.routes.contains(route) } ?? false }
+        guard !unusual.isEmpty else { return [] }
+        // Unusual calls next to each other, together while one line makes them all: a W from
+        // Sea Beach is on the N's stops, then the R's
+        var groups: [(calls: [Int], common: Set<String>)] = []
+        for call in unusual {
+            let lines = Set(stations[call]?.routes ?? [])
+            if let last = groups.last, last.calls.last == call - 1, !last.common.isDisjoint(with: lines) {
+                groups[groups.count - 1].calls.append(call)
+                groups[groups.count - 1].common.formIntersection(lines)
+            } else {
+                groups.append(([call], lines))
+            }
+        }
+        var stretches: [(line: String, calls: ClosedRange<Int>)] = []
+        for (group, common) in groups {
+            let making = { (line: String) in stations.filter { $0?.routes.contains(line) == true }.count }
+            guard let line = common.sorted().min(by: { making($0) > making($1) }) else { continue }
+            var low = group[0]
+            var high = group[group.count - 1]
+            while low > 0, stations[low - 1]?.routes.contains(line) == true { low -= 1 }
+            while high < stations.count - 1, stations[high + 1]?.routes.contains(line) == true { high += 1 }
+            if !stretches.contains(where: { $0.line == line && $0.calls == low...high }) { stretches.append((line, low...high)) }
+        }
+        return stretches
     }
 
     // MARK: Places
@@ -174,7 +242,7 @@ struct WayFinder: Sendable {
             let boarding = ride == 0 ? frontier : Set(frontier.flatMap { Self.transfers(from: $0).map(\.place) })
             for from in boarding {
                 for call in calling[from] ?? [] {
-                    for later in runs[call.run].places[(call.index + 1)...] where later != place {
+                    for later in runs[call.run].places[(call.index + 1)...] where later != place && !later.isEmpty {
                         if reached.insert(later).inserted { next.insert(later) }
                     }
                 }
@@ -200,6 +268,9 @@ struct WayFinder: Sendable {
         var minutes: [Part: Int]
         /// Seconds riding and changing, the timetable's way, for ranking before timing.
         var typical: Int
+        /// Rides (by index) whose train is at times another line's running on its stops: the R
+        /// and trains running on the local track.
+        var localTrack: Set<Int> = []
 
         struct Start: Hashable, Sendable {
             /// A train's station and way.
@@ -241,6 +312,9 @@ struct WayFinder: Sendable {
             var direction: Direction = .north
             var boardStop: BusRoutes.Stop?
             var headsign: String?
+            /// The next ride's lines boarded here, of those a merged way rides: the N and D at
+            /// Atlantic Av, the Q and B at DeKalb Av. Empty for any of them.
+            var lines: [String] = []
             var across: Bool
             var walkMinutes: Int
             /// Seconds there this way, the timetable's.
@@ -312,7 +386,7 @@ struct WayFinder: Sendable {
             let run = runs[index]
             var next: (off: Int, walk: Int)?
             // From the end back: each stop's first end after it
-            for on in stride(from: run.places.count - 1, through: 0, by: -1) {
+            for on in stride(from: run.places.count - 1, through: 0, by: -1) where !run.places[on].isEmpty {
                 if let found = next, ends[run.places[on]] == nil {
                     toTarget[run.places[on], default: []].append((index, on, found.off, found.walk))
                 }
@@ -321,6 +395,13 @@ struct WayFinder: Sendable {
         }
         var found: [String: (path: Path, seconds: Int)] = [:]
         func add(_ path: Path) {
+            // No change onto a train making the same next stop: it's on the same track (R to W)
+            for (before, after) in zip(path.rides, path.rides.dropFirst()) {
+                let off = runs[before.run]
+                let on = runs[after.run]
+                if !off.isBus, !on.isBus, before.off + 1 < off.stops.count, after.on + 1 < on.stops.count,
+                   off.stops[before.off + 1] == on.stops[after.on + 1] { return }
+            }
             let key = path.rides.map { ride in "\(runs[ride.run].route)@\(runs[ride.run].places[ride.on])" }
                 .joined(separator: ">") + ">" + runs[path.rides[0].run].stops[path.rides[0].on]
             let seconds = path.seconds(runs)
@@ -335,6 +416,7 @@ struct WayFinder: Sendable {
             for off in (start.index + 1)..<run.places.count {
                 let place = run.places[off]
                 if place == origin { break }
+                if place.isEmpty { continue }
                 if let walk = ends[place] {
                     add(Path(rides: [(start.run, start.index, off)], walks: [], endWalk: walk))
                     break
@@ -376,6 +458,7 @@ struct WayFinder: Sendable {
                         for off in (middle.index + 1)..<run.places.count {
                             let stop = run.places[off]
                             if stop == origin || stop == to.place || ends[stop] != nil { break }
+                            if stop.isEmpty { continue }
                             let path = Path(rides: [first.ride, (middle.run, middle.index, off)], walks: [to.walk], endWalk: 0)
                             let riding = path.seconds(runs)
                             if Double(riding) > limit { break }
@@ -474,8 +557,8 @@ struct WayFinder: Sendable {
                 let after = runs[next.run]
                 let offStop = before.stops[ride.off]
                 let onStop = after.stops[next.on]
-                var option = Way.Option(place: after.places[next.on], across: false, walkMinutes: path.walks[index],
-                                        typical: seconds)
+                var option = Way.Option(place: after.places[next.on], lines: [after.route], across: false,
+                                        walkMinutes: path.walks[index], typical: seconds)
                 if before.isBus {
                     option.offStop = BusRoutes.stopByCode[offStop]
                 } else {
@@ -529,27 +612,89 @@ struct WayFinder: Sendable {
             }
             return way
         }
-        // Train lines as good as each other, changed to at the same place: one way ("R → N Q")
+        // Changed to the same way wherever both change: across the platform at both, or not. The
+        // N and D are across from the R at Atlantic Av, the Q and B a walk through the station.
+        func changedAlike(_ one: Way, _ other: Way) -> Bool {
+            zip(one.changes, other.changes).allSatisfy { ours, theirs in
+                theirs.allSatisfy { option in ours.first { $0.place == option.place }.map { $0.across == option.across } ?? true }
+            }
+        }
+        // Train lines as good as each other, changed to at the same place and the same way: one
+        // way ("R → N D"); with one change, at a place both can be, going on along the same
+        // tracks ("R → Q B", from DeKalb Av). A change's places are then those of either; each
+        // only takes the lines stopping there.
         var merged: [Way] = []
         for way in ways.sorted(by: { $0.typical < $1.typical }) {
             if let index = merged.firstIndex(where: { other in
                 other.rides.count == way.rides.count && other.rides.count >= 2 && other.start == way.start
                     && other.rides[0] == way.rides[0] && Array(other.rides.dropFirst(2)) == Array(way.rides.dropFirst(2))
                     && BusLeg.line(of: other.rides[1][0]) == nil && BusLeg.line(of: way.rides[1][0]) == nil
-                    && other.changes.map { $0.first?.place } == way.changes.map { $0.first?.place }
+                    && (other.changes.map { $0.first?.place } == way.changes.map { $0.first?.place }
+                        || other.rides.count == 2
+                            && !Set(other.changes[0].map(\.place)).isDisjoint(with: way.changes[0].map(\.place))
+                            && headTogether(other, way))
+                    && changedAlike(other, way)
                     && abs(other.typical - way.typical) <= 4 * 60
             }) {
                 merged[index].rides[1] += way.rides[1].filter { !merged[index].rides[1].contains($0) }
                 for (position, options) in way.changes.enumerated() {
-                    for option in options where !merged[index].changes[position].contains(where: { $0.place == option.place }) {
-                        merged[index].changes[position].append(option)
+                    for option in options {
+                        if let found = merged[index].changes[position].firstIndex(where: { $0.place == option.place }) {
+                            merged[index].changes[position][found].lines += option.lines.filter {
+                                !merged[index].changes[position][found].lines.contains($0)
+                            }
+                        } else {
+                            merged[index].changes[position].append(option)
+                        }
                     }
                 }
             } else {
                 merged.append(way)
             }
         }
-        return merged
+        // First train lines as good as each other from the same station, then the same: one way
+        // ("F G → B57")
+        var together: [Way] = []
+        for way in merged {
+            if let index = together.firstIndex(where: { other in
+                other.start == way.start && other.rides.count == way.rides.count
+                    && Array(other.rides.dropFirst()) == Array(way.rides.dropFirst())
+                    && BusLeg.line(of: other.rides[0][0]) == nil && BusLeg.line(of: way.rides[0][0]) == nil
+                    && other.changes.map { $0.first?.place } == way.changes.map { $0.first?.place }
+                    && changedAlike(other, way)
+                    && abs(other.typical - way.typical) <= 3 * 60
+            }) {
+                together[index].rides[0] += way.rides[0].filter { !together[index].rides[0].contains($0) }
+                for (position, options) in way.changes.enumerated() {
+                    for option in options where !together[index].changes[position].contains(where: { $0.place == option.place }) {
+                        together[index].changes[position].append(option)
+                    }
+                }
+            } else {
+                together.append(way)
+            }
+        }
+        return together
+    }
+
+    /// Whether two ways' second rides go on along the same tracks from where they're changed to:
+    /// one of their next two stops in common (the D from Atlantic Av and B from DeKalb Av at
+    /// Grand St, the N and Q at Canal St), not the 3 from Atlantic Av.
+    private func headTogether(_ one: Way, _ other: Way) -> Bool {
+        func ahead(_ way: Way) -> Set<String> {
+            var found = Set<String>()
+            for option in way.changes[0] where option.boardStationID != nil {
+                for call in calling[option.place] ?? [] {
+                    let run = runs[call.run]
+                    guard way.rides[1].contains(run.route), Direction(ofStop: run.stops[call.index]) == option.direction else { continue }
+                    found.formUnion(run.places[(call.index + 1)..<min(call.index + 3, run.places.count)].filter { !$0.isEmpty })
+                }
+            }
+            return found
+        }
+        // Not where they're going: lines from all over meet there
+        let ends = Set([one.end, other.end].compactMap { $0.stationID.flatMap(StationDirectory.station(id:))?.complex })
+        return !ahead(one).subtracting(ends).isDisjoint(with: ahead(other))
     }
 
     // MARK: Timing
@@ -560,7 +705,7 @@ struct WayFinder: Sendable {
     private func moments() -> [Part: TimeInterval] {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = Self.zone
-        let start = max(timetable.base, Date.now.addingTimeInterval(-3600))
+        let start = max(timetable.base, AppClock.now.addingTimeInterval(-3600))
         var found: [Part: TimeInterval] = [:]
         for offset in 0..<9 {
             guard let day = calendar.date(byAdding: .day, value: offset, to: calendar.startOfDay(for: start)) else { continue }
@@ -595,11 +740,18 @@ struct WayFinder: Sendable {
                 way.minutes[part] = quickest.minutes
                 for found in tries {
                     for (index, places) in found.useful.enumerated() { useful[index].formUnion(places) }
+                    way.localTrack.formUnion(found.localTrack)
                 }
             }
             way.changes = zip(way.changes, useful).map { options, useful in
                 let kept = options.filter { useful.contains($0.place) }
                 return kept.isEmpty ? Array(options.prefix(1)) : kept
+            }
+            // Each ride after a change, only the lines boarded at the places kept
+            for (index, options) in way.changes.enumerated() {
+                let boarded = Set(options.flatMap(\.lines))
+                let kept = way.rides[index + 1].filter(boarded.contains)
+                if !kept.isEmpty { way.rides[index + 1] = kept }
             }
             return way
         }
@@ -607,14 +759,15 @@ struct WayFinder: Sendable {
 
     /// Minutes from the first train or bus leaving to getting there, for `way` leaving at or after
     /// `time` (seconds after the timetable's base), and per change the places within a couple of
-    /// minutes of the best; nil if it doesn't run then. Trains by the timetable; buses by their
-    /// minutes, from when you're at the stop (Bus Time has no week ahead).
-    private func trip(_ way: Way, leaving time: TimeInterval, ends: [String: Int]) -> (minutes: Int, useful: [Set<String>])? {
-        var done: [(through: [String], total: TimeInterval)] = []
+    /// minutes of the best and the rides those take another line's train on (`Way.localTrack`);
+    /// nil if it doesn't run then. Trains by the timetable; buses by their minutes, from when
+    /// you're at the stop (Bus Time has no week ahead).
+    private func trip(_ way: Way, leaving time: TimeInterval, ends: [String: Int])
+        -> (minutes: Int, useful: [Set<String>], localTrack: Set<Int>)? {
+        var done: [(through: [String], total: TimeInterval, localTrack: Set<Int>)] = []
         // Ride `index` boarded at `board` (a station or a stop), from `after`
-        func go(ride index: Int, board: (station: Station?, stop: BusRoutes.Stop?, headsign: String?), after: TimeInterval,
-                wait: TimeInterval, left: TimeInterval?, through: [String]) {
-            let lines = Set(way.rides[index])
+        func go(ride index: Int, lines: Set<String>, board: (station: Station?, stop: BusRoutes.Stop?, headsign: String?),
+                after: TimeInterval, wait: TimeInterval, left: TimeInterval?, through: [String], localTrack: Set<Int>) {
             let last = index == way.rides.count - 1
             let targets: [(place: String, option: Way.Option?)] = last
                 ? ends.keys.map { ($0, nil) }
@@ -622,53 +775,65 @@ struct WayFinder: Sendable {
             for target in targets {
                 guard let rode = ride(lines: lines, board: board, to: target.place, after: after, within: wait) else { continue }
                 let leftAt = left ?? rode.leaves
+                let local = rode.standIn ? localTrack.union([index]) : localTrack
                 guard let option = target.option else {
                     let walk = TimeInterval((ends[target.place] ?? 0) * 60)
-                    done.append((through, rode.arrives + walk - leftAt))
+                    done.append((through, rode.arrives + walk - leftAt, local))
                     continue
                 }
                 let walk = TimeInterval(option.across ? 30 : option.walkMinutes * 60)
                 let next = (station: option.boardStationID.flatMap(StationDirectory.station(id:)), stop: option.boardStop,
                             headsign: option.headsign)
-                go(ride: index + 1, board: next, after: rode.arrives + walk, wait: 60 * 60, left: leftAt,
-                   through: through + [option.place])
+                // Only the lines boarded at this place: the Q isn't changed to at Atlantic Av
+                // because the N and D across the platform are
+                let onward = Set(option.lines.isEmpty ? way.rides[index + 1] : option.lines)
+                go(ride: index + 1, lines: onward, board: next, after: rode.arrives + walk, wait: 60 * 60, left: leftAt,
+                   through: through + [option.place], localTrack: local)
             }
         }
         let start = (station: way.start.stationID.flatMap(StationDirectory.station(id:)), stop: way.start.stop,
                      headsign: way.start.headsign)
-        go(ride: 0, board: start, after: time, wait: 40 * 60, left: nil, through: [])
+        go(ride: 0, lines: Set(way.rides[0]), board: start, after: time, wait: 40 * 60, left: nil, through: [], localTrack: [])
         guard let best = done.map(\.total).min() else { return nil }
         var useful = Array(repeating: Set<String>(), count: way.changes.count)
+        var localTrack = Set<Int>()
         for path in done where path.total <= best + 150 {
             for (index, place) in path.through.enumerated() { useful[index].insert(place) }
+            localTrack.formUnion(path.localTrack)
         }
-        return (Int((best / 60).rounded()), useful)
+        return (Int((best / 60).rounded()), useful, localTrack)
     }
 
     /// Riding `lines` from `board` after `time` (within `wait` of it) to `place`: when it leaves
-    /// and gets there. A train by the timetable's soonest; a bus by its minutes, leaving then.
+    /// and gets there, and whether that's another line's train on their stops (`standIns`). A
+    /// train by the timetable's soonest; a bus by its minutes, leaving then.
     private func ride(lines: Set<String>, board: (station: Station?, stop: BusRoutes.Stop?, headsign: String?),
                       to place: String, after time: TimeInterval, within wait: TimeInterval)
-        -> (leaves: TimeInterval, arrives: TimeInterval)? {
+        -> (leaves: TimeInterval, arrives: TimeInterval, standIn: Bool)? {
         if let stop = board.stop {
             guard let code = Self.stopCode(place), let line = lines.first.flatMap(BusLeg.line(of:)),
                   let minutes = BusRoutes.ahead(on: line, from: stop.code, toward: board.headsign)
                     .first(where: { $0.stop.code == code })?.minutes else { return nil }
-            return (time, time + minutes * 60)
+            return (time, time + minutes * 60, false)
         }
         guard let station = board.station, Self.stopCode(place) == nil else { return nil }
-        var best: (leaves: TimeInterval, arrives: TimeInterval)?
+        var best: (leaves: TimeInterval, arrives: TimeInterval, standIn: Bool)?
         for stop in StationDirectory.stops(inComplexOf: station) {
             for call in timetable.calls(at: stop) {
                 let pattern = timetable.patterns[call.pattern]
-                guard lines.contains(Lines.normalized(timetable.routes[Int(pattern.route)])),
-                      let off = patternComplexes[call.pattern][(call.call + 1)...].firstIndex(of: place),
+                guard let off = patternComplexes[call.pattern][(call.call + 1)...].firstIndex(of: place) else { continue }
+                let own = lines.contains(Lines.normalized(timetable.routes[Int(pattern.route)]))
+                // Another line's train, along `lines`' stops both where it's boarded and left
+                let standIn = !own && (standIns[call.pattern] ?? []).contains { stretch in
+                    lines.contains(stretch.line) && stretch.calls.contains(call.call) && stretch.calls.contains(off)
+                }
+                guard own || standIn,
                       let start = timetable.firstStart(ofPattern: call.pattern, leaving: call.call, after: time) else { continue }
                 let here = pattern.calls[call.call]
                 let leaves = start + TimeInterval(here.arrives) + TimeInterval(here.waits)
                 guard leaves - time <= wait else { continue }
                 let arrives = start + TimeInterval(pattern.calls[off].arrives)
-                if best.map({ arrives < $0.arrives }) ?? true { best = (leaves, arrives) }
+                if best.map({ arrives < $0.arrives }) ?? true { best = (leaves, arrives, standIn) }
             }
         }
         return best

@@ -16,7 +16,9 @@ struct SavedWidget: Codable, Hashable, Identifiable, Sendable {
     var destinationID: String?
     /// Whether the medium Next train widget shows the other direction beside this one.
     var bothWays: Bool
-    /// What it shows: a subway train (`selection`), a bus (`bus`) or a Citi Bike dock (`dock`).
+    /// What it shows: a subway train (`selection`) or a bus (`bus`). A Citi Bike dock (`dock`) only
+    /// in saves from before docks were the Citi Bike widget's, which `SavedWidgets` drops; kept
+    /// here as the push server shares this file.
     var kind: SavedRouteKind = .subway
     /// A bus widget's bus.
     var bus: BusChoice? = nil
@@ -87,20 +89,88 @@ struct SavedWidget: Codable, Hashable, Identifiable, Sendable {
         if (kind == .bus && bus == nil) || (kind == .bike && dock == nil) { kind = .subway }
     }
 
+    /// Planned From and To: the ways there, each ride a train or a bus, carried by its change
+    /// (from a station) or its bus (from a stop) so every widget path has it. Nil for a route
+    /// picked by hand.
+    var trip: PlannedTrip? {
+        kind == .bus ? bus?.planned : change?.planned
+    }
+
+    /// Where it goes: its change's destination, or without one its own.
+    var destination: Station? {
+        (trip?.destinationID ?? change?.destinationID ?? destinationID).flatMap(StationDirectory.station(id:))
+    }
+
+    /// A saved route with somewhere it goes, a station or a stop: New Trip can plan to it
+    /// (`PlanRouteTripIntent`). Not the unsaved default, a countdown-only route, nor a dock.
+    var hasEnd: Bool {
+        id != Self.defaultID && kind != .bike
+            && (trip?.destinationID ?? trip?.destinationStop?.id ?? change?.destinationID ?? destinationID) != nil
+    }
+
     /// Where Next train times its trains to: the destination, when there's no change.
     var directDestination: Station? {
         change == nil ? destinationID.flatMap(StationDirectory.station(id:)) : nil
     }
 
-    /// The name, or the station's, stop's or dock's.
+    /// The name typed for it, or `summary`.
     var title: String {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
-        guard trimmed.isEmpty else { return trimmed }
+        return trimmed.isEmpty ? summary : trimmed
+    }
+
+    /// Whether a name was typed for it.
+    var isNamed: Bool { !name.trimmingCharacters(in: .whitespaces).isEmpty }
+
+    /// What you ride and from where: "R from 4 Av-9 St", "B63 from 5 Av/3 St",
+    /// "Citi Bike at 5 Av & 3 St".
+    var summary: String {
         switch kind {
-        case .subway: return selection.station?.name ?? "Train"
-        case .bus: return bus.map { "\($0.allLines.map(BusNames.label).joined(separator: ", ")) · \($0.stopName)" } ?? "Bus"
-        case .bike: return dock?.name ?? "Citi Bike"
+        case .subway:
+            let lines = selection.routes.map { LineStyle.of($0).label }.joined(separator: " ")
+            return selection.station.map { "\(lines) from \($0.name)" } ?? "Train"
+        case .bus:
+            return bus.map { "\($0.allLines.map(BusNames.label).joined(separator: ", ")) from \($0.stopName)" } ?? "Bus"
+        case .bike:
+            return dock.map { "Citi Bike at \($0.name)" } ?? "Citi Bike"
         }
+    }
+
+    /// Which way it goes: "to Manhattan", "change at DeKalb Av for the Q", "both ways";
+    /// empty for a dock.
+    var way: String {
+        // Planned From and To: where it goes
+        if kind != .bike, let destination { return "to \(destination.name)" }
+        if let stop = trip?.destinationStop { return "to \(BusNames.readable(stop.name))" }
+        switch kind {
+        case .subway:
+            if let change {
+                let onward = Lines.list(change.allRoutes, joinedBy: "or")
+                // Alternatives change at more than one station
+                guard change.alternatives.isEmpty, let station = change.station else {
+                    return "change for the \(onward)"
+                }
+                return "change at \(station.name) for the \(onward)"
+            }
+            if bothWays { return "both ways" }
+            if let directDestination { return "to \(directDestination.name)" }
+            let heading = selection.heading
+            return heading.isEmpty ? selection.direction.compassName.lowercased() : "to \(heading)"
+        case .bus:
+            guard let bus else { return "" }
+            return bus.bothWays ? "both ways" : "to \(bus.wayName)"
+        case .bike:
+            return ""
+        }
+    }
+
+    /// Every line it rides, each once: the train's, then the change's.
+    var allRoutes: [String] {
+        var routes = selection.routes
+        for route in change?.allRoutes ?? [] where !routes.contains(route) {
+            routes.append(route)
+        }
+        return routes
     }
 
     /// What to show at `date`: during commuting hours, their train and change with this one's
@@ -143,25 +213,97 @@ private func keptDestination(_ id: String?, from old: Selection, to new: Selecti
 /// The saved widgets in Widgets tab order. Widgets that pick none show Settings' default train
 /// (`SavedWidget.default(_:)`). Older saves' `defaultID` is ignored.
 struct SavedWidgets: Codable, Hashable, Sendable {
-    /// Never empty.
+    /// Possibly none: every route can be deleted, and widgets then show Settings' default train.
     private(set) var widgets: [SavedWidget]
+    /// Citi Bike docks saved before they were the Citi Bike widget's: not listed, but kept (and
+    /// saved again), so a Saved Route widget still showing one says it's moved, not a train.
+    private(set) var movedDocks: [SavedWidget] = []
+    /// Widgets this version can't read (saved by a newer one, say), kept as they were saved and
+    /// saved again, so going back a version never loses them. Not listed, nor shown by widgets.
+    private(set) var unreadable: [Unreadable] = []
 
-    init(widgets: [SavedWidget]) {
-        self.widgets = widgets.isEmpty ? [SavedWidget(selection: .fallback)] : widgets
+    /// An unreadable widget, and where it goes among the rest.
+    struct Unreadable: Hashable, Sendable {
+        /// The listed widget it follows: it keeps its place after that one as widgets move, and
+        /// takes the place of that one's when it's deleted. Nil: before them all.
+        var after: UUID?
+        var json: SavedJSON
+    }
+
+    init(widgets: [SavedWidget], movedDocks: [SavedWidget] = [], unreadable: [Unreadable] = []) {
+        self.widgets = widgets
+        self.movedDocks = movedDocks
+        self.unreadable = unreadable
     }
 
     private enum CodingKeys: String, CodingKey {
         case widgets
     }
 
-    /// Goes through `init(widgets:)` so empty widgets stay valid.
+    /// A saved widget, or what was saved if it can't be read as one.
+    private enum Entry: Decodable {
+        case widget(SavedWidget)
+        case unreadable(SavedJSON)
+
+        init(from decoder: Decoder) throws {
+            if let widget = try? SavedWidget(from: decoder) {
+                self = .widget(widget)
+            } else {
+                self = .unreadable(try SavedJSON(from: decoder))
+            }
+        }
+    }
+
+    /// One widget at a time: one that can't be read is kept as `unreadable`, not the end of them
+    /// all. Citi Bike docks saved before they were the Citi Bike widget's are kept apart, as
+    /// `movedDocks`.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.init(widgets: try container.decode([SavedWidget].self, forKey: .widgets))
+        var list = try container.nestedUnkeyedContainer(forKey: .widgets)
+        var widgets: [SavedWidget] = []
+        var docks: [SavedWidget] = []
+        var unreadable: [Unreadable] = []
+        while !list.isAtEnd {
+            switch try list.decode(Entry.self) {
+            case .widget(let widget) where widget.kind == .bike: docks.append(widget)
+            case .widget(let widget): widgets.append(widget)
+            case .unreadable(let json): unreadable.append(Unreadable(after: widgets.last?.id, json: json))
+            }
+        }
+        self.init(widgets: widgets, movedDocks: docks, unreadable: unreadable)
+    }
+
+    /// The unreadable each after the widget it follows, and `movedDocks` last: with none
+    /// unreadable, as before them.
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        var list = container.nestedUnkeyedContainer(forKey: .widgets)
+        let ids = Set(widgets.map(\.id))
+        for entry in unreadable where entry.after == nil {
+            try list.encode(entry.json)
+        }
+        for widget in widgets {
+            try list.encode(widget)
+            for entry in unreadable where entry.after == widget.id {
+                try list.encode(entry.json)
+            }
+        }
+        // Following a widget that's gone some other way than `delete`: at the end
+        for entry in unreadable where entry.after.map({ !ids.contains($0) }) ?? false {
+            try list.encode(entry.json)
+        }
+        for dock in movedDocks {
+            try list.encode(dock)
+        }
     }
 
     func widget(_ id: UUID) -> SavedWidget? {
         widgets.first { $0.id == id }
+    }
+
+    /// The Citi Bike dock saved as `id` before docks were the Citi Bike widget's, if it was one.
+    func movedDock(_ id: UUID) -> SavedWidget? {
+        movedDocks.first { $0.id == id }
     }
 
     /// Replaces the saved widget with the same id.
@@ -174,12 +316,17 @@ struct SavedWidgets: Codable, Hashable, Sendable {
         widgets.append(widget)
     }
 
-    /// Never deletes the last one.
+    /// Any unreadable widgets after it then follow the one before it, keeping their place.
     mutating func delete(_ id: UUID) {
-        guard widgets.count > 1 else { return }
+        guard let index = widgets.firstIndex(where: { $0.id == id }) else { return }
+        let before = index > 0 ? widgets[index - 1].id : nil
+        for at in unreadable.indices where unreadable[at].after == id {
+            unreadable[at].after = before
+        }
         widgets.removeAll { $0.id == id }
     }
 
+    /// Unreadable widgets move with the widget before them.
     mutating func move(fromOffsets source: IndexSet, toOffset destination: Int) {
         let moving = source.sorted().map { widgets[$0] }
         var rest = widgets.enumerated().filter { !source.contains($0.offset) }.map(\.element)
@@ -273,5 +420,49 @@ extension CommutingHours {
         start = try container.decodeIfPresent(Int.self, forKey: .start) ?? start
         end = try container.decodeIfPresent(Int.self, forKey: .end) ?? end
         weekdays = try container.decodeIfPresent(Set<Int>.self, forKey: .weekdays) ?? weekdays
+    }
+}
+
+/// JSON as it was read, to write back as it was: a saved widget this version can't read
+/// (`SavedWidgets.unreadable`). Whole numbers are kept exactly; others as `Double`.
+indirect enum SavedJSON: Codable, Hashable, Sendable {
+    case null
+    case bool(Bool)
+    case integer(Int64)
+    case number(Double)
+    case string(String)
+    case array([SavedJSON])
+    case object([String: SavedJSON])
+
+    init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer()
+        if value.decodeNil() {
+            self = .null
+        } else if let bool = try? value.decode(Bool.self) {
+            self = .bool(bool)
+        } else if let integer = try? value.decode(Int64.self) {
+            self = .integer(integer)
+        } else if let number = try? value.decode(Double.self) {
+            self = .number(number)
+        } else if let string = try? value.decode(String.self) {
+            self = .string(string)
+        } else if let array = try? value.decode([SavedJSON].self) {
+            self = .array(array)
+        } else {
+            self = .object(try value.decode([String: SavedJSON].self))
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var value = encoder.singleValueContainer()
+        switch self {
+        case .null: try value.encodeNil()
+        case .bool(let bool): try value.encode(bool)
+        case .integer(let integer): try value.encode(integer)
+        case .number(let number): try value.encode(number)
+        case .string(let string): try value.encode(string)
+        case .array(let array): try value.encode(array)
+        case .object(let object): try value.encode(object)
+        }
     }
 }

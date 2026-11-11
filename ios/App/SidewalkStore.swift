@@ -64,6 +64,81 @@ actor SidewalkStore {
         return mine != theirs
     }
 
+    /// Whether `point` is inside a block, in from its sidewalk's building line by `margin` metres
+    /// each way: in a building, as GPS puts you before you've come out. A block counts where
+    /// its sidewalk rings it whole, a hole in it; false where the sidewalk's in pieces, or
+    /// without the file.
+    func isIndoors(_ point: Walk.Point, margin: Double = 3) -> Bool {
+        guard let database = open() else { return false }
+        let sql = """
+            SELECT s.rings FROM sidewalk_boxes b JOIN sidewalks s ON s.id = b.id
+            WHERE b.min_lat <= ? AND b.max_lat >= ? AND b.min_lon <= ? AND b.max_lon >= ?
+            """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else { return false }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_double(statement, 1, point.lat)
+        sqlite3_bind_double(statement, 2, point.lat)
+        sqlite3_bind_double(statement, 3, point.lon)
+        sqlite3_bind_double(statement, 4, point.lon)
+        let plane = Sidewalks.Plane(origin: point)
+        let probes = [Sidewalks.V(x: 0, y: 0), Sidewalks.V(x: margin, y: 0), Sidewalks.V(x: -margin, y: 0),
+                      Sidewalks.V(x: 0, y: margin), Sidewalks.V(x: 0, y: -margin)]
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let count = Int(sqlite3_column_bytes(statement, 0))
+            guard count > 0, let bytes = sqlite3_column_blob(statement, 0) else { continue }
+            guard let rings = Sidewalks.rings(from: UnsafeRawBufferPointer(start: bytes, count: count)),
+                  rings.count > 1, rings.count <= Self.mostBlockRings else { continue }
+            // In one of its holes (rings after the curb), a block's size, not a park's
+            for hole in rings.dropFirst().map({ $0.map(plane.xy) }) where Self.area(hole) <= Self.biggestBlock {
+                let edges = Sidewalks.Edges([hole])
+                if probes.allSatisfy(edges.inside) { return true }
+            }
+        }
+        return false
+    }
+
+    /// Up to `most` sidewalks in the box, for Prototyping's map overlays, each with whether
+    /// `isIndoors` counts each of its holes (rings after the curb) as a block.
+    func sidewalks(south: Double, west: Double, north: Double, east: Double, most: Int)
+        -> [(rings: Sidewalks.Rings, blocks: [Bool])] {
+        guard let database = open() else { return [] }
+        let sql = """
+            SELECT s.rings FROM sidewalk_boxes b JOIN sidewalks s ON s.id = b.id
+            WHERE b.min_lat <= ? AND b.max_lat >= ? AND b.min_lon <= ? AND b.max_lon >= ? LIMIT ?
+            """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_double(statement, 1, north)
+        sqlite3_bind_double(statement, 2, south)
+        sqlite3_bind_double(statement, 3, east)
+        sqlite3_bind_double(statement, 4, west)
+        sqlite3_bind_int64(statement, 5, Int64(most))
+        var found: [(rings: Sidewalks.Rings, blocks: [Bool])] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let count = Int(sqlite3_column_bytes(statement, 0))
+            guard count > 0, let bytes = sqlite3_column_blob(statement, 0),
+                  let rings = Sidewalks.rings(from: UnsafeRawBufferPointer(start: bytes, count: count)),
+                  let origin = rings.first?.first else { continue }
+            let plane = Sidewalks.Plane(origin: origin)
+            let counts = rings.count > 1 && rings.count <= Self.mostBlockRings
+            found.append((rings, rings.dropFirst().map { counts && Self.area($0.map(plane.xy)) <= Self.biggestBlock }))
+        }
+        return found
+    }
+
+    /// Square metres of a block, at most, for `isIndoors`: a long Manhattan block's 22,000, not
+    /// a block-sized park like Bryant Park's 39,000 (or superblocks, missed).
+    private static let biggestBlock = 30_000.0
+    /// Rings of a sidewalk round blocks, at most: more is a park's paths round its lawns.
+    private static let mostBlockRings = 6
+
+    /// Square metres `ring` closes in.
+    private static func area(_ ring: [Sidewalks.V]) -> Double {
+        abs(zip(ring, ring.dropFirst() + ring.prefix(1)).reduce(0) { $0 + $1.0.x * $1.1.y - $1.1.x * $1.0.y }) / 2
+    }
+
     /// The sidewalk `point` is on, by its row; nil off them.
     private func sidewalk(at point: Walk.Point) -> Int64? {
         guard let database = open() else { return nil }

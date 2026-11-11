@@ -3,6 +3,7 @@ import CoreLocation
 import MapKit
 import Observation
 import SwiftUI
+import Synchronization
 import UIKit
 
 /// One end of a New Trip: where you are, a station, or a place found on the map.
@@ -102,8 +103,8 @@ struct ShowOnWidgetButton: View {
     }
 }
 
-/// The New Trip tab: pick where from and where to, then the trips between them, Google's (through
-/// the push server's `GET /routes`) and the app's own, as the Share sheet works them out from maps
+/// The New Trip tab: pick where from and where to, then the trips between them, planned on the
+/// phone (`LocalRoutes`, or the push server's `GET /routes` without the timetables) and the app's own, as the Share sheet works them out from maps
 /// directions. Go shows the one picked on the Transit Directions widget for an hour, as a shared
 /// trip does (`SharedTrip.show()`).
 ///
@@ -114,6 +115,9 @@ struct ShowOnWidgetButton: View {
 struct NewTripView: View {
     /// The picked trip, which Go shows on the widget.
     let showing: TripShowing
+    /// Which way the start map's compass turned it, when not Settings' way: framed that way
+    /// after. Shared with Nearby's map, and cleared as Settings changes.
+    @Binding var startHeading: Double?
 
     private enum End {
         case from, to
@@ -127,18 +131,27 @@ struct NewTripView: View {
     }
 
     /// What a failed plan offers: trying again, Settings to turn on Location Services, or
-    /// nothing, fading after `fadeAfter` back to From and To to change the trip (No Trip Found).
+    /// nothing, fading after `fadeAfter(_:)` back to From and To to change the trip (No Trip Found).
     private enum Fix: Equatable {
         case retry, settings, fades
     }
 
-    /// How long No Trip Found shows before fading back to From and To.
-    private static let fadeAfter: Duration = .seconds(1.5)
+    /// How long No Trip Found shows before fading back to From and To: time to read it, 1 s
+    /// plus 0.2 s a word.
+    private static func fadeAfter(_ message: String) -> Duration {
+        let words = message.split(whereSeparator: \.isWhitespace).count
+        return .seconds(1 + 0.2 * Double(words))
+    }
 
     /// No Trip Found showing over the map, to fade (`Fix.fades`).
     private var fading: Bool {
-        guard collapsed, case .failed(_, _, .fades) = state else { return false }
-        return true
+        fadingMessage != nil
+    }
+
+    /// No Trip Found's message, while it's showing to fade.
+    private var fadingMessage: String? {
+        guard collapsed, case .failed(_, let message, .fades) = state else { return nil }
+        return message
     }
 
     @State private var from: TripPlace? = .here
@@ -159,12 +172,15 @@ struct NewTripView: View {
     @State private var state = PlanState.waiting
     @State private var options: [ServerRoutes.Choice] = []
     @State private var picked = 0
+    /// Whether `picked` was tapped rather than the first trip by default: only then does it
+    /// stay picked, and shown, once walking all the way comes in (`addWalkAll`).
+    @State private var pickedByTap = false
     /// Each option's minutes door to door by the timetable; nil where it can't time one.
     @State private var minutes: [Int?] = []
     /// The train trips behind `options` (nil for one with a bus), for timing one again, and when
     /// they were planned for.
     @State private var trips: [TripPlanner.Trip?] = []
-    @State private var plannedAt = Date.now
+    @State private var plannedAt = AppClock.now
     /// For each option whose change is at more than one station, by its index: every station it
     /// can change at, those it does switched on, then others it could (`TripPlanner.otherChanges`).
     @State private var changeStations: [Int: [ChangeStation]] = [:]
@@ -172,23 +188,34 @@ struct NewTripView: View {
     @State private var stationsOpen = false
     /// What the trips shown were planned for, so coming back to the tab keeps them.
     @State private var plannedKey: PlanKey?
+    /// What Plan Trip was last tapped for: trips are planned as soon as both ends are picked, but
+    /// kept off the map until it's tapped for them.
+    @State private var shownKey: PlanKey?
+    /// Walking all the way, with Walk on, added to the trips once it's routed: a walk across town
+    /// takes seconds, which the trips mustn't wait on. Not cut short by leaving the tab.
+    @State private var walkAllTask: Task<Void, Never>?
+    /// The trips still to come once the others show (`Late`), each held a place in the list by
+    /// a row with a spinner, and the tasks adding them when they're in.
+    @State private var lateRows: [Late] = []
+    @State private var lateTasks: [Task<Void, Never>] = []
     /// Where the trips were planned from and to, for the map.
     @State private var ends: (start: CLLocation, end: CLLocation)?
-    /// The map before there are trips: around you, or the city until you're found.
-    @State private var startPosition = MapCameraPosition.userLocation(fallback: .region(Self.cityRegion))
-    /// The start map's size and safe area, to frame it turned NY North.
+    /// The map: before there are trips, around you, or the city until you're found; then framed
+    /// on the trips by `TripMap`. The city at first, framed on you by the app's own fix once
+    /// it's in (`framesNextFix`): following you, MapKit kept best-accuracy GPS on.
+    @State private var startPosition = MapCameraPosition.region(Self.cityRegion)
+    /// The start map's size and safe area, to frame it turned Grid North.
     @State private var startRoom = MapRoom()
-    /// Where the start map last came to rest, for a new one to begin there (`holdStart`).
+    /// Where the map last came to rest (`holdStart`).
     @State private var startCamera: MapCamera?
     /// Started over with no fresh fix (`startOver`): the start map frames you once you're found.
-    @State private var framesNextFix = false
+    /// At first too, until you're first found.
+    @State private var framesNextFix = true
     @AppStorage(MapNorth.key) private var nyNorth = false
     /// The lines round From on the map before there are trips (`findLines`), a count of each new
-    /// set, and the map's height and map points a point is, as Nearby's.
+    /// set, as Nearby's.
     @State private var lines = NearbyLines.none
     @State private var linesVersion = 0
-    @State private var mapHeight: CGFloat = 0
-    @State private var mapPointsPerPoint: Double = 0
     @State private var linesCache = NearbyLinesLayer.Cache()
     private static let cityRegion = MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: 40.73, longitude: -73.97),
                                                        latitudinalMeters: 8_000, longitudinalMeters: 8_000)
@@ -213,7 +240,6 @@ struct NewTripView: View {
         var buses: Bool
         var subway: Bool
         var walkMinutes: Int
-        var walkAll: Bool
         var bike: String
         var located: Bool
         var locateFailed: Bool
@@ -228,21 +254,19 @@ struct NewTripView: View {
         // again, the picked one lost, as you're found
         let here = from?.isHere == true || to?.isHere == true
         return PlanKey(from: from, to: to, buses: settings.settings.includesBuses, subway: subway,
-                       walkMinutes: walkMinutes, walkAll: walkAll,
+                       walkMinutes: walkMinutes,
                        bike: biking ? "\(bikeKinds.rawValue) \(ownBike.rawValue) \(bikeCarry.rawValue)" : "", located: here && location.location != nil,
                        locateFailed: here && location.failed, status: here ? location.status : .notDetermined,
                        attempt: attempt, moved: moved)
     }
 
-    /// How you'll go, remembered: by subway, walking all the way, and how far you'll walk to and
-    /// from a ride (minutes, one of `walkChoices`, picked in Settings). By bus is Settings'
-    /// Include buses.
+    /// How you'll go, remembered: by subway, and how far you'll walk to and from a ride (minutes,
+    /// one of `walkChoices`, picked in Settings). By bus is Settings' Include buses. Walking all
+    /// the way is always offered.
     @AppStorage(Self.subwayKey) private var subway = true
-    @AppStorage(Self.walkAllKey) private var walkAll = true
     @AppStorage(Self.walkMinutesKey) private var walkMinutes = Self.defaultWalkMinutes
 
     private static let subwayKey = "tripSubway"
-    private static let walkAllKey = "tripWalk"
     /// Where `walkMinutes` is kept, and what it is until picked, for Settings and first-run setup.
     static let walkMinutesKey = "tripWalkMinutes"
     static let defaultWalkMinutes = 15
@@ -265,9 +289,6 @@ struct NewTripView: View {
     static let bikeKey = "tripCitiBike"
 
     private var bike: BikeKinds? { biking ? bikeKinds : nil }
-
-    /// Whether any way to go is on: with none, Plan Trip is greyed and there's nothing to plan.
-    private var hasMode: Bool { subway || settings.settings.includesBuses || biking || walkAll }
 
     /// How far you'll walk to and from a ride, as offered on Settings' slider: its minutes, the
     /// walk's miles at 20 minutes a mile, and meters as the crow flies a station (stop, dock) may
@@ -376,9 +397,6 @@ struct NewTripView: View {
     /// The longer walk to and from a ride the trips were planned with, there being none within
     /// yours (`walkChoice`); nil when they're within it.
     @State private var longerWalk: Int?
-    /// Said over the walk all the way offered with Walk off, there being no trip the ways picked
-    /// and the walk being within yours (`walkChoice`); nil otherwise.
-    @State private var walkInstead: String?
     /// Go's walks being asked for.
     @State private var startingWalk = false
     /// Go waiting on its walks, let go (`cancelGo`) if the trip's changed or started over
@@ -388,9 +406,190 @@ struct NewTripView: View {
     @State private var walksAhead: WalksAhead?
     /// Apple Maps couldn't give Go its walks.
     @State private var walkFailed = false
+    /// The picked trip as a route, being planned and saved (`NewRouteView`).
+    @State private var savingRoute: SavedWidget?
     /// Go's walks failed as a station has no entrance listed, not for Apple Maps: trying again
     /// won't help.
     @State private var walkNoEntrance = false
+    /// Opened from a Saved Route's button (`PlanRouteTripIntent`): only the trips that take it,
+    /// until Show All Trips, or To's changed.
+    @State private var routeOnly: RouteFilter?
+    /// Opened from a Saved Route: its trips shown as soon as they're planned, as if Plan Trip
+    /// were tapped then. Not at once, as your being found after changes what they wait on.
+    @State private var showsWhenPlanned = false
+
+    /// A Saved Route whose trips alone are shown, and the To it was opened with.
+    private struct RouteFilter {
+        var widget: SavedWidget
+        var to: TripPlace
+    }
+
+    /// With `routeOnly`, the trips that start as the route does (`takes(_:route:)`); nil without
+    /// it, To changed since, or when none do.
+    private var routeIndices: [Int]? {
+        guard let routeOnly, routeOnly.to == to else { return nil }
+        let found = options.indices.filter { Self.takes(options[$0], route: routeOnly.widget) }
+        return found.isEmpty ? nil : found
+    }
+
+    /// The trips listed: the route's only, opened from one, else all.
+    private var shownIndices: [Int] { routeIndices ?? Array(options.indices) }
+
+    /// Whether `choice` starts as `route` does: from its station on one of its lines going its
+    /// way, or for a bus route, on one of its buses from its stop.
+    private static func takes(_ choice: ServerRoutes.Choice, route: SavedWidget) -> Bool {
+        switch route.kind {
+        case .subway:
+            let train: SharedTrip.Option? = switch choice {
+            case .train(let option): option
+            case .bus(let trip): trip.busFirst ? nil : trip.train
+            case .walk, .bike: nil
+            }
+            guard let train, let station = train.selection.station, let routeStation = route.selection.station,
+                  station.complex == routeStation.complex else { return false }
+            return train.selection.routes.contains { line in
+                route.selection.routes.contains(line)
+                    && train.selection.direction(of: line) == route.selection.direction(of: line)
+            }
+        case .bus:
+            guard case .bus(let trip) = choice, trip.busFirst, let bus = route.bus,
+                  let stop = BusRoutes.stopByCode[bus.stop.id] else { return false }
+            let line = BusRoutes.key(trip.bus.line)
+            return bus.allLines.contains { BusRoutes.key($0) == line }
+                && trip.bus.from.location.distance(from: stop.location) <= Self.sameStop
+        case .bike:
+            return false
+        }
+    }
+
+    /// Metres a trip's bus may board from a route's stop and be the same stop: the planner's
+    /// stops and the route's are the same, give or take where each puts it.
+    private static let sameStop: CLLocationDistance = 60
+
+    /// Plans from where you are to Saved Route `id`'s end, showing only its trips (`routeOnly`):
+    /// its button on a widget was tapped.
+    private func planRoute(_ id: UUID) {
+        guard let widget = SharedStore.loadWidgets().widget(id)?.shown(at: AppClock.now), widget.hasEnd else { return }
+        let place: TripPlace
+        switch widget.end {
+        case .station(let station):
+            place = TripPlace(station: station)
+        case .stop(let stop):
+            place = TripPlace(name: BusNames.readable(stop.name),
+                              point: TripPlace.Point(latitude: stop.latitude, longitude: stop.longitude))
+        case .none:
+            return
+        }
+        cancelGo()
+        closeStations()
+        picking = nil
+        search = ""
+        from = .here
+        to = place
+        routeOnly = RouteFilter(widget: widget, to: place)
+        showsWhenPlanned = true
+        frameEnds()
+        location.find()
+        // The trips just planned for the same ends, shown now: nothing's planned again to show them
+        if planKey == plannedKey, state == .ready { showPlanned() }
+        withAnimation(Self.endsAnimation) { collapsed = true }
+    }
+
+    /// The trips planned shown, as Plan Trip shows them; a route's first trip picked.
+    private func showPlanned() {
+        showsWhenPlanned = false
+        shownKey = planKey
+        pickRouteTrip()
+    }
+
+    /// Opened from a route, its first trip picked, unless one was tapped.
+    private func pickRouteTrip() {
+        guard !pickedByTap, let first = routeIndices?.first else { return }
+        picked = first
+    }
+
+    /// The route's header over its trips, opened from one (`routeOnly`): whose they are, or that
+    /// none take it now; and Show All Trips under them.
+    @ViewBuilder private var routeHeader: some View {
+        if let routeOnly, routeOnly.to == to {
+            VStack(spacing: 0) {
+                HStack(spacing: 6) {
+                    Image(systemName: "bookmark.fill")
+                        .foregroundStyle(.tint)
+                        .accessibilityHidden(true)
+                    if routeIndices == nil {
+                        Text("No trip takes \(routeOnly.widget.title) now")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("Your route")
+                            .foregroundStyle(.secondary)
+                        Text(routeOnly.widget.title)
+                            .fontWeight(.semibold)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .font(.footnote)
+                .lineLimit(1)
+                .padding(.horizontal, Self.margin)
+                .padding(.vertical, 9)
+                .accessibilityElement(children: .combine)
+                Divider()
+            }
+            .modifier(Unroll(shown: !stationsOpen))
+        }
+    }
+
+    /// A trip's row in the list, known by the trip rather than its place.
+    private struct ShownTrip: Hashable {
+        let index: Int
+        let option: ServerRoutes.Choice
+    }
+
+    /// Trips planned after the others show, rather than holding them up: bike trips, which ask
+    /// Apple Maps for each ride, and, where the phone hasn't the bus timetable, the server's bus trips.
+    enum Late: Hashable {
+        case bikes, buses
+
+        var finding: String { self == .bikes ? "Finding bike trips…" : "Finding bus trips…" }
+    }
+
+    /// A late trips' place in the list till they're in, with a spinner.
+    private func lateRow(_ late: Late) -> some View {
+        HStack(spacing: 12) {
+            ProgressView()
+                .frame(width: 52)
+            Text(late.finding)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+        }
+        .font(.subheadline)
+        .padding(.horizontal, Self.margin)
+        .padding(.vertical, 11)
+        .frame(minHeight: 44)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(late.finding)
+    }
+
+    @ViewBuilder private var showAllTripsRow: some View {
+        if routeIndices != nil {
+            VStack(spacing: 0) {
+                Divider()
+                Button {
+                    withAnimation(.smooth(duration: 0.3)) { routeOnly = nil }
+                } label: {
+                    Label("Show All Trips", systemImage: "list.bullet")
+                        .font(.subheadline.weight(.medium))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, Self.margin)
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.tint)
+            }
+            .modifier(Unroll(shown: !stationsOpen))
+        }
+    }
 
     /// The picked trip, if it's a train trip: Go walks those.
     private var pickedTrip: TripPlanner.Trip? {
@@ -403,7 +602,7 @@ struct NewTripView: View {
         return walk
     }
 
-    /// The picked trip, if it's with a Citi Bike: Go opens its ride in Apple Maps.
+    /// The picked trip, if it's with a bike: Go follows its walks and rides turn by turn.
     private var pickedBike: BikeTrip? {
         guard state == .ready, options.indices.contains(picked), case .bike(let trip) = options[picked] else { return nil }
         return trip
@@ -436,10 +635,9 @@ struct NewTripView: View {
         })
     }
 
-    /// Longest walk all the way offered beside the trains, unless it's as quick as they are.
-    private static let walkOffered = 30
     /// Metres you may have moved from where a walk all the way was planned from before Go asks
-    /// Apple Maps for it again.
+    /// Apple Maps for it again; and from where trips were planned, before they're planned from
+    /// where you are now.
     private static let walkMoved: CLLocationDistance = 40
 
     /// The trips card's most height, the From/To strip included, as Nearby's card.
@@ -455,29 +653,20 @@ struct NewTripView: View {
 
     var body: some View {
         NavigationStack {
-            Group {
+            // One map all along, under the search page while picking: made anew for each page,
+            // a new map began at MapKit's own view, held to the city's bounds at their far
+            // corner, and jumped there (bottom left, Perth Amboy) as a destination was picked
+            ZStack {
+                tripPage
                 if picking != nil {
                     pickingPage
-                } else if hasEnds {
-                    tripPage
-                } else {
-                    startMap
-                    // Its logo and Legal over From and To, clear of the screen's rounded corner;
-                    // on its side, past the cards down the left
-                    .safeAreaPadding(.bottom, attributionRoom)
-                    .safeAreaPadding(.leading, mapLeading)
-                    .ignoresSafeArea(.container, edges: [.top, .bottom])
-                    // Its size kept as the keyboard goes (`tripPage`)
-                    .ignoresSafeArea(.keyboard)
+                        .background(Color(.systemGroupedBackground))
                 }
             }
             .overlay(alignment: sideways ? .bottomLeading : .bottom) {
                 if endsOpen {
                     VStack(spacing: 10) {
-                        if !hasMode {
-                            noModeCallout
-                                .transition(.move(edge: .bottom).combined(with: .opacity))
-                        } else if impreciseHere {
+                        if impreciseHere {
                             impreciseCallout
                                 .transition(.move(edge: .bottom).combined(with: .opacity))
                         }
@@ -495,7 +684,6 @@ struct NewTripView: View {
                     .frame(width: sideways ? Sideways.width : nil)
                     .padding(.leading, sideways ? Sideways.inset : 0)
                     .padding(.bottom, 8)
-                    .animation(.smooth(duration: 0.3), value: hasMode)
                     .animation(.smooth(duration: 0.3), value: impreciseHere)
                 }
             }
@@ -514,8 +702,18 @@ struct NewTripView: View {
             .toolbar(.hidden, for: .navigationBar)
             .toolbar(endsOpen ? .visible : .hidden, for: .tabBar)
         }
+        // Save as Route: the trip planned as a route, every way across the week
+        .fullScreenCover(item: $savingRoute) { widget in
+            NewRouteView(starting: widget, fromNear: Self.near(from, widget.start), toNear: Self.near(to, widget.end))
+        }
         .onAppear {
             location.start()
+            // Made again with you already found (the one `tripLocation`): framed on you now, as
+            // no new fix may come to do it
+            if framesNextFix, let here = location.location, to == nil, ends == nil, picking == nil {
+                framesNextFix = false
+                frameStart(on: [here])
+            }
             // Back on the tab, where you are now, for trips from or to it
             if hasEnds, from?.isHere == true || to?.isHere == true { location.find() }
         }
@@ -539,13 +737,24 @@ struct NewTripView: View {
         }
         // Ended with End or Done: a clean New Trip from where you are, nothing in To
         .onChange(of: ActiveWalk.shared.endings) { startOver() }
-        // Planned once both ends are picked, the fastest drawn on the map behind From and To, and
-        // again as what it waits on changes, such as the ways you'll go
+        // A Saved Route's button on a widget: planned from where you are to where it goes. Also
+        // when the tap launched the app, so it was set before this appeared; not under a walk
+        .onChange(of: StationOpening.shared.route, initial: true) { _, route in
+            guard let route, ActiveWalk.shared.session == nil else { return }
+            StationOpening.shared.route = nil
+            planRoute(route)
+        }
+        // Planned once both ends are picked, and again as what it waits on changes, such as the
+        // ways you'll go; kept off the map until Plan Trip's tapped (`shownKey`)
         .task(id: hasEnds ? planKey : nil) { await plan() }
+        // The network trips are planned on, built while From and To are picked, so the first
+        // plan doesn't wait for it
+        .task(id: settings.settings.includesBuses) { await LocalRoutes.prepare(buses: settings.settings.includesBuses) }
         // No Trip Found fades after a moment, back to From and To to change the trip
-        .task(id: fading) {
-            guard fading else { return }
-            try? await Task.sleep(for: Self.fadeAfter)
+        // and timed afresh for each message, not cut short by the last one's
+        .task(id: fadingMessage) {
+            guard let message = fadingMessage else { return }
+            try? await Task.sleep(for: Self.fadeAfter(message))
             guard !Task.isCancelled, fading else { return }
             withAnimation(Self.endsAnimation) { collapsed = false }
         }
@@ -572,8 +781,9 @@ struct NewTripView: View {
     }
 
     /// Picking an end: its search field at the top, everything under it the places to pick.
-    /// Home and Work under the field until you type (Current Location too, for From), then the
-    /// stations as chips in their place and the contacts and places below.
+    /// Home and Work under the field until you type (Current Location too, for From), with your
+    /// next event (for To) and recent addresses under them; then the stations as chips in their
+    /// place and the contacts and places below.
     private var pickingPage: some View {
         VStack(spacing: 0) {
             searchBar
@@ -586,20 +796,12 @@ struct NewTripView: View {
                     savedChips(here: picking == .from)
                         .padding(.vertical, 6)
                 }
-                // Not on its side, where with the keyboard up there's no room for it
-                VStack(spacing: 6) {
-                    if !sideways {
-                        Image(systemName: "magnifyingglass").font(.title2)
-                        Text("Search for a station, address, place or person")
-                            .font(.subheadline)
-                            .multilineTextAlignment(.center)
-                    }
-                }
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, Self.margin)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // Today's events for To, and the addresses picked lately; or what to search
+                // for, but not on its side, where with the keyboard up there's no room for it
+                TripSuggestions(showsCalendar: picking == .to && setting == nil, showsHint: !sideways,
+                                pick: pick)
             } else {
-                TripPlaceList(search: search, submits: submits, pick: pick)
+                TripPlaceList(search: search, submits: submits, keepsRecents: setting == nil, pick: pick)
             }
         }
         // Over the keyboard while it's up
@@ -616,6 +818,7 @@ struct NewTripView: View {
                       text: $search, selection: $searchSelection)
                 .textInputAutocapitalization(.words)
                 .autocorrectionDisabled()
+                .accessibilityLabel(picking == .from ? "From" : "To")
                 .submitLabel(.search)
                 .focused($searchFocused)
                 .onSubmit { submits += 1 }
@@ -676,14 +879,15 @@ struct NewTripView: View {
         searchSelection = TextSelection(insertionPoint: search.index(search.startIndex, offsetBy: offset))
     }
 
-    /// Once From and To are picked: the map the whole screen, and over its bottom the trips with
-    /// From and To shrunk to a line over them, and New Trip and Go in the tab bar's place. Opened
-    /// again, From and To take the trips' place, the tab bar back under them.
+    /// The map the whole screen, From and To over its bottom. Once both are picked, over its
+    /// bottom the trips with From and To shrunk to a line over them, and New Trip and Go in the
+    /// tab bar's place. Opened again, From and To take the trips' place, the tab bar back under them.
     private var tripPage: some View {
         mapArea
             // The trips framed clear of the status bar, and of the cards and the bar under them;
-            // reframed as From and To open and close. Its logo and Legal over the cards.
-            .safeAreaPadding(.top, sideways ? Sideways.top : Self.statusBarRoom)
+            // reframed as From and To open and close. Its logo and Legal over the cards, clear of
+            // the screen's rounded corner; on its side, past the cards down the left.
+            .safeAreaPadding(.top, hasEnds ? (sideways ? Sideways.top : Self.statusBarRoom) : 0)
             .safeAreaPadding(.bottom, attributionRoom)
             .safeAreaPadding(.leading, mapLeading)
             .ignoresSafeArea(.container, edges: [.top, .bottom])
@@ -692,7 +896,7 @@ struct NewTripView: View {
             // and growing back as it went, MapKit's drawing failed Metal's checks
             .ignoresSafeArea(.keyboard)
             .overlay(alignment: sideways ? .bottomLeading : .bottom) {
-                if collapsed {
+                if hasEnds && collapsed {
                     VStack(spacing: 10) {
                         list
                         goBar
@@ -725,9 +929,74 @@ struct NewTripView: View {
             .buttonStyle(.plain)
             .glassEffect(.regular.interactive(), in: Circle())
             .accessibilityHint("Clears this trip to plan another")
+            // Lit like Go once there's a trip to save
+            let canSave = routeFromTrip != nil
+            Button {
+                cancelGo()
+                savingRoute = routeFromTrip
+            } label: {
+                Label("Save as Route", systemImage: "bookmark")
+                    .labelStyle(.iconOnly)
+                    .font(.title3)
+                    .frame(width: Self.barHeight, height: Self.barHeight)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(canSave ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
+            .glassEffect(canSave ? .regular.tint(.accentColor).interactive() : .regular.interactive(), in: Circle())
+            .disabled(!canSave)
+            .accessibilityHint("Plans this trip as a route for your widgets, every way across the week")
             goButton
         }
         .padding(.horizontal, sideways ? 0 : Self.barMargin)
+    }
+
+    /// The picked trip as a new route (`NewRouteView`): from its train's station or its bus's
+    /// stop to where it gets off; walking or biking, or with no stop found, the stations nearest
+    /// where it was planned from and to.
+    private var routeFromTrip: SavedWidget? {
+        guard let ends, state == .ready else { return nil }
+        var start = RouteStart.none
+        var end = RouteStart.none
+        if let trip = pickedTrip {
+            start = trip.selection.station.map(RouteStart.station) ?? .none
+            end = .station(trip.destination)
+        } else if options.indices.contains(picked), case .bus(let bus) = options[picked] {
+            if bus.busFirst {
+                start = Self.stop(near: bus.bus.from.location, line: bus.bus.line)
+            } else {
+                start = bus.train?.selection.station.map(RouteStart.station) ?? .none
+            }
+            if bus.busFirst, let station = bus.train?.endStation {
+                end = .station(station)
+            } else {
+                let last = bus.onward ?? bus.bus
+                end = Self.stop(near: last.to.location, line: last.line)
+            }
+        }
+        if start.id == nil { start = Nearby.nearest(to: ends.start).map { .station($0.station) } ?? .none }
+        if end.id == nil { end = Nearby.nearest(to: ends.end).map { .station($0.station) } ?? .none }
+        guard start.id != nil, end.id != nil, start.place != end.place else { return nil }
+        var widget = SavedWidget(selection: settings.defaultTrain)
+        widget.startAt(start)
+        widget.goTo(end)
+        return widget
+    }
+
+    /// What `place` is called, if the route's `end` for it is a station or stop of another name.
+    private static func near(_ place: TripPlace?, _ end: RouteStart) -> String? {
+        guard let place, let name = end.name, place.name != name else { return nil }
+        return place.name
+    }
+
+    /// The stop nearest `location` that `line` stops at, within a short walk.
+    private static func stop(near location: CLLocation, line: String) -> RouteStart {
+        let key = BusRoutes.key(line)
+        let nearest = BusRoutes.allStops
+            .filter { abs($0.latitude - location.coordinate.latitude) < 0.003 && abs($0.longitude - location.coordinate.longitude) < 0.004 }
+            .filter { stop in (BusRoutes.linesAtStop[stop.code] ?? []).contains { BusRoutes.key($0.line) == key } }
+            .min { $0.location.distance(from: location) < $1.location.distance(from: location) }
+        return nearest.map(RouteStart.stop) ?? .none
     }
 
     /// The bar's height, as the tab bar's when it shrinks while scrolling: just its tab, in a circle.
@@ -758,16 +1027,16 @@ struct NewTripView: View {
     /// show over the cards and the map frames what's left.
     private var attributionRoom: CGFloat { bottomRoom + (sideways ? 0 : bottomCardsHeight) + 12 }
 
+    /// Whether the trips' map shows, over the start map.
+    private var showsTrips: Bool { hasEnds && state == .ready && shownKey == planKey }
+
     /// The trips on the map, or how planning's going.
     @ViewBuilder private var mapArea: some View {
         ZStack {
-            if state == .ready {
-                TripMap(options: options, picked: picked, start: ends?.start.coordinate,
-                        end: ends?.end.coordinate, endName: to?.name ?? "")
-            } else {
+            tripMap
+            if !showsTrips {
                 // The map stays with both ends on it, how planning's going on a card over it
-                startMap
-                if collapsed {
+                if hasEnds && collapsed {
                     Group {
                         switch state {
                         case .failed(let title, let message, let fix):
@@ -810,28 +1079,24 @@ struct NewTripView: View {
         })
     }
 
-    /// The map before there are trips: you, both ends, and the lines round From (`NearbyLines`).
-    private var startMap: some View {
-        Map(position: $startPosition, bounds: Self.cityBounds) {
-            NearbyLinesLayer(lines: lines, version: linesVersion, mapPointsPerPoint: mapPointsPerPoint, cache: linesCache)
-            UserAnnotation()
-            endPins
-        }
-        // Muted, as the trip's map: the standard map's yellow main roads read as N/Q/R/W lines
-        .mapStyle(.standard(emphasis: .muted, pointsOfInterest: .excludingAll))
-        .measuresRoom($startRoom)
-        .turnsNorth($startPosition)
-        // The lines' zoom followed as it moves, a step at a time (`LineScale`)
-        .onMapCameraChange(frequency: .continuous) { context in
-            guard mapHeight > 0 else { return }
-            let scale = LineScale.step(MapNorth.mapPointsPerPoint(context, height: mapHeight), from: mapPointsPerPoint)
-            if scale != mapPointsPerPoint { mapPointsPerPoint = scale }
-        }
-        .onMapCameraChange(frequency: .onEnd) { context in
-            startCamera = context.camera
-        }
-        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { mapHeight = $0 }
-        .onChange(of: linesKey, initial: true) { findLines() }
+    /// The one map, before there are trips and with them: before, you, both ends and Nearby's
+    /// lines (`NearbyLines`); once planned, the picked trip (`TripMap`).
+    private var tripMap: some View {
+        TripMap(options: showsTrips ? options : [], picked: picked,
+                start: showsTrips ? ends?.start.coordinate : from?.location?.coordinate,
+                end: showsTrips ? ends?.end.coordinate : (to?.location ?? (to?.isHere == true ? location.location : nil))?.coordinate,
+                endName: to?.name ?? "", position: $startPosition, keptHeading: $startHeading,
+                before: TripMap.Before(lines: lines, version: linesVersion, cache: linesCache, bounds: Self.cityBounds,
+                                       // Before both ends, nothing pads the map's top: clear of the status bar
+                                       compassTop: hasEnds ? 0 : (sideways ? Sideways.top : Self.statusBarRoom),
+                                       you: location.location?.coordinate),
+                rested: { startCamera = $0 },
+                // The picked train trip's walks Go will take, drawn too rather than asked for twice
+                aheadWalks: walksAhead.flatMap { $0.trip == pickedTrip ? $0.task : nil },
+                asksWalks: showsTrips && pickedTrip != nil)
+            .measuresRoom($startRoom)
+            // Each new key's lines dropped for the next's, if it comes before they're laid out
+            .task(id: linesKey) { await findLines() }
     }
 
     /// Where the lines are drawn round: From, or you.
@@ -842,45 +1107,26 @@ struct NewTripView: View {
     private var linesKey: [Double] {
         guard let center = linesCenter?.coordinate else { return [] }
         return [(center.latitude * 1000).rounded(), (center.longitude * 1000).rounded(),
-                subway ? 1 : 0, settings.settings.includesBuses ? 1 : 0]
+                settings.settings.includesBuses ? 1 : 0]
     }
 
-    /// The lines of the stations nearest From, each its own colour, and of the buses stopping a
-    /// few minutes' walk from it, pale; just those of the ways you'll go.
-    private func findLines() {
+    /// The lines of the bus stops nearest From, pale, if buses are a way you'll go; not the
+    /// subway, which Nearby draws whole but here only crowded the map before a trip. Off the main
+    /// thread; not shown if the key's moved on meanwhile.
+    private func findLines() async {
         guard let center = linesCenter else {
             lines = .none
             linesVersion += 1
             return
         }
-        let stations = subway ? Nearby.stations(near: center, limit: 3) : []
-        let buses = settings.settings.includesBuses
-            ? Array(NearbyLines.busLines(near: center.coordinate, within: Self.busLinesReach).prefix(Self.busLinesShown)) : []
-        lines = NearbyLines(routes: stations.flatMap(\.station.routes), busLines: buses,
-                            around: stations.map { $0.station.coordinate }
-                                + [center.coordinate])
+        let includesBuses = settings.settings.includesBuses
+        let found = await Task.detached(priority: .userInitiated) {
+            let buses = includesBuses ? Array(NearbyLines.nearestStopsLines(near: center)) : []
+            return NearbyLines(routes: [], busLines: buses, around: [center.coordinate])
+        }.value
+        guard !Task.isCancelled else { return }
+        lines = found
         linesVersion += 1
-    }
-
-    /// Meters from From a bus line must stop to be drawn, and how many are, nearest first.
-    private static let busLinesReach: Double = 400
-    private static let busLinesShown = 6
-
-    /// From and To on the map before there are trips, as `TripMap` marks them: To's pin as soon as
-    /// it's picked, From's dot unless it's where you are, which the map shows already.
-    @MapContentBuilder private var endPins: some MapContent {
-        if let start = from?.location {
-            Annotation("", coordinate: start.coordinate) {
-                Circle().fill(.blue).frame(width: 14, height: 14)
-                    .overlay(Circle().stroke(.white, lineWidth: 3))
-                    .shadow(radius: 2)
-            }
-        }
-        if let end = to?.location ?? (to?.isHere == true ? location.location : nil) {
-            Marker(to?.name ?? "", systemImage: "mappin", coordinate: end.coordinate)
-                .tint(.red)
-                .annotationTitles(.hidden)
-        }
     }
 
     /// Clears the trip and its map: From back to where you are, no To, the map around you again.
@@ -897,7 +1143,11 @@ struct NewTripView: View {
             minutes = []
             changeStations = [:]
             picked = 0
+            pickedByTap = false
             plannedKey = nil
+            shownKey = nil
+            routeOnly = nil
+            showsWhenPlanned = false
             ends = nil
             // Somewhere to begin for its new map, not following you (`holdStart`): where you
             // are if just found, else the city until you're found again (`framesNextFix`); the
@@ -912,6 +1162,7 @@ struct NewTripView: View {
     private func openEnds() {
         cancelGo()
         closeStations()
+        showsWhenPlanned = false
         withAnimation(Self.endsAnimation) { collapsed = false }
     }
 
@@ -968,7 +1219,11 @@ struct NewTripView: View {
         .foregroundStyle(canGo ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
         .disabled(!canGo || startingWalk)
         .glassEffect(canGo ? .regular.tint(.accentColor).interactive() : .regular.interactive(), in: Capsule())
+        // Said as Go even while it's only a spinner
+        .accessibilityLabel("Go")
+        .accessibilityValue(startingWalk ? "Loading directions" : "")
         .accessibilityHint(pickedWalk != nil ? "Walks you to \(to?.name ?? "the end") turn by turn"
+                           : pickedBike != nil ? "Takes you to \(to?.name ?? "the end") turn by turn, riding and walking"
                            : "Walks you to the train turn by turn, and from it to \(to?.name ?? "the end")")
     }
 
@@ -1023,10 +1278,33 @@ struct NewTripView: View {
             }
             return
         }
-        // With a bike: its train on the widget, and its ride, dock to dock, in Apple Maps
+        // With a bike: its train on the widget, and the walks and rides turn by turn, the ride
+        // joined into the walk before its train or after, or all the way
         if let bike = pickedBike {
-            showing.show()
-            if let url = Self.cyclingURL(from: bike.pickup, to: bike.dropoff) { openURL(url) }
+            if bike.train != nil { showing.show() }
+            startingWalk = true
+            goTask = Task {
+                defer { if !Task.isCancelled { startingWalk = false } }
+                let found: WalkingDirections.BikeWalks?
+                do {
+                    found = try await WalkingDirections.walks(for: bike, from: start, to: ends.end)
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    walkNoEntrance = false
+                    walkFailed = true
+                    return
+                }
+                guard !Task.isCancelled else { return }
+                switch found {
+                case .allTheWay(let walk):
+                    ActiveWalk.shared.begin(WalkSession(walk: walk, endName: endName, end: ends.end))
+                case .withTrain(let trip, let walks):
+                    ActiveWalk.shared.begin(WalkSession(trip: trip, walks: walks, endName: endName, end: ends.end))
+                case nil:
+                    walkNoEntrance = true
+                    walkFailed = true
+                }
+            }
             return
         }
         guard let trip = pickedTrip else { return }
@@ -1068,17 +1346,6 @@ struct NewTripView: View {
         startingWalk = false
     }
 
-    /// Apple Maps' cycling directions from one dock to another.
-    private static func cyclingURL(from pickup: CitiBike.Dock, to dropoff: CitiBike.Dock) -> URL? {
-        guard var components = URLComponents(string: "https://maps.apple.com/directions") else { return nil }
-        components.queryItems = [
-            URLQueryItem(name: "source", value: String(format: "%.6f,%.6f", pickup.lat, pickup.lon)),
-            URLQueryItem(name: "destination", value: String(format: "%.6f,%.6f", dropoff.lat, dropoff.lon)),
-            URLQueryItem(name: "mode", value: "cycling"),
-        ]
-        return components.url
-    }
-
     /// The trips once planned, best first, the picked one tinted, From and To over them: a card
     /// over the map above New Trip and Go, as tall as the trips up to `tripsHeight`, scrolling
     /// within it. A scroll view rather than a List, whose rows scroll out past the card's rounded
@@ -1105,7 +1372,7 @@ struct NewTripView: View {
                 if state == .ready {
                     // With the picked trip's stations open, all but it roll up, and its stations
                     // unroll under it (`Unroll`); everything stays laid out so both move smoothly
-                    if let note = walkInstead ?? longerWalk.map({
+                    if let note = longerWalk.map({
                         "No trip within \(Self.yourWalk(walkChoice.minutes)). These walk up to \(Self.longestWalkLabel($0))."
                     }) {
                         VStack(spacing: 0) {
@@ -1118,9 +1385,14 @@ struct NewTripView: View {
                             Divider()
                         }
                         .modifier(Unroll(shown: !stationsOpen))
+                        .onAppear { AccessibilityNotification.Announcement(note).post() }
                     }
-                    ForEach(options.indices, id: \.self) { index in
-                        if index > 0 {
+                    routeHeader
+                    let shown = shownIndices
+                    // By trip, not place, so a trip coming in late slides the others into order
+                    ForEach(shown.map { ShownTrip(index: $0, option: options[$0]) }, id: \.option) { row in
+                        let index = row.index
+                        if index != shown.first {
                             // Under the text, past the bullets
                             Divider().padding(.leading, Self.margin + 64)
                                 .modifier(Unroll(shown: !stationsOpen))
@@ -1130,6 +1402,7 @@ struct NewTripView: View {
                                 withAnimation(Self.stationsAnimation) { stationsOpen.toggle() }
                             } else {
                                 picked = index
+                                pickedByTap = true
                             }
                         } label: {
                             Group {
@@ -1146,7 +1419,7 @@ struct NewTripView: View {
                                 case .walk(let walk):
                                     WalkTripRow(walk: walk, endName: to?.name ?? "",
                                                 minutes: minutes.indices.contains(index) ? minutes[index] : nil,
-                                                picked: index == picked)
+                                                picked: index == picked, longer: walkIsLong(walk))
                                 case .bike(let trip):
                                     BikeTripRow(trip: trip, picked: index == picked,
                                                 docksOpen: trip.dockChoices.isEmpty ? nil : index == picked && stationsOpen)
@@ -1158,8 +1431,20 @@ struct NewTripView: View {
                                 .background(index == picked ? Self.pickedBackground : .clear)
                         }
                         .buttonStyle(.plain)
+                        .accessibilityAddTraits(index == picked ? .isSelected : [])
+                        .accessibilityHint(index == picked && changeStations[index] != nil
+                                           ? stationsOpen ? "Hides change stations" : "Shows change stations" : "")
                         .modifier(Unroll(shown: !stationsOpen || index == picked))
                     }
+                    ForEach(lateRows, id: \.self) { late in
+                        if !shown.isEmpty || late != lateRows.first {
+                            Divider().padding(.leading, Self.margin + 64)
+                                .modifier(Unroll(shown: !stationsOpen))
+                        }
+                        lateRow(late)
+                            .modifier(Unroll(shown: !stationsOpen))
+                    }
+                    showAllTripsRow
                     VStack(spacing: 0) {
                         changeStationList
                         dockChoiceList
@@ -1236,6 +1521,7 @@ struct NewTripView: View {
                     .padding(.horizontal, Self.margin)
                     .padding(.top, 10)
                     .padding(.bottom, 4)
+                    .accessibilityAddTraits(.isHeader)
                 ForEach(choices.indices, id: \.self) { index in
                     if index > 0 {
                         Divider().padding(.leading, Self.margin)
@@ -1369,10 +1655,10 @@ struct NewTripView: View {
         .buttonStyle(.plain)
     }
 
-    /// How you'll go, one row: Subway, Bus, Citi Bike and Walk each a toggle, and Plan Trip as a
-    /// round arrow at the end. Citi Bike rides the bikes Settings picks (`BikeKinds`); Walk
-    /// offers walking all the way where it's worth it, and how far you'll walk to and from a
-    /// ride is in Settings too. A long press on a toggle picks only that way.
+    /// How you'll go, one row: Subway, Bus and Citi Bike each a toggle, and Plan Trip as a round
+    /// arrow at the end. Citi Bike rides the bikes Settings picks (`BikeKinds`), and how far
+    /// you'll walk to and from a ride is in Settings too. Walking all the way is always offered;
+    /// with every toggle off, it's the only trip. A long press on a toggle picks only that way.
     private var modesRow: some View {
         HStack(spacing: 8) {
             modeToggle("Subway", "tram.fill", on: $subway, hint: "Offers trips by subway")
@@ -1383,7 +1669,6 @@ struct NewTripView: View {
                            hint: ownBike == .none ? "Offers trips with a Citi Bike" : "Offers trips on your own bike",
                            eBike: ownBike == .none ? bikeKinds == .eBike : ownBike == .eBike)
             }
-            modeToggle("Walk", "figure.walk", on: $walkAll, hint: "Offers walking all the way")
             Spacer(minLength: 0)
             planTripButton
         }
@@ -1398,7 +1683,6 @@ struct NewTripView: View {
         subway = false
         settings.settings.includesBuses = false
         bikeOn = false
-        walkAll = false
         on.wrappedValue = true
         onlyPicked += 1
     }
@@ -1434,18 +1718,20 @@ struct NewTripView: View {
             pickOnly(on)
         })
         .accessibilityAddTraits(on.wrappedValue ? .isSelected : [])
+        .accessibilityValue(eBike ? "E-bikes only" : "")
         .accessibilityHint(hint)
         .accessibilityAction(named: "Only \(name)") { pickOnly(on) }
     }
 
     /// Shrinks From and To to a line atop the trips, planned for them the ways picked as soon as
-    /// both were. Greyed until both are, and while every way to go is off.
+    /// both were. Greyed until both are.
     private var planTripButton: some View {
-        let canPlan = hasEnds && hasMode
+        let canPlan = hasEnds
         return Button {
             closeStations()
             // After No Trip Found, planned again: back online, or the timetable caught up
             if case .failed = state { retry() }
+            shownKey = planKey
             withAnimation(Self.endsAnimation) { collapsed = true }
         } label: {
             Label("Plan Trip", systemImage: "arrow.right")
@@ -1458,17 +1744,6 @@ struct NewTripView: View {
         }
         .buttonStyle(.plain)
         .disabled(!canPlan)
-    }
-
-    /// Over From and To while every way to go is off, gone as soon as one's back on.
-    private var noModeCallout: some View {
-        Label("Select a mode of transportation to continue", systemImage: "hand.tap.fill")
-            .font(.subheadline.weight(.semibold))
-            .multilineTextAlignment(.center)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-            .glassEffect(.regular, in: Capsule())
-            .padding(.horizontal, Self.margin)
     }
 
     /// An end is where you are, but Leeway may only know it to a few miles.
@@ -1484,6 +1759,7 @@ struct NewTripView: View {
             .padding(.vertical, 12)
             .glassEffect(.regular, in: Capsule())
             .padding(.horizontal, Self.margin)
+            .onAppear { AccessibilityNotification.Announcement("Precise Location is off").post() }
     }
 
     /// Sets the end being picked, then moves From and To back down, or to a line atop the trips once both
@@ -1661,6 +1937,9 @@ struct NewTripView: View {
             if let start = from?.location { frameStart(on: [start]) } else { holdStart() }
             return
         }
+        // The same ends picked again, their trips already drawn: left framed on the trips, as
+        // nothing's planned again to frame them
+        guard planKey != plannedKey || state != .ready else { return }
         frameStart(on: [from?.location ?? location.location, to?.location ?? location.location].compactMap { $0 })
     }
 
@@ -1698,7 +1977,7 @@ struct NewTripView: View {
     /// Shrinks From and To, open over the map, back to a line atop the trips.
     /// Only once the trips for them are planned.
     private func collapse() {
-        guard hasEnds, !collapsed, picking == nil, planKey == plannedKey, state == .ready else { return }
+        guard hasEnds, !collapsed, picking == nil, planKey == plannedKey, planKey == shownKey, state == .ready else { return }
         withAnimation(Self.endsAnimation) { collapsed = true }
     }
 
@@ -1739,17 +2018,23 @@ struct NewTripView: View {
     private func plan() async {
         // Once both ends are picked; back on the tab, the trips planned stay, with the one picked
         guard hasEnds, planKey != plannedKey || state != .ready else { return }
+        // Where the last trips were planned from and to, for a new fix a few metres off to keep
+        let lastEnds = ends
+        walkAllTask?.cancel()
+        walkAllTask = nil
+        lateTasks.forEach { $0.cancel() }
+        lateTasks = []
+        lateRows = []
         options = []
         minutes = []
         trips = []
         changeStations = [:]
         stationsOpen = false
         picked = 0
+        pickedByTap = false
         ends = nil
         longerWalk = nil
-        walkInstead = nil
-        // Every way to go off: nothing to plan, Plan Trip greyed and a word over From and To
-        guard let from, let to, hasMode else {
+        guard let from, let to else {
             state = .waiting
             return
         }
@@ -1766,12 +2051,16 @@ struct NewTripView: View {
                 return
             }
         }
-        guard let start = from.location ?? location.location, let end = to.location ?? location.location else {
+        guard let found = from.location ?? location.location, let toward = to.location ?? location.location else {
             // Waits for your location; this runs again once it's found
             state = .planning
             frameStart(on: [from.location, to.location].compactMap { $0 })
             return
         }
+        // Where you are, a new fix within `walkMoved` of where it was last planned from: that, as
+        // Go keeps it, so the walks asked for again are those already found, not routed afresh
+        let start = from.isHere ? lastEnds.flatMap { $0.start.distance(from: found) <= Self.walkMoved ? $0.start : nil } ?? found : found
+        let end = to.isHere ? lastEnds.flatMap { $0.end.distance(from: toward) <= Self.walkMoved ? $0.end : nil } ?? toward : toward
         frameStart(on: [start, end])
         // From and To a few steps apart: no trip, rather than a 0 m walk of a minute
         guard start.distance(from: end) >= Self.samePlace else {
@@ -1779,6 +2068,7 @@ struct NewTripView: View {
             return
         }
         state = .planning
+        let clock = PlanClock()
         // The timetable read in now, off the main thread, while the server plans: the first
         // time, it's a big file to unpack, which held the trips up as they came in
         Task.detached(priority: .userInitiated) { _ = TimetableStore.load() }
@@ -1788,44 +2078,68 @@ struct NewTripView: View {
         // Walking all the way, asked of Apple Maps while the trains are planned, and Citi Bike's trips
         let noLimit = walkChoice.minutes == Self.noLimitMinutes
         // Not waited on where it can't be offered (below): a walk across town takes seconds to route
-        let walking = Task { await Self.walkAll(walkAll, noLimit: noLimit, from: start, to: end) }
-        defer { walking.cancel() }
-        async let biking = Self.bikeTrips(bike, own: biking ? ownBike.kind : nil, carry: bikeCarry, endName: to.name,
-                                          from: start, to: end, subway: subway, walkRange: walkRange)
-        // Google's routes, asked for once: each walk tried below picks from the same ones. Nil
-        // if the server couldn't be reached, and whether it refused as over its daily limit
-        let fetched: (routes: [ServerRoutes.Route]?, overLimit: Bool) = buses || subway
-            ? await ServerRoutes.fetchRoutes(from: start, to: end, buses: buses, subway: subway) : ([], false)
+        let walking = Task { await Self.walkAll(noLimit: noLimit, from: start, to: end) }
+        // Unless it's handed on to be added once the trips show (`walkAllTask`)
+        var walkingHandedOn = false
+        defer { if !walkingHandedOn { walking.cancel() } }
+        // Citi Bike's or your own bike's trips, waited on only till `bikesWait` after planning
+        // starts: Apple Maps times each ride, which can take seconds; later, added once they're in
+        let bikeKinds = bike, ownKind = biking ? ownBike.kind : nil, carry = bikeCarry, endName = to.name
+        let bikesTask = Task {
+            await Self.bikeTrips(bikeKinds, own: ownKind, carry: carry, endName: endName,
+                                 from: start, to: end, subway: subway, walkRange: walkRange)
+        }
+        var bikesHandedOn = false
+        defer { if !bikesHandedOn { bikesTask.cancel() } }
+        let bikesBy = ContinuousClock.now + Self.bikesWait
+        // The planned routes, asked for once: each walk tried below picks from the same ones. Nil
+        // if they couldn't be planned on the phone and the server couldn't be reached, and whether
+        // it refused as over its daily limit. Without the bus timetable on the phone (Low Data
+        // Mode, or not yet downloaded), its subway trips first, and the server's bus trips added
+        // once they're in, rather than waited on
+        var fetched: (routes: [ServerRoutes.Route]?, overLimit: Bool) = ([], false)
+        var ridesBuses = buses
+        if buses || subway, let local = await LocalRoutes.routes(from: start, to: end, buses: buses, subway: subway) {
+            fetched = (local, false)
+        } else if buses, subway, let local = await LocalRoutes.routes(from: start, to: end, buses: false, subway: true) {
+            fetched = (local, false)
+            ridesBuses = false
+        } else if buses || subway {
+            fetched = await ServerRoutes.fetchRoutes(from: start, to: end, buses: buses, subway: subway)
+        }
+        clock.mark("server")
+        guard !Task.isCancelled else { return }
+        var rides = await Self.rides(fetched.routes, buses: ridesBuses, subway: subway, from: start, to: end,
+                                     walkRange: walkRange)
+        // No subway trip to show first: the server's waited on after all, as there'd be nothing else
+        if buses, !ridesBuses, rides.planned.isEmpty {
+            fetched = await ServerRoutes.fetchRoutes(from: start, to: end, buses: true, subway: true)
+            guard !Task.isCancelled else { return }
+            ridesBuses = true
+            rides = await Self.rides(fetched.routes, buses: true, subway: true, from: start, to: end, walkRange: walkRange)
+        }
         let routes = fetched.routes
+        let busesLate = buses && !ridesBuses
+        clock.mark("rides")
         guard !Task.isCancelled else { return }
-        var rides = await Self.rides(routes, buses: buses, subway: subway, from: start, to: end, walkRange: walkRange)
-        guard !Task.isCancelled else { return }
-        let biked = await biking
-        let bikeTrips = biked.trips
+        // Waited on in full only where there's no ride to show without them
+        let biked = rides.planned.isEmpty ? await bikesTask.value : await Self.value(of: bikesTask, by: bikesBy)
+        let bikesLate = biked == nil
+        clock.mark(bikesLate ? "bikes later" : "bikes")
+        let bikeTrips = biked?.trips ?? []
         // Walking all the way now only if there's nothing else; else once the trips' minutes
         // say whether it could be offered beside them
         var walkedAll: (walk: Walk?, tooLong: Int?, trouble: MapsTrouble?) = (nil, nil, nil)
         let nothingElse = rides.planned.isEmpty && bikeTrips.isEmpty
         if nothingElse { walkedAll = await walking.value }
-        var walk = walkedAll.walk
-        guard !Task.isCancelled else { return }
-        // Walk off, and no ride within your walk to and from it nor any bike trip: walking all
-        // the way, where it's no longer than your walk, rather than a ride with a longer one
-        var walkedInstead = false
-        if !walkAll, rides.planned.isEmpty, bikeTrips.isEmpty,
-           let found = await Self.walkAll(true, noLimit: noLimit, from: start, to: end).walk,
-           noLimit || WalkTripRow.minutes(of: found) <= walkChoice.minutes {
-            guard !Task.isCancelled else { return }
-            walk = found
-            walkedInstead = true
-        }
-        // A walk instead cut short comes back nil, as if there were none: superseded, this plan
-        // mustn't put No Trip Found over the new one's planning
+        let walk = walkedAll.walk
+        // A walk cut short comes back nil, as if there were none: superseded, this plan mustn't
+        // put No Trip Found over the new one's planning
         guard !Task.isCancelled else { return }
         // No ride within your walk to and from it, nor any bike trip, nor a walk instead: the
         // trips of the shortest longer walk offered that has some, rather than none at all
         var walked = walkChoice.minutes
-        if rides.planned.isEmpty, bikeTrips.isEmpty, !walkedInstead, buses || subway {
+        if rides.planned.isEmpty, bikeTrips.isEmpty, buses || subway {
             // In fifteens, as many tries as before the slider's fives
             for choice in Self.walkChoices where choice.meters > walkRange && choice.minutes % 15 == 0 {
                 rides = await Self.rides(routes, buses: buses, subway: subway, from: start, to: end,
@@ -1839,16 +2153,115 @@ struct NewTripView: View {
         guard !planned.isEmpty || walk != nil || !bikeTrips.isEmpty else {
             state = noTripFound(from: start, to: end, buses: buses, subway: subway, none: rides.none, walked: walked,
                                 offline: buses && routes == nil, overLimit: buses && fetched.overLimit,
-                                walkTooLong: walkedAll.tooLong, walkTrouble: walkedAll.trouble, noBike: biked.none)
+                                walkTooLong: walkedAll.tooLong, walkTrouble: walkedAll.trouble, noBike: biked?.none)
             return
         }
-        // Trips with a bus aren't in the timetable: estimated by Google's times for the bus
-        // (`BusTrip.arrival`). Read once for them all, and timed, off the main thread: the first
-        // read unpacks a big file, which hitched New Trip as the trips came in. As
-        // `minutes(of:by:)`, from these ends at this time
+        let at = AppClock.now
+        let rows = await timedRides(planned, from: start, to: end, at: at)
+        clock.mark("timed")
+        // Set only now, after the wait, so a plan superseded meanwhile leaves the new one's be
+        guard !Task.isCancelled else { return }
+        options = rows.options
+        trips = rows.trips
+        plannedAt = at
+        ends = (start, end)
+        minutes = rows.minutes
+        changeStations = rows.changeStations
+        // Walking all the way beside other trips: offered however slow (up to `longestWalk`), but
+        // added once routed rather than waited on (`addWalkAll`)
+        let walkPending = !nothingElse
+        if let walk {
+            let walkMinutes = WalkTripRow.minutes(of: walk)
+            dropTrips(slowerThan: walkMinutes)
+            options.append(.walk(walk))
+            trips.append(nil)
+            minutes.append(walkMinutes)
+        }
+        appendBikes(bikeTrips)
+        sortByEffort()
+        // Said over the trips while a ride's among them that walks past your choice
+        let riding = options.contains { if case .walk = $0 { false } else { true } }
+        longerWalk = walked > walkChoice.minutes && riding ? walked : nil
+        lateRows = (bikesLate ? [Late.bikes] : []) + (busesLate ? [Late.buses] : [])
+        plannedKey = planKey
+        state = .ready
+        // Opened from a Saved Route: shown now, its first trip picked
+        if showsWhenPlanned { showPlanned() } else { pickRouteTrip() }
+        clock.mark("ready")
+        Self.log.info("Planned in \(clock.summary)")
+        let key = planKey
+        if bikesLate {
+            bikesHandedOn = true
+            lateTasks.append(Task {
+                let biked = await withTaskCancellationHandler {
+                    await bikesTask.value
+                } onCancel: {
+                    bikesTask.cancel()
+                }
+                // Not for trips planned since, or From and To cleared
+                guard !Task.isCancelled, plannedKey == key else { return }
+                Self.log.info("Bike trips added after \(clock.summary), \(biked.trips.count) found")
+                withAnimation(.smooth) {
+                    lateRows.removeAll { $0 == .bikes }
+                    guard state == .ready else { return }
+                    keepingPick {
+                        appendBikes(biked.trips)
+                        sortByEffort()
+                    }
+                }
+            })
+        }
+        if busesLate {
+            lateTasks.append(Task {
+                let server = await ServerRoutes.fetchRoutes(from: start, to: end, at: at, buses: true, subway: true)
+                guard !Task.isCancelled, plannedKey == key else { return }
+                // Couldn't be reached: the subway's trips are all there are
+                guard let routes = server.routes else {
+                    Self.log.info("Bus trips not added after \(clock.summary): no server")
+                    lateRows.removeAll { $0 == .buses }
+                    return
+                }
+                let all = await Self.rides(routes, buses: true, subway: true, from: start, to: end, walkRange: walkRange)
+                let rows = await timedRides(all.planned, from: start, to: end, at: at)
+                guard !Task.isCancelled, plannedKey == key else { return }
+                Self.log.info("Bus trips added after \(clock.summary), \(rows.options.count) rides")
+                withAnimation(.smooth) {
+                    lateRows.removeAll { $0 == .buses }
+                    guard state == .ready, !rows.options.isEmpty else { return }
+                    keepingPick { replaceRides(with: rows) }
+                }
+            })
+        }
+        guard walkPending else { return }
+        walkingHandedOn = true
+        walkAllTask = Task {
+            let walked = await withTaskCancellationHandler {
+                await walking.value
+            } onCancel: {
+                walking.cancel()
+            }
+            clock.mark("walk")
+            guard let walk = walked.walk else {
+                Self.log.info("Walk all the way not offered after \(clock.summary): "
+                              + (walked.tooLong.map { "\($0) min" } ?? "none found"))
+                return
+            }
+            // Not for trips planned since, or From and To cleared
+            guard !Task.isCancelled, state == .ready, plannedKey == key else { return }
+            Self.log.info("Walk all the way added after \(clock.summary)")
+            withAnimation(.smooth) { addWalkAll(walk) }
+        }
+    }
+
+    /// The trips by subway and bus as rows: each timed, and where a train trip can change at more
+    /// than one station, those it's worth changing at (`changeStations`). Trips with a bus aren't
+    /// in the timetable: estimated by the bus timetable's times (`BusTrip.arrival`). Read once for
+    /// them all, and timed, off the main thread: the first read unpacks a big file, which hitched
+    /// New Trip as the trips came in. As `minutes(of:by:)`, from these ends at `at`
+    private func timedRides(_ planned: [ServerRoutes.Planned], from start: CLLocation, to end: CLLocation,
+                            at: Date) async -> TimedRides {
         let choices = planned.map(\.choice)
         let rideTrips = planned.map(\.trip)
-        let at = Date.now
         let (timetable, timed) = await Task.detached(priority: .userInitiated) { () -> (Timetable?, [Int?]) in
             let timetable = TimetableStore.load(now: at)
             let timed = choices.indices.map { index -> Int? in
@@ -1862,59 +2275,46 @@ struct NewTripView: View {
             }
             return (timetable, timed)
         }.value
-        // Set only now, after the wait, so a plan superseded meanwhile leaves the new one's be
-        guard !Task.isCancelled else { return }
-        options = choices
-        trips = rideTrips
-        plannedAt = at
-        ends = (start, end)
-        minutes = timed
-
-        for (index, trip) in trips.enumerated() {
+        var rows = TimedRides(options: choices, trips: rideTrips, minutes: timed)
+        for (index, trip) in rows.trips.enumerated() {
             guard let trip, let change = trip.change,
                   Set(change.stops.compactMap { $0.station?.complex }).count > 1 else { continue }
             let all = change.stops.map { ChangeStation(change: $0, on: true) }
                 + TripPlanner.otherChanges(for: trip).map { ChangeStation(change: $0, on: false) }
             let kept = withoutNeedlessWalks(all, for: trip, by: timetable)
             // Stations to pick from only while there's more than one
-            changeStations[index] = Set(kept.compactMap { $0.change.station?.complex }).count > 1 ? kept : nil
-            // Changing only where it's still offered
-            guard kept.filter(\.on).count < all.filter(\.on).count,
+            rows.changeStations[index] = Set(kept.compactMap { $0.change.station?.complex }).count > 1 ? kept : nil
+            // Changing only where it's still offered, to the lines still offered there
+            guard kept.filter(\.on) != all.filter(\.on),
                   let fewer = Change(stops: kept.filter(\.on).map(\.change))?.validated(for: trip.selection),
-                  case .train(var option) = options[index] else { continue }
+                  case .train(var option) = rows.options[index] else { continue }
             var changed = trip
             changed.change = fewer
-            trips[index] = changed
+            rows.trips[index] = changed
             option.change = fewer
-            options[index] = .train(option)
-            minutes[index] = minutes(of: changed, by: timetable)
+            rows.options[index] = .train(option)
+            rows.minutes[index] = minutes(of: changed, by: timetable)
         }
-        // Walking all the way, waited on unless even the straight line's too long to offer
-        // beside the trips: over `walkOffered` and slower than the fastest
-        if !nothingElse, walkAll {
-            let soonest = Self.soonestWalk(from: start, to: end)
-            let fastestTrip = minutes.compactMap { $0 }.min()
-            if soonest <= Self.walkOffered || fastestTrip.map({ soonest <= $0 }) ?? true {
-                walk = await walking.value.walk
-                guard !Task.isCancelled else { return }
-            }
-        }
-        // Walking all the way, if it's not far, as quick as the trains, or all there is
-        let walkAllMinutes = walk.map(WalkTripRow.minutes(of:))
-        if let walk, let walkMinutes = walkAllMinutes {
-            dropTrips(slowerThan: walkMinutes)
-            let fastest = minutes.compactMap { $0 }.min()
-            if walkedInstead || walkMinutes <= Self.walkOffered || fastest.map({ walkMinutes <= $0 }) ?? true {
-                options.append(.walk(walk))
-                trips.append(nil)
-                minutes.append(walkMinutes)
-            }
-        }
-        // With a bike: to or from a train where it beats every trip without one, and riding all
-        // the way; all the way where it's not long or beats them too. None slower than walking
-        // all the way.
+        return rows
+    }
+
+    /// `timedRides`' trips, as the trip state holds them.
+    private struct TimedRides {
+        var options: [ServerRoutes.Choice]
+        var trips: [TripPlanner.Trip?]
+        var minutes: [Int?]
+        var changeStations: [Int: [ChangeStation]] = [:]
+    }
+
+    /// The bike trips worth offering added: to or from a train where it beats every trip without
+    /// one, and riding all the way; all the way where it's not long or beats them too. None slower
+    /// than walking all the way, but with a bike on, its soonest trip always, however slow.
+    private func appendBikes(_ bikeTrips: [BikeTrip]) {
+        let walkAllMinutes = options.indices.first { if case .walk = options[$0] { true } else { false } }
+            .flatMap { minutes[$0] }
         let fastest = minutes.compactMap { $0 }.min()
         let soonestRide = bikeTrips.filter { $0.train == nil }.map(\.minutes).min()
+        var bikeShown = false
         for trip in bikeTrips where walkAllMinutes.map({ trip.minutes < $0 }) ?? true {
             let beats = fastest.map { trip.minutes < $0 } ?? true
             guard trip.train == nil || soonestRide.map({ trip.minutes < $0 }) ?? true,
@@ -1922,22 +2322,72 @@ struct NewTripView: View {
             options.append(.bike(trip))
             trips.append(nil)
             minutes.append(trip.minutes)
+            bikeShown = true
         }
-        sortByMinutes()
-        // Said over the trips while a ride's among them that walks past your choice
-        let riding = options.contains { if case .walk = $0 { false } else { true } }
-        longerWalk = walked > walkChoice.minutes && riding ? walked : nil
-        if walkedInstead {
-            let by = Self.orList((subway ? ["subway"] : []) + (buses ? ["bus"] : []) + (self.biking ? ["bike"] : []))
-            walkInstead = by.isEmpty ? nil
-                : "No \(by) trip found. Walking there is within \(Self.yourWalk(walkChoice.minutes))."
+        if !bikeShown, let soonestBike = bikeTrips.min(by: { $0.minutes < $1.minutes }) {
+            options.append(.bike(soonestBike))
+            trips.append(nil)
+            minutes.append(soonestBike.minutes)
         }
-        plannedKey = planKey
-        state = .ready
     }
 
+    /// The subway's trips given way to `rows`, the server's with buses (which has them too); walking
+    /// all the way and bike trips kept, and trips slower than walking dropped, as when planned with them.
+    private func replaceRides(with rows: TimedRides) {
+        let others = options.indices.filter {
+            switch options[$0] {
+            case .walk, .bike: true
+            case .train, .bus: false
+            }
+        }
+        let otherOptions = others.map { options[$0] }, otherMinutes = others.map { minutes[$0] }
+        options = rows.options + otherOptions
+        trips = rows.trips + others.map { _ in nil }
+        minutes = rows.minutes + otherMinutes
+        changeStations = rows.changeStations
+        if let walk = otherOptions.firstIndex(where: { if case .walk = $0 { true } else { false } }),
+           let walkMinutes = otherMinutes[walk] {
+            dropTrips { index in
+                switch options[index] {
+                case .walk, .bike: true
+                case .train, .bus: TripRanking.keeps(minutes: minutes[index], besideWalk: walkMinutes)
+                }
+            }
+        }
+        sortByEffort()
+    }
+
+    /// `change` made to the trips, the one tapped still picked where it's still offered, else the best.
+    private func keepingPick(_ change: () -> Void) {
+        let kept = pickedByTap ? pickedOption : nil
+        change()
+        picked = kept.flatMap { options.firstIndex(of: $0) } ?? 0
+        pickRouteTrip()
+    }
+
+    /// Walking all the way, routed after the trips showed: trips and Citi Bike rides slower than
+    /// it give way to it, as when it's planned with them, but for one tapped, which stays
+    /// picked; the soonest ride stays if every one is slower. Then all in order again
+    /// (`sortByEffort`), and the best picked unless one was tapped.
+    private func addWalkAll(_ walk: Walk) {
+        let kept = pickedByTap ? pickedOption : nil
+        let walkMinutes = WalkTripRow.minutes(of: walk)
+        let bikeRows = Set(options.indices.filter { if case .bike = options[$0] { true } else { false } })
+        let staying = Set(TripRanking.keptBesideWalk(walkMinutes, minutes: minutes, bikes: bikeRows,
+                                                     tapped: pickedByTap ? picked : nil))
+        dropTrips { staying.contains($0) }
+        options.append(.walk(walk))
+        trips.append(nil)
+        minutes.append(walkMinutes)
+        sortByEffort()
+        picked = kept.flatMap { options.firstIndex(of: $0) } ?? 0
+        pickRouteTrip()
+    }
+
+    private static let log = AppLog(category: "NewTrip")
+
     /// The rides by subway and bus from `start` to `end` with up to `walkRange` to and from them,
-    /// of Google's `routes` (nil if the server couldn't be reached) and the app's own, and where
+    /// of the planned `routes` (nil if they couldn't be planned) and the app's own, and where
     /// there are none by subway, why. Off the main thread.
     private nonisolated static func rides(_ routes: [ServerRoutes.Route]?, buses: Bool, subway: Bool,
                                           from start: CLLocation, to end: CLLocation,
@@ -2010,7 +2460,7 @@ struct NewTripView: View {
         // By subway, why: an end the app can't plan to (Staten Island, JFK), or as the planner
         // found, no station a walk from an end, or none but across the water, or walking's as
         // quick; and that the other ways found none either
-        let why = Self.unplanned(from: start, to: end) ?? (subway ? none?.message(walk: walk, walkOn: walkAll) : nil)
+        let why = Self.unplanned(from: start, to: end) ?? (subway ? none?.message(walk: walk) : nil)
         var message = why.map { others.isEmpty ? $0 : "\($0) Leeway couldn't find a \(Self.orList(others)) trip either." }
             ?? "Leeway couldn't find a \(by) trip between these places with up to a \(walk) walk."
         if let whyNoBike { message += " \(whyNoBike)" }
@@ -2069,28 +2519,47 @@ struct NewTripView: View {
     /// Longest ride all the way offered beside quicker trips.
     private static let rideOffered = 45
 
-    /// Longest walk all the way offered at all, even with nothing else: past it, No Trip Found
-    /// rather than an eight-hour walk from Glen Oaks to Times Square. With No Limit, any.
-    private static let longestWalk = 120
+    /// The longest the trips wait for bike trips, from when planning starts: past it they show
+    /// without them, a row held for them, and they're added once in.
+    private static let bikesWait = Duration.milliseconds(800)
+
+    /// `task`'s value if it's in by `deadline`, else nil, the task left to carry on.
+    private static func value<T: Sendable>(of task: Task<T, Never>, by deadline: ContinuousClock.Instant) async -> T? {
+        let first = FirstAnswer<T>()
+        return await withCheckedContinuation { continuation in
+            first.waiting(continuation)
+            Task { first.answer(await task.value) }
+            Task {
+                try? await Task.sleep(until: deadline)
+                first.answer(nil)
+            }
+        }
+    }
+
+    /// Longest walk all the way offered at all (`TripRanking.longestWalk`).
+    private static let longestWalk = TripRanking.longestWalk
+
+    /// Whether walking all the way is well past your comfortable walk (`TripRanking.walkIsLong`),
+    /// for a word on its row. Never with No Limit.
+    private func walkIsLong(_ walk: Walk) -> Bool {
+        TripRanking.walkIsLong(minutes: WalkTripRow.minutes(of: walk), comfortable: walkChoice.minutes,
+                               noLimit: walkChoice.minutes == Self.noLimitMinutes)
+    }
 
     /// Meters apart From and To are the same place: no trip planned between them.
     private static let samePlace: Double = 30
 
-    /// Fewest minutes walking all the way from `start` to `end` could take: the straight line,
-    /// at a brisker pace than any walk's timed at, as none's shorter.
-    private static func soonestWalk(from start: CLLocation, to end: CLLocation) -> Int {
-        Int(start.distance(from: end) / briskPace / 60)
-    }
 
-    /// Metres a second: quicker than walks are timed at (`WalkCosts.pace`, Apple Maps').
-    private static let briskPace = 1.6
-
-    /// Walking all the way, or none with Walk off or past `longestWalk` (unless `noLimit`), then
+    /// Walking all the way, or none past `longestWalk` (unless `noLimit`), then
     /// with its minutes (`tooLong`) for No Trip Found to say; or none as Apple Maps was busy or
     /// out of reach (`trouble`), rather than having no walk.
-    private static func walkAll(_ on: Bool, noLimit: Bool, from start: CLLocation,
+    private static func walkAll(noLimit: Bool, from start: CLLocation,
                                 to end: CLLocation) async -> (walk: Walk?, tooLong: Int?, trouble: MapsTrouble?) {
-        guard on else { return (nil, nil, nil) }
+        // Past `longestWalk` even straight there at a brisk pace: not routed, as a walk across the
+        // city takes seconds to, and its minutes as the app times walks (`TripPlanner.walkMinutes`)
+        if !noLimit, Self.ruledOut(from: start, to: end, within: longestWalk) {
+            return (nil, TripPlanner.walkMinutes(start.distance(from: end)), nil)
+        }
         let walk: Walk
         do {
             walk = try await WalkingDirections.walk(from: start, to: end)
@@ -2098,8 +2567,17 @@ struct NewTripView: View {
             return (nil, nil, MapsTrouble(error))
         }
         let minutes = WalkTripRow.minutes(of: walk)
-        return noLimit || minutes <= longestWalk ? (walk, nil, nil) : (nil, minutes, nil)
+        return TripRanking.offersWalk(minutes: minutes, noLimit: noLimit) ? (walk, nil, nil) : (nil, minutes, nil)
     }
+
+    /// Whether a walk from `start` to `end` takes over `minutes` even straight there at
+    /// `briskPace`, quicker than any walk routed: no need to route it to know.
+    private static func ruledOut(from start: CLLocation, to end: CLLocation, within minutes: Int) -> Bool {
+        start.distance(from: end) / briskPace / 60 > Double(minutes)
+    }
+
+    /// Metres a second, brisker than Apple Maps' walks or the app's own (`WalkCosts.pace`).
+    private static let briskPace = 1.5
 
     /// Minutes sooner an e-bike's trip is to be kept over a classic bike's the same way: a
     /// classic costs members nothing more, and there are more of them.
@@ -2167,7 +2645,12 @@ struct NewTripView: View {
     /// mile's walk away from where you are to ride one stop back toward it. A trip with a bus by
     /// its estimate; those it can't time stay.
     private func dropTrips(slowerThan walkMinutes: Int) {
-        let kept = options.indices.filter { minutes[$0].map { $0 <= walkMinutes } ?? true }
+        dropTrips { TripRanking.keeps(minutes: minutes[$0], besideWalk: walkMinutes) }
+    }
+
+    /// The trips but those `keeping` says not to keep, by index.
+    private func dropTrips(keeping: (Int) -> Bool) {
+        let kept = options.indices.filter(keeping)
         guard kept.count < options.count else { return }
         options = kept.map { options[$0] }
         trips = kept.map { trips[$0] }
@@ -2177,21 +2660,16 @@ struct NewTripView: View {
         })
     }
 
-    /// The trips soonest there first, by the minutes each shows: the planner ranks a change as
-    /// worse than its minutes, which put a slower trip without one first. A trip with a bus by
-    /// its estimate. Trips it can't time keep their places, and those it can fill the others in
-    /// order; ties keep theirs.
-    private func sortByMinutes() {
-        // The timed ones' places, and the timed ones soonest first (a stable sort, so ties keep
-        // their order)
-        let timed = minutes.indices.filter { minutes[$0] != nil }
-        let sorted = timed.enumerated()
-            .sorted { (minutes[$0.element] ?? 0, $0.offset) < (minutes[$1.element] ?? 0, $1.offset) }
-            .map(\.element)
-        var order = Array(options.indices)
-        for (slot, index) in zip(timed, sorted) {
-            order[slot] = index
-        }
+    /// The trips best first, by `effort(at:timetable:)`: the minutes each shows, plus what its
+    /// wait and changes count against it, with a short walk all the way ahead of a ride only a
+    /// little quicker. The minutes shown stay as they are. Trips it can't time keep their places,
+    /// and those it can fill the others in order; ties keep theirs, but for walking, which wins
+    /// them (`TripRanking.order`).
+    private func sortByEffort() {
+        let timetable = TimetableStore.load(now: plannedAt)
+        let efforts = options.indices.map { effort(at: $0, timetable: timetable) }
+        let walkAll = options.map { if case .walk = $0 { true } else { false } }
+        let order = TripRanking.order(efforts: efforts, walkAll: walkAll)
         if order != Array(options.indices) {
             options = order.map { options[$0] }
             trips = order.map { trips[$0] }
@@ -2202,52 +2680,80 @@ struct NewTripView: View {
         }
     }
 
+    /// What option `index` is ranked by, in seconds: its minutes, plus for a ride what its first
+    /// walks, bus wait and changes count against it (`TripPlanner.penalty`, `BusTrip.penalty`).
+    /// Walking all the way short of `TripRanking.walkMarginUnder` minutes counts
+    /// `TripRanking.walkMargin` less, so a ride has to beat it by that; only a ride's walks count
+    /// `TripPlanner.walkWeight`. Nil where its minutes aren't known.
+    private func effort(at index: Int, timetable: Timetable?) -> TimeInterval? {
+        guard let shown = minutes[index] else { return nil }
+        let penalty: TimeInterval
+        switch options[index] {
+        case .walk:
+            return TripRanking.walkEffort(minutes: shown)
+        case .bus(let trip):
+            penalty = ends.map { trip.penalty(from: $0.start, to: $0.end, at: plannedAt, timetable: timetable) } ?? 0
+        case .train:
+            if let ends, let trip = trips[index], let timetable {
+                penalty = TripPlanner.penalty(of: trip, from: ends.start, to: ends.end, at: plannedAt,
+                                              timetable: timetable) ?? 0
+            } else {
+                penalty = 0
+            }
+        case .bike:
+            penalty = 0
+        }
+        return TripRanking.rideEffort(minutes: shown, penalty: penalty)
+    }
+
     /// Minutes a change across the platform may take to get there over a walk to another
     /// platform for the same lines, and the walk not be offered.
     private static let walkWorth: TimeInterval = 2 * 60
 
-    /// `stations` (more than two of them) without walks to another platform for lines another
-    /// of them has across the platform, which gets there no more than `walkWorth` later: not
-    /// Atlantic Av-Barclays Ctr's walk to the B or Q, with them across the platform at DeKalb Av.
-    /// At least one the trip changes at stays.
+    /// `stations` without walks to another platform for lines another of them has across the
+    /// platform, which gets there no more than `walkWorth` later: not Atlantic Av-Barclays Ctr's
+    /// walk to the B or Q, with them across the platform at DeKalb Av. Each walked line is weighed
+    /// on its own, so the D and N across the platform at Atlantic Av stay without the B walked to
+    /// there. A station left with no lines goes. At least one the trip changes at stays.
     private func withoutNeedlessWalks(_ stations: [ChangeStation], for trip: TripPlanner.Trip,
                                       by timetable: Timetable?) -> [ChangeStation] {
-        guard stations.count > 2 else { return stations }
+        guard stations.count > 1 else { return stations }
         let selection = trip.selection
-        // When it gets there changing at just one of them
-        func arrival(_ station: ChangeStation) -> Date? {
-            guard let ends, let timetable,
-                  let change = Change(stops: [station.change])?.validated(for: selection) else { return nil }
-            var only = trip
-            only.change = change
-            return TripPlanner.arrival(of: only, from: ends.start, to: ends.end, at: plannedAt, timetable: timetable)
-        }
-        // Each timed once, as each is compared with several
-        var timed: [Int: Date?] = [:]
-        func timedArrival(_ index: Int) -> Date? {
-            if let known = timed[index] { return known }
-            let found = arrival(stations[index])
-            timed[index] = found
+        // When it gets there changing at just `station`, to just `route`; each timed once, as
+        // each is compared with several
+        var timed: [String: Date?] = [:]
+        func arrival(_ station: Change, on route: String) -> Date? {
+            let key = station.stationID + " " + route
+            if let known = timed[key] { return known }
+            var stop = station
+            stop.routes = [route]
+            var found: Date?
+            if let ends, let timetable, let change = Change(stops: [stop])?.validated(for: selection) {
+                var only = trip
+                only.change = change
+                found = TripPlanner.arrival(of: only, from: ends.start, to: ends.end, at: plannedAt, timetable: timetable)
+            }
+            timed[key] = found
             return found
         }
         var kept: [ChangeStation] = []
-        for (index, station) in stations.enumerated() {
-            let walks = station.change.routes.filter { !station.change.isAcross($0, from: selection) }
+        for station in stations {
             let complex = station.change.station?.complex
-            let across = walks.isEmpty ? [] : stations.indices.filter { other in
-                stations[other].change.station?.complex != complex
-                    && walks.allSatisfy { stations[other].change.routes.contains($0)
-                        && stations[other].change.isAcross($0, from: selection) }
+            let needless = station.change.routes.filter { route in
+                guard !station.change.isAcross(route, from: selection) else { return false }
+                let across = stations.map(\.change).filter { other in
+                    other.station?.complex != complex && other.routes.contains(route)
+                        && other.isAcross(route, from: selection)
+                }
+                // Left out only if one across is known to get there no more than `walkWorth`
+                // later; untimed (no timetable yet), it stays
+                guard !across.isEmpty, let walking = arrival(station.change, on: route),
+                      let soonest = across.compactMap({ arrival($0, on: route) }).min() else { return false }
+                return soonest.timeIntervalSince(walking) <= Self.walkWorth
             }
-            // Left out only if one across is known to get there no more than `walkWorth` later;
-            // untimed (no timetable yet), it stays
-            guard !across.isEmpty, let walking = timedArrival(index),
-                  let soonest = across.compactMap(timedArrival).min(),
-                  soonest.timeIntervalSince(walking) <= Self.walkWorth
-            else {
-                kept.append(station)
-                continue
-            }
+            var station = station
+            station.change.routes.removeAll(where: needless.contains)
+            if !station.change.routes.isEmpty { kept.append(station) }
         }
         if !kept.contains(where: \.on), let first = stations.first(where: \.on) {
             kept.insert(first, at: 0)
@@ -2257,16 +2763,19 @@ struct NewTripView: View {
 
     /// Frames the map while trips are found on `places` (From and To, as far as they're known), or
     /// on the city without them, rather than wherever the map was, which can be the continent.
-    /// Animated only for a map already showing (`animated`): most callers make the map anew, and a
-    /// new one animates from MapKit's start, the city bounds' far corner, sweeping past Bayonne.
+    /// Animated only when asked (`animated`).
     private func frameStart(on places: [CLLocation], animated: Bool = false) {
-        let heading = MapNorth.heading(ny: nyNorth)
+        let heading = startHeading ?? MapNorth.heading(ny: nyNorth)
+        // Always a camera for the room as measured, clear of the cards, as the trips are: a
+        // `.rect` is fitted to the whole map, and left you under the cards, framed too close, till
+        // the trips came in and zoomed it out again, loading its tiles twice
+        let northUp = true
         // Called inside other animations too (`startOver`), so they're turned off here unless asked
         var transaction = Transaction(animation: animated ? .smooth : nil)
         transaction.disablesAnimations = !animated
         guard !places.isEmpty else {
-            let position = MapNorth.position(fitting: MKMapRect(Self.cityRegion), heading: heading, in: startRoom)
-                ?? .region(Self.cityRegion)
+            let position = MapNorth.position(fitting: MKMapRect(Self.cityRegion), heading: heading, in: startRoom,
+                                             northUp: northUp) ?? .region(Self.cityRegion)
             withTransaction(transaction) { startPosition = position }
             return
         }
@@ -2274,12 +2783,14 @@ struct NewTripView: View {
         for place in places {
             rect = rect.union(MKMapRect(origin: MKMapPoint(place.coordinate), size: MKMapSize(width: 0, height: 0)))
         }
-        // At least a couple of kilometers across, and a little beyond both
-        let least = 2_000 * MKMapPointsPerMeterAtLatitude(places[0].coordinate.latitude)
+        // At least a couple of kilometers across, and a little beyond both; just one spot (you,
+        // as it starts), as close as Nearby's map starts round you
+        let across = rect.width == 0 && rect.height == 0 ? LiveView.framedMeters : 2_000
+        let least = across * MKMapPointsPerMeterAtLatitude(places[0].coordinate.latitude)
         let dx = max(rect.width * 0.15, (least - rect.width) / 2, 0)
         let dy = max(rect.height * 0.15, (least - rect.height) / 2, 0)
         let framed = rect.insetBy(dx: -dx, dy: -dy)
-        let position = MapNorth.position(fitting: framed, heading: heading, in: startRoom) ?? .rect(framed)
+        let position = MapNorth.position(fitting: framed, heading: heading, in: startRoom, northUp: northUp) ?? .rect(framed)
         withTransaction(transaction) { startPosition = position }
     }
 
@@ -2388,6 +2899,8 @@ private struct WalkTripRow: View {
     let endName: String
     let minutes: Int?
     let picked: Bool
+    /// Whether it's well past your comfortable walk, said under it.
+    var longer = false
 
     /// Apple Maps' minutes for `walk`, rounded up, never under one.
     static func minutes(of walk: Walk) -> Int {
@@ -2409,7 +2922,7 @@ private struct WalkTripRow: View {
                     .foregroundStyle(.primary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 HStack(alignment: .lastTextBaseline, spacing: 8) {
-                    Text("\(Walk.distance(walk.meters)), no train")
+                    Text("\(Walk.distance(walk.meters)), no train\(walk.saferAtNight == true ? ", via safer streets" : "")")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                     Spacer(minLength: 0)
@@ -2419,6 +2932,11 @@ private struct WalkTripRow: View {
                             .foregroundStyle(.secondary)
                             .fixedSize()
                     }
+                }
+                if longer {
+                    Label("Longer than you typically walk", systemImage: "exclamationmark.triangle.fill")
+                        .font(.footnote)
+                        .foregroundStyle(.orange)
                 }
             }
         }
@@ -2447,6 +2965,8 @@ struct TripPlaceList: View {
     let search: String
     /// Bumped by Return in the search field, to pick the first result.
     var submits = 0
+    /// Whether addresses picked are kept in Recents: New Trip's ends, not Home or first-run's.
+    var keepsRecents = false
     let pick: (TripPlace) -> Void
 
     /// An address or place to look up before it's picked: MapKit's suggestion, or a contact's.
@@ -2681,8 +3201,10 @@ struct TripPlaceList: View {
             return
         }
         let coordinate = item.location.coordinate
-        pick(TripPlace(name: name, detail: detail,
-                       point: TripPlace.Point(latitude: coordinate.latitude, longitude: coordinate.longitude)))
+        let place = TripPlace(name: name, detail: detail,
+                              point: TripPlace.Point(latitude: coordinate.latitude, longitude: coordinate.longitude))
+        if keepsRecents { RecentPlaces.shared.add(place) }
+        pick(place)
     }
 }
 
@@ -2749,6 +3271,295 @@ private struct ContactAddressRow: View {
     }
 }
 
+/// Under Home and Work before anything's typed: for To, your next event today with somewhere to
+/// be (the rest of today's under it, once asked for), then the addresses picked lately. Before
+/// Leeway may read your calendar, a row to allow it instead, until it's closed.
+struct TripSuggestions: View {
+    /// Today's events are offered: picking To.
+    let showsCalendar: Bool
+    /// What to search for, when there's nothing to suggest.
+    let showsHint: Bool
+    let pick: (TripPlace) -> Void
+
+    @State private var events = TodayEvents()
+    @AppStorage("calendarRowClosed") private var rowClosed = false
+    /// The rest of today's events shown under the next.
+    @State private var showsAll = false
+    /// The event being looked up after a tap.
+    @State private var resolving: CalendarEvent?
+    @State private var looking: Task<Void, Never>?
+    @State private var tooFar: Set<CalendarEvent> = []
+    @State private var notFound: Set<CalendarEvent> = []
+
+    private var recents: [TripPlace] { RecentPlaces.shared.places }
+    private var asks: Bool { showsCalendar && events.mayAsk && !rowClosed }
+    private var calendar: [CalendarEvent] { showsCalendar ? events.events : [] }
+
+    var body: some View {
+        Group {
+            if calendar.isEmpty && recents.isEmpty && !asks {
+                hint
+            } else {
+                list
+            }
+        }
+        .task { await events.watch() }
+        .onDisappear { looking?.cancel() }
+    }
+
+    private var hint: some View {
+        // Not on its side, where with the keyboard up there's no room for it
+        VStack(spacing: 6) {
+            if showsHint {
+                Image(systemName: "magnifyingglass").font(.title2)
+                    .accessibilityHidden(true)
+                Text("Search for a station, address, place or person")
+                    .font(.subheadline)
+                    .multilineTextAlignment(.center)
+            }
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var list: some View {
+        List {
+            if asks {
+                Section { askRow }
+            } else if let next = calendar.first {
+                Section {
+                    nextCard(next, more: calendar.count - 1)
+                    if showsAll {
+                        ForEach(calendar.dropFirst()) { event in
+                            eventButton(event) { EventRow(event: event, tooFar: tooFar.contains(event),
+                                                          notFound: notFound.contains(event)) }
+                        }
+                    }
+                }
+            }
+            if !recents.isEmpty {
+                Section("Recents") {
+                    ForEach(recents) { place in
+                        Button {
+                            RecentPlaces.shared.add(place)
+                            pick(place)
+                        } label: {
+                            RecentRow(place: place)
+                        }
+                        .buttonStyle(.plain)
+                        .swipeActions {
+                            Button("Remove", systemImage: "trash", role: .destructive) {
+                                RecentPlaces.shared.remove(place)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .scrollContentBackground(.hidden)
+        .contentMargins(.top, 4, for: .scrollContent)
+        .scrollDismissesKeyboard(.immediately)
+    }
+
+    /// Asks for your calendar on a tap; closed, it's not offered here again (first-run setup and
+    /// the Settings app still can).
+    private var askRow: some View {
+        HStack(spacing: 12) {
+            Button {
+                Task { await events.ask() }
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "calendar")
+                        .font(.title3)
+                        .foregroundStyle(.tint)
+                        .frame(width: 32)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Show Today's Events").foregroundStyle(.tint)
+                        Text("Where you're due today, from your calendar. It stays on your iPhone.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            Button {
+                withAnimation { rowClosed = true }
+            } label: {
+                Label("Close", systemImage: "xmark")
+                    .labelStyle(.iconOnly)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 32, height: 32)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    /// The next event, large: what, when, where, and how soon. With others today, a button to show
+    /// them under it.
+    private func nextCard(_ event: CalendarEvent, more: Int) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Label("Next on Your Calendar", systemImage: "calendar")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if more > 0 {
+                    Button(showsAll ? "Show Less" : "+\(more) More Today") {
+                        withAnimation { showsAll.toggle() }
+                    }
+                    .font(.caption)
+                    .buttonStyle(.borderless)
+                }
+            }
+            eventButton(event) {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(event.title).font(.title3.weight(.semibold))
+                        Spacer()
+                        Text(event.start, format: .dateTime.hour().minute()).font(.headline)
+                    }
+                    if tooFar.contains(event) {
+                        Text("More than 5 miles from the subway").font(.subheadline).foregroundStyle(.red)
+                    } else if notFound.contains(event) {
+                        Text("Couldn't look up this address").font(.subheadline).foregroundStyle(.red)
+                    } else {
+                        Text(event.placeLine).font(.subheadline).foregroundStyle(.secondary)
+                    }
+                    TimelineView(.everyMinute) { context in
+                        Label(Self.starts(event.start, now: context.date), systemImage: "clock")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.orange)
+                    }
+                }
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func eventButton(_ event: CalendarEvent, @ViewBuilder label: () -> some View) -> some View {
+        Button {
+            looking?.cancel()
+            looking = Task { await choose(event) }
+        } label: {
+            HStack {
+                label()
+                if resolving == event { ProgressView() }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(resolving != nil)
+    }
+
+    /// "Starts in 1 hr 10 min", "Starts now", "Started 5 min ago".
+    private static func starts(_ start: Date, now: Date) -> String {
+        let minutes = Int((start.timeIntervalSince(now) / 60).rounded())
+        let format = Duration.UnitsFormatStyle(allowedUnits: [.hours, .minutes], width: .abbreviated)
+        if abs(minutes) < 1 { return "Starts now" }
+        let span = Duration.seconds(abs(minutes) * 60).formatted(format)
+        return minutes > 0 ? "Starts in \(span)" : "Started \(span) ago"
+    }
+
+    /// Picks an event's place: where Calendar has it on the map, else its address looked up;
+    /// within `PlaceCompleter.reach` of a station, as places searched.
+    private func choose(_ event: CalendarEvent) async {
+        guard !tooFar.contains(event), resolving == nil else { return }
+        resolving = event
+        defer { resolving = nil }
+        notFound.remove(event)
+        let location: CLLocation?
+        if let point = event.point {
+            location = CLLocation(latitude: point.latitude, longitude: point.longitude)
+        } else {
+            let request = MKGeocodingRequest(addressString: [event.placeName, event.address]
+                .compactMap { $0 }.joined(separator: ", "))
+            request?.region = PlaceCompleter.served
+            location = try? await request?.mapItems.first?.location
+        }
+        guard !Task.isCancelled else { return }
+        guard let location else {
+            notFound.insert(event)
+            return
+        }
+        guard let nearest = Nearby.nearest(to: location), nearest.meters <= PlaceCompleter.reach else {
+            tooFar.insert(event)
+            return
+        }
+        let place = TripPlace(name: event.title, detail: event.placeLine,
+                              point: TripPlace.Point(latitude: location.coordinate.latitude,
+                                                     longitude: location.coordinate.longitude))
+        RecentPlaces.shared.add(place)
+        pick(place)
+    }
+}
+
+/// One of today's later events: its time, its calendar's colour, what and where.
+private struct EventRow: View {
+    let event: CalendarEvent
+    let tooFar: Bool
+    let notFound: Bool
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(event.start, format: .dateTime.hour().minute())
+                .font(.subheadline.weight(.semibold))
+                .frame(minWidth: 64, alignment: .leading)
+            RoundedRectangle(cornerRadius: 2)
+                .fill(event.color.map { Color(cgColor: $0) } ?? .accentColor)
+                .frame(width: 4, height: 32)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(event.title).foregroundStyle(.primary)
+                Group {
+                    if tooFar {
+                        Text("More than 5 miles from the subway").foregroundStyle(.red)
+                    } else if notFound {
+                        Text("Couldn't look up this address").foregroundStyle(.red)
+                    } else {
+                        Text(event.placeLine).foregroundStyle(.secondary)
+                    }
+                }
+                .font(.caption)
+                .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// An address picked lately: a pin, its name, and under it its street.
+private struct RecentRow: View {
+    let place: TripPlace
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "mappin")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.white)
+                .frame(width: 32, height: 32)
+                .background(Color.red.gradient, in: Circle())
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(place.name).foregroundStyle(.primary)
+                if let detail = place.detail, !detail.isEmpty {
+                    Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+    }
+}
+
 /// MapKit's suggestions for addresses and places in New York near the subway as you type, nearest you first
 /// if Leeway knows where you are. Suggestions only finish words, so with few for what's typed
 /// (as for "barclys center" or "brookyln museum"), MapKit's search looks too, which forgives
@@ -2797,6 +3608,10 @@ private final class PlaceCompleter: NSObject, MKLocalSearchCompleterDelegate {
     }
     @ObservationIgnored private let completer = MKLocalSearchCompleter()
     @ObservationIgnored private var searching: Task<Void, Never>?
+    /// What `searching` searches for, or found.
+    @ObservationIgnored private var searchedQuery: String?
+    /// How long after the last suggestions before MapKit's search looks.
+    private static let searchPause: Duration = .milliseconds(400)
 
     var query = "" {
         didSet { completer.queryFragment = Self.withOrdinals(query) }
@@ -2845,6 +3660,7 @@ private final class PlaceCompleter: NSObject, MKLocalSearchCompleterDelegate {
 
     /// Where you last were, if Leeway may know: without asking or waiting for a new fix.
     private static var lastLocation: CLLocation? {
+        if let pretend = PretendLocation.current { return pretend }
         let manager = CLLocationManager()
         switch manager.authorizationStatus {
         case .authorizedWhenInUse, .authorizedAlways: return manager.location
@@ -2876,15 +3692,21 @@ private final class PlaceCompleter: NSObject, MKLocalSearchCompleterDelegate {
     }
 
     /// With few suggestions for three letters or more, MapKit's search for what's typed: up to
-    /// six places it finds near the subway that weren't suggested.
+    /// six places it finds near the subway that weren't suggested. Once for what's typed, though
+    /// the completer may say its suggestions for it more than once, and only once you've paused
+    /// typing (`searchPause`).
     private func searchIfFew() {
-        searching?.cancel()
         let query = resultsQuery
-        guard results.count < Self.few, query.count >= 3 else {
+        let few = results.count < Self.few && query.count >= 3
+        if few, query == searchedQuery { return }
+        searching?.cancel()
+        searchedQuery = nil
+        guard few else {
             found = []
             foundQuery = query
             return
         }
+        searchedQuery = query
         let suggested = Set(results.map { $0.title.lowercased() })
         let request = MKLocalSearch.Request()
         request.naturalLanguageQuery = query
@@ -2892,6 +3714,8 @@ private final class PlaceCompleter: NSObject, MKLocalSearchCompleterDelegate {
         request.regionPriority = completer.regionPriority
         request.resultTypes = [.address, .pointOfInterest]
         searching = Task {
+            try? await Task.sleep(for: Self.searchPause)
+            guard !Task.isCancelled else { return }
             let items = (try? await MKLocalSearch(request: request).start().mapItems) ?? []
             guard !Task.isCancelled else { return }
             found = Array(items.filter { item in
@@ -2906,6 +3730,50 @@ private final class PlaceCompleter: NSObject, MKLocalSearchCompleterDelegate {
 }
 
 #Preview {
-    NewTripView(showing: TripShowing())
+    NewTripView(showing: TripShowing(), startHeading: .constant(nil))
         .environment(SettingsStore())
+}
+
+/// Times `plan()`'s steps for the log: "server 1840 ms, rides 120 ms, …", each since the last.
+/// Whichever answer comes first, handed to the one waiting; any after, let go.
+private final class FirstAnswer<T: Sendable>: Sendable {
+    private let state = Mutex<(continuation: CheckedContinuation<T?, Never>?, answered: T??)>((nil, nil))
+
+    func waiting(_ continuation: CheckedContinuation<T?, Never>) {
+        let answered = state.withLock { state -> T?? in
+            guard let answered = state.answered else {
+                state.continuation = continuation
+                return nil
+            }
+            return answered
+        }
+        if let answered { continuation.resume(returning: answered) }
+    }
+
+    func answer(_ value: T?) {
+        let continuation = state.withLock { state -> CheckedContinuation<T?, Never>? in
+            guard state.answered == nil else { return nil }
+            state.answered = .some(value)
+            defer { state.continuation = nil }
+            return state.continuation
+        }
+        continuation?.resume(returning: value)
+    }
+}
+
+private final class PlanClock {
+    private let clock = ContinuousClock()
+    private var last: ContinuousClock.Instant
+    private var steps: [String] = []
+
+    init() { last = clock.now }
+
+    func mark(_ step: String) {
+        let now = clock.now
+        let ms = (now - last).components.attoseconds / 1_000_000_000_000_000 + (now - last).components.seconds * 1000
+        steps.append("\(step) \(ms) ms")
+        last = now
+    }
+
+    var summary: String { steps.joined(separator: ", ") }
 }

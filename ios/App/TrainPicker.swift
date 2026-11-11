@@ -365,6 +365,7 @@ struct LinesStep: View {
                 Image(systemName: allChosen ? "checkmark.circle.fill" : "circle")
                     .font(.title3)
                     .foregroundStyle(allChosen ? Color.accentColor : Color(.systemGray3))
+                    .accessibilityHidden(true)
             }
             .padding(16)
             .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle.pickerCard)
@@ -386,6 +387,7 @@ struct PlatformTitle: View {
         Text("\(place)\(labels) platform".uppercased())
             .font(.footnote.weight(.semibold))
             .foregroundStyle(.secondary)
+            .accessibilityAddTraits(.isHeader)
     }
 }
 
@@ -535,7 +537,7 @@ struct DirectionStep: View {
                 TimelineView(.periodic(from: .now, by: 15)) { context in
                     VStack(spacing: 12) {
                         tiles {
-                            ForEach(directions, id: \.self) { tile($0, now: context.date) }
+                            ForEach(directions, id: \.self) { tile($0, now: AppClock.pretend(context.date)) }
                         }
                         if showsBoth {
                             bothTile
@@ -632,6 +634,7 @@ struct DirectionStep: View {
                     .foregroundStyle(next.statusColor(scheduled: .primary))
                     .accessibilityElement(children: .combine)
                     .accessibilityLabel("Next train \(wait.spoken)")
+                    .accessibilityAddTraits(.updatesFrequently)
                     let then = found.dropFirst().prefix(2).map { MinutesToGo(until: $0.time, from: now).count }
                     Text(then.isEmpty ? " " : "then \(then.map(String.init).joined(separator: ", "))")
                         .font(.caption)
@@ -690,12 +693,22 @@ struct DirectionStep: View {
     /// where the feed has none.
     private func fetchTrains() async {
         let ways = directions.map { Selection(stationID: station.id, routes: routes, direction: $0) }
+        // Each feed downloaded once for every way (`TrainService.sharingFeeds`)
+        let stops = ways.reduce(into: Set<String>()) { stops, way in
+            stops.formUnion(TrainService.feedStops(for: way, change: nil, destination: nil))
+        }
+        await TrainService.sharingFeeds(atStops: stops) {
+            await fetchTrains(ways)
+        }
+    }
+
+    private func fetchTrains(_ ways: [Selection]) async {
         await withTaskGroup(of: (Direction, [Arrival]?).self) { group in
             for way in ways {
                 group.addTask {
                     let board = try? await TrainService.board(for: way, includingAlerts: false, includingOutages: false,
                                                               fillingFrom: { TimetableStore.load() })
-                    return (way.direction, board.map { way.catchable($0.trains, now: .now) })
+                    return (way.direction, board.map { way.catchable($0.trains, now: AppClock.now) })
                 }
             }
             for await (direction, found) in group {
@@ -728,7 +741,7 @@ private struct WayDisc: View {
 }
 
 /// A filled tick when chosen, else an empty circle; VoiceOver uses the isSelected trait instead.
-private struct ChosenMark: View {
+struct ChosenMark: View {
     let chosen: Bool
 
     var body: some View {
@@ -741,12 +754,12 @@ private struct ChosenMark: View {
 
 extension RoundedRectangle {
     /// A direction tile's shape.
-    fileprivate static let directionTile = RoundedRectangle(cornerRadius: 26, style: .continuous)
+    static let directionTile = RoundedRectangle(cornerRadius: 26, style: .continuous)
 }
 
 extension View {
     /// The accent ring round the chosen direction tile.
-    fileprivate func chosenRing(_ chosen: Bool) -> some View {
+    func chosenRing(_ chosen: Bool) -> some View {
         overlay {
             if chosen {
                 RoundedRectangle.directionTile.strokeBorder(Color.accentColor, lineWidth: 3)

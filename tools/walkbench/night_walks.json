@@ -1,0 +1,14 @@
+[
+  {"name": "night-central-park-72", "note": "Across Central Park at 72nd: lit drives, unlit paths, shut 1–6", "from": [40.7716, -73.9670], "to": [40.7764, -73.9770]},
+  {"name": "night-central-park-north", "note": "Across the north of Central Park", "from": [40.7967, -73.9497], "to": [40.7940, -73.9650]},
+  {"name": "night-fort-greene-park", "note": "Through or round Fort Greene Park", "from": [40.6895, -73.9737], "to": [40.6929, -73.9786]},
+  {"name": "night-brooklyn-bridge-park", "note": "Waterfront path or the streets above", "from": [40.7025, -73.9940], "to": [40.6915, -73.9998]},
+  {"name": "night-hudson-greenway", "note": "Hudson River Greenway or the West Village streets", "from": [40.7480, -74.0075], "to": [40.7330, -74.0100]},
+  {"name": "night-east-river-esplanade", "note": "East River Esplanade or York Ave", "from": [40.7590, -73.9590], "to": [40.7760, -73.9450]},
+  {"name": "night-red-hook", "note": "Smith–9 Sts to IKEA Red Hook: industrial blocks", "from": [40.6740, -73.9960], "to": [40.6720, -74.0110]},
+  {"name": "night-lic", "note": "Court Sq to Vernon Blvd: industrial Long Island City", "from": [40.7470, -73.9450], "to": [40.7425, -73.9535]},
+  {"name": "night-bushwick", "note": "Morgan Av to Jefferson St: industrial Bushwick", "from": [40.7062, -73.9331], "to": [40.7066, -73.9229]},
+  {"name": "night-mott-haven", "note": "3 Av–138 St to Port Morris", "from": [40.8102, -73.9260], "to": [40.8058, -73.9285]},
+  {"name": "night-jamaica", "note": "Jamaica Center to Sutphin Blvd", "from": [40.7022, -73.8010], "to": [40.7004, -73.8073]},
+  {"name": "night-east-new-york", "note": "Broadway Junction to Atlantic Av", "from": [40.6788, -73.9040], "to": [40.6757, -73.8960]}
+]

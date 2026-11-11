@@ -10,14 +10,19 @@ struct HomeStopPicker: View {
     @Binding var train: Selection
     @Binding var bothWays: Bool
     @Binding var bus: BusChoice?
+    /// Given a train picked, and whether both ways, to set all three at once (the bus cleared) in
+    /// place of the bindings one by one: Settings', each saved with its widgets reloaded.
+    private let pickedTrain: ((Selection, Bool) -> Void)?
     @Environment(\.dismiss) private var dismiss
     @State private var path: [Step] = []
     @State private var busPicked: Bool
 
-    init(train: Binding<Selection>, bothWays: Binding<Bool>, bus: Binding<BusChoice?>) {
+    init(train: Binding<Selection>, bothWays: Binding<Bool>, bus: Binding<BusChoice?>,
+         pickedTrain: ((Selection, Bool) -> Void)? = nil) {
         _train = train
         _bothWays = bothWays
         _bus = bus
+        self.pickedTrain = pickedTrain
         _busPicked = State(initialValue: bus.wrappedValue != nil)
     }
 
@@ -34,7 +39,7 @@ struct HomeStopPicker: View {
             Group {
                 if busPicked {
                     BusHomeStep(chosen: bus) { place in
-                        let lines = place.lines(at: .now)
+                        let lines = place.lines(at: AppClock.now)
                         if lines.count > 1 {
                             path.append(.busLines(place))
                         } else {
@@ -89,9 +94,13 @@ struct HomeStopPicker: View {
                 chosen.stationID = station.id
                 chosen.routes = routes
                 chosen.direction = direction
-                train = chosen
-                bothWays = both
-                bus = nil
+                if let pickedTrain {
+                    pickedTrain(chosen, both)
+                } else {
+                    train = chosen
+                    bothWays = both
+                    bus = nil
+                }
                 dismiss()
             }
         case .busLines(let place):
@@ -120,7 +129,7 @@ struct HomeStopPicker: View {
 
     /// The lines already ridden at `place` if it's the home stop, else all of them.
     private func chosenLines(at place: NearbyBusPlace) -> [String] {
-        let all = place.lines(at: .now).map(\.line)
+        let all = place.lines(at: AppClock.now).map(\.line)
         guard let bus, place.ways.contains(where: { $0.stop.id == bus.stop.id }) else { return all }
         let kept = all.filter { line in bus.allLines.contains { BusRoutes.key($0) == BusRoutes.key(line) } }
         return kept.isEmpty ? all : kept
@@ -145,7 +154,7 @@ extension NearbyBusPlace {
 
     /// The ways `lines` run from here: its stops with one of their buses due, else all.
     func ways(for lines: [String]) -> [NearbyBusPick.Way] {
-        let shown = ways.filter { !buses(at: $0, lines: lines, now: .now).isEmpty }
+        let shown = ways.filter { !buses(at: $0, lines: lines, now: AppClock.now).isEmpty }
         return shown.isEmpty ? ways : shown
     }
 
@@ -175,7 +184,12 @@ extension NearbyBusPlace {
     /// The home stop for `lines` going `index`'s way of `ways(for:)`, with the other way kept for
     /// Both ways.
     func choice(lines: [String], way index: Int, both: Bool) -> BusChoice? {
-        let ways = ways(for: lines)
+        choice(lines: lines, way: index, of: ways(for: lines), both: both)
+    }
+
+    /// `choice(lines:way:both:)` from `ways`, as shown when picked: a fresh `ways(for:)` can
+    /// differ once a bus has passed.
+    func choice(lines: [String], way index: Int, of ways: [NearbyBusPick.Way], both: Bool) -> BusChoice? {
         guard ways.indices.contains(index), let first = lines.first else { return nil }
         let way = ways[index]
         let other = ways.indices.first { $0 != index }.map { ways[$0] }
@@ -305,7 +319,8 @@ private struct BusHomeStep: View {
         }
         // The bus lines read off the main thread now, not on the first letter typed
         .task { await Task.detached(priority: .utility) { _ = BusRoutes.lineNames }.value }
-        .task(id: location.location.map { "\($0.coordinate.latitude),\($0.coordinate.longitude)" }) {
+        // Again once you've moved about 100 m, as the server keys its answers, not with each fix
+        .task(id: location.location.map { String(format: "%.3f,%.3f", $0.coordinate.latitude, $0.coordinate.longitude) }) {
             guard searched == nil, let here = location.location else { return }
             await find(near: here, named: nil)
         }
@@ -333,7 +348,7 @@ private struct BusHomeStep: View {
             VStack(alignment: .leading, spacing: 5) {
                 Text(place.name)
                 HStack(spacing: 4) {
-                    ForEach(place.lines(at: .now).prefix(6).map(\.line), id: \.self) { BusBadge(line: $0, size: 20) }
+                    ForEach(place.lines(at: AppClock.now).prefix(6).map(\.line), id: \.self) { BusBadge(line: $0, size: 20) }
                     Text("· \(place.walkMinutes) min walk")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
@@ -379,7 +394,7 @@ private struct BusLinesStep: View {
         _chosen = State(initialValue: chosen)
     }
 
-    private var lines: [NearbyBusPick] { place.lines(at: .now) }
+    private var lines: [NearbyBusPick] { place.lines(at: AppClock.now) }
 
     var body: some View {
         List {
@@ -447,12 +462,20 @@ private struct BusWayStep: View {
     let lines: [String]
     let current: BusChoice?
     let done: (BusChoice) -> Void
-    @State private var now = Date.now
+    @State private var now = AppClock.now
+    /// Worked out once, so a row picks the way it shows even after a bus has passed.
+    @State private var ways: [NearbyBusPick.Way]
 
-    private var ways: [NearbyBusPick.Way] { place.ways(for: lines) }
+    init(place: NearbyBusPlace, lines: [String], current: BusChoice?, done: @escaping (BusChoice) -> Void) {
+        self.place = place
+        self.lines = lines
+        self.current = current
+        self.done = done
+        _ways = State(initialValue: place.ways(for: lines))
+    }
 
     private func choice(_ index: Int, both: Bool) -> BusChoice? {
-        place.choice(lines: lines, way: index, both: both)
+        place.choice(lines: lines, way: index, of: ways, both: both)
     }
 
     var body: some View {
@@ -504,7 +527,7 @@ private struct BusWayStep: View {
         .task {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(15))
-                now = .now
+                now = AppClock.now
             }
         }
     }

@@ -1,6 +1,7 @@
 import CoreLocation
 import MapKit
 import SwiftUI
+import Synchronization
 
 /// The lines round a place, for Nearby's and New Trip's maps: each subway line's track
 /// (`TrackShapes`), beside the others where they run together as New Trip draws a trip's, and
@@ -17,27 +18,15 @@ struct NearbyLines {
     }
 
     let tracks: [Track]
-    /// Each bus line's streets, both ways once where they run the same street.
+    /// Which laying out of the subway's tracks `tracks` is: the same while they are, however the
+    /// bus lines change, for the map to keep them drawn (`NearbyLinesLayer`).
+    private(set) var tracksID = 0
+    /// Each bus line's each way, on its own side of the street (`BusNetwork`), whole.
     let buses: [[CLLocationCoordinate2D]]
     /// Those of the bus lines not stopping at a stop opened on Nearby's map, drawn fainter.
     var fadedBuses: [[CLLocationCoordinate2D]] = []
-    /// Which of `sides`' runs each of `buses` and `fadedBuses` is.
-    var busRuns: [Int] = []
-    var fadedRuns: [Int] = []
-    /// Which side of its street a stop is on, and so which way its buses go, and where buses run
-    /// both ways.
+    /// Which way a stop's buses go, and its place on their line.
     var sides = BusSides.none
-    /// For each of `sides`' runs' points, the subway lines drawn along it near enough to cover it
-    /// zoomed out, for it to be drawn beside them (`busOut`).
-    private var besideSubway: [[[SubwayBeside]]] = []
-
-    /// A subway line along a bus street: how far its track is to the street's right (left, less
-    /// than 0), how many lane widths it's drawn further right of that, and half its width.
-    private struct SubwayBeside {
-        let meters: Double
-        let lanes: Double
-        let halfWidth: CGFloat
-    }
 
     static let none = NearbyLines(tracks: [], buses: [])
 
@@ -46,216 +35,94 @@ struct NearbyLines {
         (tracks.first?.coordinates.first ?? buses.first?.first)?.latitude ?? 40.7
     }
 
-    /// Meters past the places, and the map's middle, lines are drawn.
-    private static let reach: Double = 2500
     /// Meters from a line's track already drawn that another of its shapes (a branch, a
     /// late-night route) is taken to be on it, and not drawn again.
     private static let sameTrack: Double = 60
     /// Meters a shape must keep within `sameTrack` of one drawn to be taken to run along it,
     /// rather than cross it: more than it's that near crossing a street at a slant.
     private static let alongDrawn: Double = 200
+    /// Meters long, at most, a subway route's other shape may leave its line drawn and come back
+    /// for that to be left out as a loop beside it rather than drawn as a branch.
+    private static let loopLength: Double = 1_500
 
     private init(tracks: [Track], buses: [[CLLocationCoordinate2D]]) {
         self.tracks = tracks
         self.buses = buses
     }
 
-    /// `routes`' tracks and `busLines`' streets within `reach` of `points`; with `brightBusLines`
-    /// (as `TrackShapes.busKey` has them), the other bus lines' streets faded.
+    /// `routes`' tracks (round `points`, or every route's whole length, `allRoutes`) and
+    /// `busLines`' ways; with `brightBusLines` (as `TrackShapes.busKey` has them), the other bus
+    /// lines' faded. The whole subway's even with no place yet, as before you're found.
     init(routes: [String], busLines: [String], brightBusLines: Set<String>? = nil, around points: [CLLocationCoordinate2D]) {
-        guard let box = Self.box(around: points) else {
-            self = .none
-            return
+        (tracks, tracksID) = Self.wholeTracks(of: routes, around: points)
+        // Each line's ways whole, on its own side of each street: lines sharing a street the same
+        // way lie exactly over each other there (`BusNetwork`), drawn the one solid colour
+        let ways = BusNetwork.ways(of: busLines)
+        // A piece bright if any line along it is
+        let isBright = { (way: BusNetwork.Way) in brightBusLines.map { !$0.isDisjoint(with: way.lines) } ?? true }
+        buses = ways.filter(isBright).map(\.coordinates)
+        fadedBuses = ways.filter { !isBright($0) }.map(\.coordinates)
+        sides = BusSides(ways: ways)
+    }
+
+    /// Meters past the places the subway's lines are drawn: their whole length, across the
+    /// city, so they show however far out the map's zoomed.
+    private static let wholeReach: Double = 60_000
+
+    /// Every line the stations list: the whole subway, as Nearby's map draws it.
+    static let allRoutes: [String] = Array(Set(StationDirectory.all.flatMap(\.routes))).sorted()
+
+    /// `allRoutes`' tracks, laid out once (at launch, off the main thread): the same however the
+    /// map's moved, and slow to lay out along their whole length.
+    static let allTracks: [Track] = {
+        let tracks = layOut(allRoutes, around: [CLLocationCoordinate2D(latitude: 40.73, longitude: -73.94)])
+        allTracksLaidOut.store(true, ordering: .releasing)
+        return tracks
+    }()
+
+    private static let allTracksLaidOut = Atomic(false)
+
+    /// Whether `allTracks` is laid out, for the main thread not to wait on it, or lay it out.
+    static var allTracksReady: Bool { allTracksLaidOut.load(ordering: .acquiring) }
+
+    /// `allTracks`' `tracksID`; others' counted on from it.
+    private static let allTracksID = 1
+
+    /// The last other subway tracks laid out, by their routes, as `allTracks`, and their
+    /// `tracksID`. Locked, as New Trip lays them out off the main thread.
+    private static let lastTracks = Mutex<(routes: [String], tracks: [Track], id: Int)?>(nil)
+
+    /// `routes`' whole tracks, beside each other where they run together; lines of a colour
+    /// running together once, as one line, stretch by stretch (`runs`); and their `tracksID`.
+    private static func wholeTracks(of routes: [String], around points: [CLLocationCoordinate2D]) -> ([Track], Int) {
+        var seen: Set<String> = []
+        let routes = routes.filter { seen.insert($0).inserted }.sorted()
+        if routes.isEmpty { return ([], 0) }
+        if routes == allRoutes { return (allTracks, allTracksID) }
+        if let last = lastTracks.withLock({ $0 }), last.routes == routes { return (last.tracks, last.id) }
+        let tracks = layOut(routes, around: points)
+        return lastTracks.withLock { last in
+            let id = max(last?.id ?? allTracksID, allTracksID) + 1
+            last = (routes, tracks, id)
+            return (tracks, id)
         }
-        let runs = Self.runs(of: routes, in: TrackShapes.byRoute, box: box)
+    }
+
+    /// `routes`' (sorted, once each) tracks within `wholeReach` of `points`, laid out side by side.
+    private static func layOut(_ routes: [String], around points: [CLLocationCoordinate2D]) -> [Track] {
+        guard let box = box(around: points, reach: wholeReach) else { return [] }
+        let runs = runs(of: routes, in: TrackShapes.byRoute, box: box)
         let coordinates = runs.map { $0.points.map(\.coordinate) }
-        let lanes = TripMap.laneOffsets(coordinates, width: 1)
-        tracks = runs.indices.map { index in
+        let lanes = TripMap.laneOffsets(coordinates, colors: runs.map { LineStyle.of($0.route).color }, width: 1)
+        let tracks = runs.indices.map { index in
             Track(route: runs[index].route, coordinates: coordinates[index],
                   lanes: lanes.indices.contains(index) ? lanes[index] : [])
         }
-        // A street once however many lines run along it, as two pale lines over each other
-        // read darker
-        // The bright ones first, for a street they share with faded ones to be drawn bright
-        let keys = busLines.map(TrackShapes.busKey)
-        let ordered = brightBusLines.map { bright in keys.filter(bright.contains) + keys.filter { !bright.contains($0) } } ?? keys
-        let busRuns = Self.runs(of: ordered, in: TrackShapes.byBusLine, box: box, acrossRoutes: true)
-        let isBright = { (route: String) in brightBusLines?.contains(route) ?? true }
-        self.busRuns = busRuns.indices.filter { isBright(busRuns[$0].route) }
-        fadedRuns = busRuns.indices.filter { !isBright(busRuns[$0].route) }
-        buses = self.busRuns.map { busRuns[$0].points.map(\.coordinate) }
-        fadedBuses = fadedRuns.map { busRuns[$0].points.map(\.coordinate) }
-        sides = BusSides(runs: busRuns)
-        besideSubway = Self.besideSubway(busRuns.map(\.points), tracks: tracks)
-    }
-
-    /// Meters off a bus street a subway line along it is looked for: as wide as the subway's
-    /// widest drawn, zoomed out as far as the lines show.
-    private static let subwayReach: Double = 120
-
-    /// For each of `buses`' points, the subway lines running along it within `subwayReach`: of
-    /// each, its nearest point, if it runs much the same way (not across it).
-    private static func besideSubway(_ buses: [[MKMapPoint]], tracks: [Track]) -> [[[SubwayBeside]]] {
-        guard !tracks.isEmpty, let somewhere = buses.first?.first else { return buses.map { $0.map { _ in [] } } }
-        let pointsPerMeter = MKMapPointsPerMeterAtLatitude(somewhere.coordinate.latitude)
-        let cell = subwayReach * pointsPerMeter
-        let square = { (point: MKMapPoint) in SIMD2(Int((point.x / cell).rounded(.down)), Int((point.y / cell).rounded(.down))) }
-        let trackPoints = tracks.map { $0.coordinates.map(MKMapPoint.init) }
-        var grid: [SIMD2<Int>: [(track: Int, point: Int)]] = [:]
-        for (track, points) in trackPoints.enumerated() {
-            for (index, point) in points.enumerated() { grid[square(point), default: []].append((track, index)) }
-        }
-        // A line's way at a point, from its points either side
-        func way(_ points: [MKMapPoint], _ index: Int) -> (x: Double, y: Double)? {
-            let a = points[max(0, index - 1)], b = points[min(points.count - 1, index + 1)]
-            let length = hypot(b.x - a.x, b.y - a.y)
-            return length > 0 ? ((b.x - a.x) / length, (b.y - a.y) / length) : nil
-        }
-        return buses.map { points in
-            points.indices.map { index in
-                guard let along = way(points, index) else { return [] }
-                // Right of the way the street's drawn: map points' y runs south
-                let right = (x: -along.y, y: along.x)
-                let point = points[index]
-                var nearest: [Int: (meters: Double, beside: SubwayBeside)] = [:]
-                let here = square(point)
-                for dx in -1...1 {
-                    for dy in -1...1 {
-                        for (track, trackIndex) in grid[here &+ SIMD2(dx, dy)] ?? [] {
-                            let trackPoint = trackPoints[track][trackIndex]
-                            let meters = trackPoint.distance(to: point)
-                            guard meters <= subwayReach, meters < nearest[track]?.meters ?? .infinity,
-                                  let trackWay = way(trackPoints[track], trackIndex),
-                                  // Much the same way, either way round, not crossing it, even at a slant
-                                  abs(trackWay.x * along.x + trackWay.y * along.y) > 0.96 else { continue }
-                            let across = ((trackPoint.x - point.x) * right.x + (trackPoint.y - point.y) * right.y) / pointsPerMeter
-                            // Its lanes run to its own right, which is the street's right or left
-                            let sameWay = trackWay.x * along.x + trackWay.y * along.y > 0
-                            let lanes = tracks[track].lanes.indices.contains(trackIndex) ? tracks[track].lanes[trackIndex] : 0
-                            let width = tracks[track].isBeside ? NearbyLinesLayer.besideWidth : NearbyLinesLayer.lineWidth
-                            nearest[track] = (meters, SubwayBeside(meters: across, lanes: sameWay ? lanes : -lanes, halfWidth: width / 2))
-                        }
-                    }
-                }
-                return nearest.values.map(\.beside)
-            }
-        }
-    }
-
-    /// Points to the right of bus run `run`'s street (`sides`' runs) its line at `point` is drawn
-    /// at a map `metersPerPoint`: its middle, or with `lane` 1 or -1 the way to its right or
-    /// left, `NearbyLinesLayer.laneOut` off it; moved out past any subway lines drawn over it,
-    /// one way's to its side of them, the middle's to the right. And whether any were.
-    func busOut(run: Int, point: Int, lane: Int, metersPerPoint: Double) -> (points: CGFloat, moved: Bool) {
-        let start = CGFloat(lane) * NearbyLinesLayer.laneOut
-        guard metersPerPoint > 0, besideSubway.indices.contains(run), besideSubway[run].indices.contains(point) else {
-            return (start, false)
-        }
-        // Each subway line's edges, in points right of the street
-        let spans = besideSubway[run][point].map { line -> (low: CGFloat, high: CGFloat) in
-            let middle = CGFloat(line.meters / metersPerPoint) + CGFloat(line.lanes) * NearbyLinesLayer.besideWidth
-            return (middle - line.halfWidth, middle + line.halfWidth)
-        }
-        // A gap, and half the bus line's width
-        let clear = 1.5 + NearbyLinesLayer.busWidth / 2
-        // The subway lines over it, and those beside them, side by side as they're drawn
-        var low = start, high = start, moved = false
-        var changed = true
-        while changed {
-            changed = false
-            for span in spans where span.high + clear > low && span.low - clear < high && (span.low < low || span.high > high) {
-                low = min(low, span.low)
-                high = max(high, span.high)
-                moved = true
-                changed = true
-            }
-        }
-        guard moved else { return (start, false) }
-        return (lane < 0 ? low - clear : high + clear, true)
-    }
-
-    /// How bus run `run`'s street (`sides`' runs) is drawn at `zoom`, a map `metersPerPoint`:
-    /// for each point, whether it's a line each way (`both`); and in points to the right of the
-    /// street, its line there (`middles`: its middle, or with `both` the way to its right), and
-    /// the way to its left's (`lefts`, where `both`). Where buses run both ways, a line each way
-    /// close in, and in between too where moved out from under the subway, as its stops the
-    /// other side couldn't otherwise stem from it. Eased out and back over a few points, not in
-    /// a jump, where the subway lines over it come and go or widen.
-    func busDrawing(run: Int, zoom: BusZoom, metersPerPoint: Double) -> (both: [Bool], middles: [CGFloat], lefts: [CGFloat]) {
-        let twoWay = sides.twoWay(run)
-        let count = twoWay.count
-        let middle = Self.along((0..<count).map { busOut(run: run, point: $0, lane: 0, metersPerPoint: metersPerPoint) },
-                                unmoved: { _ in 0 })
-        var both = (0..<count).map { index -> Bool in
-            guard twoWay[index] else { return false }
-            switch zoom {
-            case .far: return false
-            case .close: return true
-            case .between: return middle[index].moved
-            }
-        }
-        // Not off and on again for a point or two, as where the subway's lines part a moment
-        Self.fillGaps(&both, upTo: Self.easing)
-        let rights = Self.along((0..<count).map { busOut(run: run, point: $0, lane: both[$0] ? 1 : 0, metersPerPoint: metersPerPoint) },
-                                unmoved: { both[$0] ? NearbyLinesLayer.laneOut : 0 })
-        let lefts = Self.along((0..<count).map { busOut(run: run, point: $0, lane: -1, metersPerPoint: metersPerPoint) },
-                               unmoved: { _ in -NearbyLinesLayer.laneOut })
-        return (both, Self.eased(rights, out: 1), Self.eased(lefts, out: -1))
-    }
-
-    /// Points either way a bus line's eased out and back over, each up to 40 m (`TripMap.densified`).
-    private static let easing = 2
-
-    /// Points in a row a bus line must be under the subway to be moved out: along it, not
-    /// crossing it at a slant.
-    private static let alongPoints = 3
-
-    /// `outs` moved only where they're moved for `alongPoints` in a row; elsewhere where each
-    /// point's line is unmoved (`unmoved`, by its index).
-    private static func along(_ outs: [(points: CGFloat, moved: Bool)],
-                              unmoved: (Int) -> CGFloat) -> [(points: CGFloat, moved: Bool)] {
-        var kept = outs
-        var start = 0
-        while start < outs.count {
-            guard outs[start].moved else {
-                start += 1
-                continue
-            }
-            var end = start
-            while end + 1 < outs.count, outs[end + 1].moved { end += 1 }
-            if end - start + 1 < alongPoints {
-                for index in start...end { kept[index] = (unmoved(index), false) }
-            }
-            start = end + 1
-        }
-        return kept
-    }
-
-    /// `flags` with runs of up to `most` false between trues made true.
-    private static func fillGaps(_ flags: inout [Bool], upTo most: Int) {
-        var last: Int?
-        for index in flags.indices where flags[index] {
-            if let last, index - last > 1, index - last - 1 <= most {
-                for gap in (last + 1)..<index { flags[gap] = true }
-            }
-            last = index
-        }
-    }
-
-    /// `outs` averaged over `easing` points either way, so a line moved out eases out and back;
-    /// but where moved, never less far out than it must be, `out` the way it's moved (1 right,
-    /// -1 left), to keep it clear of the subway.
-    private static func eased(_ outs: [(points: CGFloat, moved: Bool)], out: CGFloat) -> [CGFloat] {
-        outs.indices.map { index in
-            let window = outs[max(0, index - easing)...min(outs.count - 1, index + easing)]
-            let average = window.reduce(0) { $0 + $1.points } / CGFloat(window.count)
-            guard outs[index].moved else { return average }
-            return out > 0 ? max(average, outs[index].points) : min(average, outs[index].points)
-        }
+        return tracks
     }
 
     /// The bus lines stopping within `meters` of `point`, nearest stop first: those a few
-    /// minutes' walk away, without asking Bus Time for its stops. By their stops (bus_stops.json),
+    /// minutes' walk away, without asking Bus Time for its stops. By their stops (`TrackShapes.busStops`),
     /// as Nearby's are, not their streets: an express bus on a highway, or a line turning at the
     /// end of its route, passes near without stopping.
     static func busLines(near point: CLLocationCoordinate2D, within meters: Double) -> [String] {
@@ -267,15 +134,37 @@ struct NearbyLines {
             && abs(stop.coordinate.longitude - point.longitude) < degrees * 1.4 {
             let distance = CLLocation(latitude: stop.coordinate.latitude, longitude: stop.coordinate.longitude).distance(from: here)
             guard distance < meters else { continue }
-            for line in stop.lines where TrackShapes.byBusLine[line] != nil {
+            // Only lines drawn (`BusNetwork`)
+            for line in stop.lines where BusNetwork.byLine[line] != nil {
                 nearest[line] = min(nearest[line] ?? .infinity, distance)
             }
         }
         return nearest.sorted { $0.value < $1.value || ($0.value == $1.value && $0.key < $1.key) }.map(\.key)
     }
 
-    /// `points`' bounds, `reach` round.
-    private static func box(around points: [CLLocationCoordinate2D]) -> MKMapRect? {
+    /// The lines stopping at the `nearestStops` bus stops nearest `place` within `busStopsReach`:
+    /// those Nearby draws round where it is, and New Trip round From before it's planned.
+    static func nearestStopsLines(near place: CLLocation?) -> Set<String> {
+        guard let place else { return [] }
+        let degrees = busStopsReach / Earth.metresPerDegree
+        let near = TrackShapes.busStops
+            .filter { abs($0.coordinate.latitude - place.coordinate.latitude) < degrees
+                && abs($0.coordinate.longitude - place.coordinate.longitude) < degrees * 1.4 }
+            .map { stop in
+                (stop: stop, meters: CLLocation(latitude: stop.coordinate.latitude, longitude: stop.coordinate.longitude)
+                    .distance(from: place))
+            }
+            .filter { $0.meters < busStopsReach }
+            .sorted { $0.meters < $1.meters }
+        return Set(near.prefix(nearestStops).flatMap(\.stop.lines))
+    }
+
+    /// Meters, and how many stops (about three places, a stop each way), whose lines are drawn.
+    static let busStopsReach: Double = 400
+    static let nearestStops = 6
+
+    /// `points`' bounds, `reach` meters round.
+    private static func box(around points: [CLLocationCoordinate2D], reach: Double) -> MKMapRect? {
         guard let first = points.first else { return nil }
         let mapPoints = points.map(MKMapPoint.init)
         let xs = mapPoints.map(\.x), ys = mapPoints.map(\.y)
@@ -285,24 +174,51 @@ struct NearbyLines {
                          width: (xs.max() ?? 0) - minX + pad * 2, height: (ys.max() ?? 0) - minY + pad * 2)
     }
 
+    /// A run's end joined onto a line drawn before it: that run, and its point.
+    struct Join {
+        let run: Int
+        let point: Int
+    }
+
+    /// A stretch of a route's shape drawn, and the runs before it its ends are joined onto.
+    struct Run {
+        let route: String
+        let points: [MKMapPoint]
+        var start: Join?
+        var end: Join?
+    }
+
     /// Each of `routes`' shapes, the longest first, where it's in `box` and not on one of its
-    /// route's already drawn (`acrossRoutes`, any route's).
+    /// colour's already drawn (the 4's for the 5 along Lexington Av, not where they part).
     private static func runs(of routes: [String], in shapes: [String: [[CLLocationCoordinate2D]]],
-                             box: MKMapRect, acrossRoutes: Bool = false) -> [(route: String, points: [MKMapPoint])] {
-        var runs: [(route: String, points: [MKMapPoint])] = []
+                             box: MKMapRect) -> [Run] {
+        var runs: [Run] = []
         var seen: Set<String> = []
         // A little over `sameTrack` a cell, as map points a meter vary a little across the box
         let cell = sameTrack * 1.1 * MKMapPointsPerMeterAtLatitude(MKMapPoint(x: box.midX, y: box.midY).coordinate.latitude)
         for route in routes where seen.insert(route).inserted {
-            var kept = PointGrid(acrossRoutes ? runs.flatMap(\.points) : [], cell: cell)
-            for shape in shapes[route] ?? [] {
+            let color = LineStyle.of(route).color
+            let isKept = { (run: Run) in LineStyle.of(run.route).color == color }
+            var kept = PointGrid(runs, where: isKept, cell: cell)
+            for (shapeIndex, shape) in (shapes[route] ?? []).enumerated() {
                 var run: [MKMapPoint] = []
                 var last: MKMapPoint?
-                func finish(at end: MKMapPoint?) {
+                // Whether the run began off the line drawn, rather than at the shape's start,
+                // and where on it
+                var startsJoined = false
+                var startJoin: Join?
+                func finish(at end: (point: MKMapPoint, join: Join?)?) {
                     // Joined to where it meets the track drawn, so a branch doesn't start apart
-                    if let end, !run.isEmpty { run.append(end) }
-                    if run.count > 1 { runs.append((route, run)) }
+                    if let end, !run.isEmpty { run.append(end.point) }
+                    let length = zip(run, run.dropFirst()).reduce(0) { $0 + $1.0.distance(to: $1.1) }
+                    // A subway route's other shape leaving its line drawn and back a little on (an
+                    // R detour beside Broadway, Prince St to Canal St) isn't a branch but a loop
+                    // beside it
+                    let isLoop = shapeIndex > 0 && startsJoined && end != nil && length < Self.loopLength
+                    if run.count > 1, !isLoop { runs.append(Run(route: route, points: run, start: startJoin, end: end?.join)) }
                     run = []
+                    startsJoined = false
+                    startJoin = nil
                 }
                 let points = TripMap.densified(shape).map(MKMapPoint.init)
                 var drawn = points.map { point in
@@ -324,19 +240,29 @@ struct NearbyLines {
                     }
                     start = end + 1
                 }
+                // Its ends joined onto the line drawn, not where its own track is, up to
+                // `sameTrack` off it: the 2 left loose beside the 1 at Chambers St
+                let onDrawn = { (point: MKMapPoint) -> (point: MKMapPoint, join: Join?) in
+                    kept.nearest(to: point, within: sameTrack).map { ($0.point, $0.join) } ?? (point, nil)
+                }
                 for (point, isDrawn) in zip(points, drawn) {
                     if !box.contains(point) {
                         finish(at: nil)
                     } else if isDrawn {
-                        finish(at: point)
+                        finish(at: onDrawn(point))
                     } else {
-                        if run.isEmpty, let last, box.contains(last) { run.append(last) }
+                        if run.isEmpty, let last, box.contains(last) {
+                            let joined = onDrawn(last)
+                            run.append(joined.point)
+                            startJoin = joined.join
+                            startsJoined = true
+                        }
                         run.append(point)
                     }
                     last = point
                 }
                 finish(at: nil)
-                kept = PointGrid(runs.filter { acrossRoutes || $0.route == route }.flatMap(\.points), cell: cell)
+                kept = PointGrid(runs, where: isKept, cell: cell)
             }
         }
         return runs
@@ -346,11 +272,16 @@ struct NearbyLines {
     /// point within a cell's width without looking at every one.
     private struct PointGrid {
         private let cell: Double
-        private var cells: [SIMD2<Int>: [MKMapPoint]] = [:]
+        private var cells: [SIMD2<Int>: [(point: MKMapPoint, join: Join)]] = [:]
 
-        init(_ points: [MKMapPoint], cell: Double) {
+        /// The points of `runs` that are `included`, each kept with its run and place on it.
+        init(_ runs: [Run], where included: (Run) -> Bool, cell: Double) {
             self.cell = cell
-            for point in points { cells[Self.square(of: point, cell: cell), default: []].append(point) }
+            for (index, run) in runs.enumerated() where included(run) {
+                for (place, point) in run.points.enumerated() {
+                    cells[Self.square(of: point, cell: cell), default: []].append((point, Join(run: index, point: place)))
+                }
+            }
         }
 
         private static func square(of point: MKMapPoint, cell: Double) -> SIMD2<Int> {
@@ -361,154 +292,124 @@ struct NearbyLines {
         func isNear(_ point: MKMapPoint, within meters: Double) -> Bool {
             let square = Self.square(of: point, cell: cell)
             for dx in -1...1 {
-                for dy in -1...1 where cells[square &+ SIMD2(dx, dy)]?.contains(where: { $0.distance(to: point) < meters }) == true {
+                for dy in -1...1 where cells[square &+ SIMD2(dx, dy)]?.contains(where: { $0.point.distance(to: point) < meters }) == true {
                     return true
                 }
             }
             return false
         }
+
+        /// The nearest within `meters` of `point`, `meters` no more than a cell across, and where it is.
+        func nearest(to point: MKMapPoint, within meters: Double) -> (point: MKMapPoint, join: Join)? {
+            let square = Self.square(of: point, cell: cell)
+            var best: (point: MKMapPoint, join: Join, meters: Double)?
+            for dx in -1...1 {
+                for dy in -1...1 {
+                    for near in cells[square &+ SIMD2(dx, dy)] ?? [] {
+                        let distance = near.point.distance(to: point)
+                        if distance < meters, distance < best?.meters ?? .infinity { best = (near.point, near.join, distance) }
+                    }
+                }
+            }
+            return best.map { ($0.point, $0.join) }
+        }
     }
 }
 
-/// Which side of its street a bus stop is on, from where it is off the street's line drawn, and
-/// so which way its buses go there, as they keep right; and where a street drawn has stops on
-/// both sides, so buses both ways, rather than one way (one of a one-way pair).
+/// Which way the buses at a stop go, and where on their line its mark sits: the nearest of its
+/// lines' ways (`BusNetwork`), each drawn on its own side of the street the way its buses go, so
+/// a stop at the kerb is nearest its own way's.
 struct BusSides {
     struct Way: Equatable {
         /// The way its buses go, as map points have it (x east, y south), in radians.
         let angle: Double
-        /// Whether buses run its street both ways there.
-        let twoWay: Bool
-        /// The stop's place on the street's line, for its mark to sit on or stem from.
+        /// The stop's place on its way's line, for its mark to sit on.
         let onLine: CLLocationCoordinate2D
-        /// The run it's along, the run's point nearest, and which side of the way it's drawn the
-        /// stop is: 1 right, -1 left.
-        let run: Int
-        let point: Int
-        let side: Int
 
         static func == (a: Way, b: Way) -> Bool {
-            a.angle == b.angle && a.twoWay == b.twoWay && a.run == b.run && a.point == b.point && a.side == b.side
-                && a.onLine.latitude == b.onLine.latitude && a.onLine.longitude == b.onLine.longitude
+            a.angle == b.angle && a.onLine.latitude == b.onLine.latitude && a.onLine.longitude == b.onLine.longitude
         }
     }
 
-    private let runs: [(route: String, points: [MKMapPoint])]
-    /// Each run's segments, by the square their middles are in.
-    private let grid: [SIMD2<Int>: [(run: Int, segment: Int)]]
+    private let ways: [(lines: Set<String>, points: [MKMapPoint])]
+    /// Each way's segments, by the square their middles are in.
+    private let grid: [SIMD2<Int>: [(way: Int, segment: Int)]]
     private let cell: Double
     private let pointsPerMeter: Double
-    private var twoWays: [[Bool]] = []
 
-    static let none = BusSides(runs: [])
+    static let none = BusSides(ways: [])
 
-    /// Meters off a street's line a stop may be to be on it: past the kerb of a wide avenue; and
-    /// on one of its own lines', past the far roadway of a boulevard drawn down the near one
-    /// (Queens Blvd's), not as far as the next street over.
-    private static let reach: Double = 35
+    /// Meters off its own lines' way a stop may be to be on it, past the far roadway of a
+    /// boulevard (Queens Blvd's); and off another's, for a stop of a line not drawn.
     private static let ownReach: Double = 60
-    /// Meters further its own lines' street may be than another's for a stop to be taken as on it.
+    private static let reach: Double = 30
+    /// Meters further its own lines' way may be than another's for a stop to be taken as on it.
     private static let ownBetter: Double = 15
-    /// Meters off it a stop must be to tell its side: the line drawn strays a few from the street's middle.
-    private static let leastOff: Double = 2
-    /// Points either way along a run (each up to 40 m, `TripMap.densified`) a stop each side is
-    /// looked for to take it as two-way: further than a stop each way is apart.
-    private static let twoWayReach = 8
+    /// Meters a way's segment is at most, for the grid's squares to hold all near a stop.
+    private static let longest: Double = 400
 
-    init(runs: [(route: String, points: [MKMapPoint])]) {
-        self.runs = runs
-        let latitude = runs.first?.points.first?.coordinate.latitude ?? 40.7
+    init(ways: [BusNetwork.Way]) {
+        self.ways = ways.map { (Set($0.lines), $0.coordinates.map(MKMapPoint.init)) }
+        let latitude = ways.first?.coordinates.first?.latitude ?? 40.7
         pointsPerMeter = MKMapPointsPerMeterAtLatitude(latitude)
-        // Segments are no more than 40 m, so one within `reach` has its middle in the square
-        // next to the stop's
-        cell = (Self.ownReach + 25) * pointsPerMeter
-        var grid: [SIMD2<Int>: [(run: Int, segment: Int)]] = [:]
-        for (index, run) in runs.enumerated() {
-            for segment in run.points.indices.dropLast() {
-                let a = run.points[segment], b = run.points[segment + 1]
-                grid[Self.square(MKMapPoint(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2), cell: cell), default: []]
-                    .append((index, segment))
+        cell = (Self.ownReach + Self.longest / 2) * pointsPerMeter
+        var grid: [SIMD2<Int>: [(way: Int, segment: Int)]] = [:]
+        for (index, way) in self.ways.enumerated() {
+            for segment in way.points.indices.dropLast() {
+                let a = way.points[segment], b = way.points[segment + 1]
+                // Long straight segments (simplified) in each square they cross, every half cell
+                let steps = max(1, Int((a.distance(to: b) / (cell / 2)).rounded(.up)))
+                var squares: Set<SIMD2<Int>> = []
+                for step in 0...steps {
+                    let t = Double(step) / Double(steps)
+                    squares.insert(Self.square(MKMapPoint(x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t), cell: cell))
+                }
+                for square in squares { grid[square, default: []].append((index, segment)) }
             }
         }
         self.grid = grid
-        guard !runs.isEmpty else { return }
-        // Each stop's side along the line it's on, for the runs with stops both sides
-        let xs = runs.flatMap { $0.points.map(\.x) }, ys = runs.flatMap { $0.points.map(\.y) }
-        let pad = Self.ownReach * pointsPerMeter
-        let box = MKMapRect(x: (xs.min() ?? 0) - pad, y: (ys.min() ?? 0) - pad,
-                            width: (xs.max() ?? 0) - (xs.min() ?? 0) + pad * 2,
-                            height: (ys.max() ?? 0) - (ys.min() ?? 0) + pad * 2)
-        var right = runs.map { $0.points.map { _ in 0 } }, left = right
-        for stop in TrackShapes.busStops {
-            let point = MKMapPoint(stop.coordinate)
-            guard box.contains(point), let near = nearest(point, lines: Set(stop.lines), only: true),
-                  abs(near.off) >= Self.leastOff else { continue }
-            if near.off > 0 { right[near.run][near.segment] += 1 } else { left[near.run][near.segment] += 1 }
-        }
-        twoWays = runs.indices.map { run in
-            let count = runs[run].points.count
-            // How many each side up to each point, to count those near it without counting again
-            let rights = right[run].reduce(into: [0]) { $0.append(($0.last ?? 0) + $1) }
-            let lefts = left[run].reduce(into: [0]) { $0.append(($0.last ?? 0) + $1) }
-            return (0..<count).map { index in
-                let from = max(0, index - Self.twoWayReach), to = min(count, index + Self.twoWayReach + 1)
-                return rights[to] - rights[from] > 0 && lefts[to] - lefts[from] > 0
-            }
-        }
     }
 
-    /// For each of run `index`'s points, whether buses run its street both ways there.
-    func twoWay(_ index: Int) -> [Bool] { twoWays.indices.contains(index) ? twoWays[index] : [] }
-
     /// Which way the buses at a stop at `coordinate` stopping for `lines` (as `TrackShapes.busKey`
-    /// has them) go: along the street drawn for one of them it's on, else any it's on. Nil off
-    /// any, or too near its middle to tell.
+    /// has them) go, and its place on their line: the nearest of its lines' ways, unless
+    /// another's is plainly nearer. Nil off any.
     func way(at coordinate: CLLocationCoordinate2D, lines: [String]) -> Way? {
         let point = MKMapPoint(coordinate)
-        // Its own lines' street, unless another drawn is plainly nearer: where the street it's on
-        // is drawn for another line, its own line's nearest may be round the corner
         let own = nearest(point, lines: Set(lines), only: true), any = nearest(point, lines: [], only: false)
-        let chosen: (run: Int, segment: Int, off: Double, onLine: MKMapPoint)? = switch (own, any) {
-        case let (own?, any?): own.onLine.distance(to: point) <= any.onLine.distance(to: point) + Self.ownBetter
+        let chosen: (way: Int, segment: Int, onLine: MKMapPoint)? = switch (own, any) {
+        case let (own?, any?): own.onLine.distance(to: point) <= any.onLine.distance(to: point) + Self.ownBetter * pointsPerMeter
             ? own : any
         case let (own?, nil): own
         case let (nil, any): any
         }
-        guard let near = chosen, abs(near.off) >= Self.leastOff else { return nil }
-        let a = runs[near.run].points[near.segment], b = runs[near.run].points[near.segment + 1]
-        let angle = near.off > 0 ? atan2(b.y - a.y, b.x - a.x) : atan2(a.y - b.y, a.x - b.x)
-        let twoWay = twoWays[near.run][near.segment] || twoWays[near.run][near.segment + 1]
-        // The nearer end of its segment
-        let nearer = a.distance(to: near.onLine) <= b.distance(to: near.onLine) ? near.segment : near.segment + 1
-        return Way(angle: angle, twoWay: twoWay, onLine: near.onLine.coordinate, run: near.run, point: nearer,
-                   side: near.off > 0 ? 1 : -1)
+        guard let near = chosen else { return nil }
+        let a = ways[near.way].points[near.segment], b = ways[near.way].points[near.segment + 1]
+        return Way(angle: atan2(b.y - a.y, b.x - a.x), onLine: near.onLine.coordinate)
     }
 
-    /// The segment nearest `point` within `reach`, of a run for one of `lines` within `ownReach` if `only`, meters
-    /// `point` is to its right (left, less than 0), and the nearest point on it.
-    private func nearest(_ point: MKMapPoint, lines: Set<String>, only: Bool)
-        -> (run: Int, segment: Int, off: Double, onLine: MKMapPoint)? {
+    /// The segment nearest `point`, of a way of one of `lines` within `ownReach` if `only`, else
+    /// any within `reach`, and the nearest point on it.
+    private func nearest(_ point: MKMapPoint, lines: Set<String>, only: Bool) -> (way: Int, segment: Int, onLine: MKMapPoint)? {
         let square = Self.square(point, cell: cell)
-        var best: (run: Int, segment: Int, off: Double, onLine: MKMapPoint, meters: Double)?
+        var best: (way: Int, segment: Int, onLine: MKMapPoint, meters: Double)?
+        var seen: Set<SIMD2<Int>> = []
         for dx in -1...1 {
             for dy in -1...1 {
-                for (run, segment) in grid[square &+ SIMD2(dx, dy)] ?? [] where !only || lines.contains(runs[run].route) {
-                    let a = runs[run].points[segment], b = runs[run].points[segment + 1]
+                for (way, segment) in grid[square &+ SIMD2(dx, dy)] ?? [] where !only || !lines.isDisjoint(with: ways[way].lines) {
+                    guard seen.insert(SIMD2(way, segment)).inserted else { continue }
+                    let a = ways[way].points[segment], b = ways[way].points[segment + 1]
                     let dx = b.x - a.x, dy = b.y - a.y
-                    let length = (dx * dx + dy * dy).squareRoot()
-                    guard length > 0 else { continue }
-                    // How far along, held to the segment, and how far off it
-                    let t = max(0, min(1, ((point.x - a.x) * dx + (point.y - a.y) * dy) / (length * length)))
+                    let length2 = dx * dx + dy * dy
+                    guard length2 > 0 else { continue }
+                    let t = max(0, min(1, ((point.x - a.x) * dx + (point.y - a.y) * dy) / length2))
                     let onLine = MKMapPoint(x: a.x + dx * t, y: a.y + dy * t)
                     let meters = hypot(point.x - onLine.x, point.y - onLine.y) / pointsPerMeter
                     guard meters <= (only ? Self.ownReach : Self.reach), meters < best?.meters ?? .infinity else { continue }
-                    // Right of the way it's drawn: map points' y runs south, so east's right is south
-                    let off = ((point.x - a.x) * -dy + (point.y - a.y) * dx) / length / pointsPerMeter
-                    best = (run, segment, off, onLine, meters)
+                    best = (way, segment, onLine, meters)
                 }
             }
         }
-        return best.map { ($0.run, $0.segment, $0.off, $0.onLine) }
+        return best.map { ($0.way, $0.segment, $0.onLine) }
     }
 
     private static func square(_ point: MKMapPoint, cell: Double) -> SIMD2<Int> {
@@ -516,27 +417,95 @@ struct BusSides {
     }
 }
 
-/// The map's zoom as lines side by side are drawn apart by it: map points a screen point is,
-/// held to quarter-octave steps. Followed as the map moves (not only where it comes to rest), so
-/// the lines stay about their width apart through a pinch, rather than bunching or splaying and
-/// jumping into place at its end; redrawn only as it passes a step, not every frame.
+/// The map's zoom as lines side by side are drawn apart by it: map points a screen point is.
+/// Only moved on where the map comes to rest, and only once it's well off: while the map moves,
+/// the lines keep their shape on the ground, so they and their stations scale with the map as
+/// one. Laid out again for each step through a pinch, MapKit re-added them a beat behind the map,
+/// off their stations' dots.
 enum LineScale {
     private static let stepsPerOctave = 4.0
-    /// Steps past `current` the map must be before it moves on, so it doesn't flicker back and
-    /// forth at a step's edge.
-    private static let hold = 0.75
+    /// Octaves zoomed in, or out, past `current` before the lines are laid out again: zoomed in,
+    /// lines side by side part a little; zoomed out, they're soon over each other.
+    private static let holdIn = 1.0
+    private static let holdOut = 0.5
 
-    /// `current`, or the step nearest `mapPointsPerPoint` once it's `hold` steps from it.
+    /// `current`, or `mapPointsPerPoint` once it's past the hold from it, or there's none yet.
     static func step(_ mapPointsPerPoint: Double, from current: Double) -> Double {
         guard mapPointsPerPoint > 0, mapPointsPerPoint.isFinite else { return current }
-        let level = log2(mapPointsPerPoint) * stepsPerOctave
-        if current > 0, abs(level - log2(current) * stepsPerOctave) < hold { return current }
-        return exp2(level.rounded() / stepsPerOctave)
+        guard current > 0 else { return mapPointsPerPoint }
+        // More map points a point is zoomed out
+        let octaves = log2(mapPointsPerPoint / current)
+        return octaves > holdOut || octaves < -holdIn ? mapPointsPerPoint : current
     }
 
     /// Which step `scale` is, for lines' ids.
     static func id(of scale: Double) -> Int {
         scale > 0 ? Int((log2(scale) * stepsPerOctave).rounded()) : 0
+    }
+}
+
+/// How finely the subway's lines are drawn for the map's zoom: every point close in (`full`);
+/// further out, at each octave's step, only those keeping each line within `tolerance` of its
+/// track, where more points than the eye can see were slow to draw. Laid out for the zoom the
+/// map rests at, as the lines are, with 10% either way of each step so it doesn't flicker
+/// between them.
+enum SubwayDetail: Hashable {
+    case full
+    /// From `closest` meters a point times 2^step, for an octave.
+    case simplified(step: Int)
+
+    /// Meters a point within which the lines are drawn whole, and the steps out from there.
+    static let closest: Double = 4
+    static let steps = 6
+    private static let margin = 1.1
+
+    init(metersPerPoint: Double, from shown: SubwayDetail? = nil) {
+        guard metersPerPoint.isFinite, metersPerPoint > 0 else {
+            self = shown ?? .full
+            return
+        }
+        let step = Int(floor(log2(metersPerPoint / Self.closest)))
+        let new: SubwayDetail = step < 0 ? .full : .simplified(step: min(step, Self.steps - 1))
+        // Kept while the map's within 10% of the zoom it was drawn for
+        if let shown, shown != new, shown.closestMeters / Self.margin <= metersPerPoint,
+           metersPerPoint < shown.farthestMeters * Self.margin {
+            self = shown
+        } else {
+            self = new
+        }
+    }
+
+    /// Meters a point at the closest and farthest of its zoom.
+    private var closestMeters: Double {
+        switch self {
+        case .full: 0
+        case .simplified(let step): Self.closest * pow(2, Double(step))
+        }
+    }
+
+    private var farthestMeters: Double {
+        switch self {
+        case .full: Self.closest
+        case .simplified(let step): step == Self.steps - 1 ? .infinity : Self.closest * pow(2, Double(step + 1))
+        }
+    }
+
+    /// Meters a line may be off its track: a quarter of a point at the closest of its zoom, so
+    /// still half a point an octave closer in, as the map's pinched in past it before the lines
+    /// are laid out again where it rests (`LineScale` holds an octave in). Nil, whole.
+    var tolerance: Double? {
+        switch self {
+        case .full: nil
+        case .simplified: closestMeters / 4
+        }
+    }
+
+    /// For lines' ids: nothing for `full`, as they always were.
+    var idPart: String {
+        switch self {
+        case .full: ""
+        case .simplified(let step): "d\(step)-"
+        }
     }
 }
 
@@ -550,116 +519,265 @@ struct NearbyLinesLayer: MapContent {
     /// The lines last drawn, kept by the map showing them, as the map's redrawn many times a
     /// second while it moves (for your dot and the marks), and they're slow to work out.
     let cache: Cache
-    /// How near the map is for bus streets: a line each way past zoomed out (`NearbyLines.busLanes`).
-    var zoom = BusZoom.far
 
     final class Cache {
         fileprivate var key: Key?
         fileprivate var drawn: [Drawn] = []
+        /// The subway's lines apart, kept while they're the same tracks at the same zoom however
+        /// the bus lines change: the whole city's, slow to offset and for MapKit to add again.
+        fileprivate var subwayKey: SubwayKey?
+        fileprivate var subway: [Drawn] = []
+        /// Each track's strips, and its line at each detail it's been drawn at, for the tracks
+        /// `laidOutFor`: worked out once each, not again as the map zooms back and forth.
+        fileprivate var laidOutFor: Int?
+        fileprivate var strips: [[Drawn]] = []
+        fileprivate var linesByDetail: [SubwayDetail: [Drawn?]] = [:]
 
         fileprivate struct Key: Equatable {
             let version: Int
-            let mapPointsPerPoint: Double
-            let zoom: BusZoom
+            /// Whether the bus lines show at the zoom (`farthest`): they don't change with it.
+            let busesShown: Bool
+        }
+
+        fileprivate struct SubwayKey: Equatable {
+            let tracksID: Int
+            /// Whether the subway shows at the zoom, and how finely it's drawn there.
+            let shown: Bool
+            let detail: SubwayDetail
         }
     }
 
-    /// Points either side of a two-way street's middle each way's line is drawn close in, and
-    /// how wide.
-    static let laneOut: CGFloat = 5
+    /// How wide each way of a bus line is drawn.
     private static let laneWidth: CGFloat = 2.5
 
     /// A line on its own, each of two or more side by side, and a bus route.
     static let lineWidth: CGFloat = 5
     static let besideWidth: CGFloat = 4
-    static let busWidth: CGFloat = 3
-    private static let busColor = BusBadge.blue.opacity(0.35)
-    private static let fadedBusColor = BusBadge.blue.opacity(0.1)
+    /// Bus blue at 35% (and 10%, faded) over the map, but solid, so lines sharing a lane, drawn
+    /// over each other, don't read darker.
+    private static let busColor = Color(UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0.08, green: 0.16, blue: 0.32, alpha: 1)
+            : UIColor(red: 0.62, green: 0.70, blue: 0.85, alpha: 1)
+    })
+    private static let fadedBusColor = Color(UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0.13, green: 0.14, blue: 0.17, alpha: 1)
+            : UIColor(red: 0.88, green: 0.90, blue: 0.94, alpha: 1)
+    })
 
     fileprivate struct Drawn: Identifiable {
         let id: String
         let coordinates: [CLLocationCoordinate2D]
         let color: Color
         let width: CGFloat
+        /// A shape filled (a subway line's strip, `coordinates` its outline), not a line stroked.
+        var filled = false
     }
 
     var body: some MapContent {
         ForEach(drawn) { line in
-            MapPolyline(coordinates: line.coordinates)
-                .stroke(line.color, style: StrokeStyle(lineWidth: line.width, lineCap: .round, lineJoin: .round))
+            if line.filled {
+                MapPolygon(coordinates: line.coordinates)
+                    .foregroundStyle(line.color)
+            } else {
+                MapPolyline(coordinates: line.coordinates)
+                    .stroke(line.color, style: StrokeStyle(lineWidth: line.width, lineCap: .round, lineJoin: .round))
+            }
         }
     }
 
-    /// Meters a point is, past which the map's zoomed out too far for the lines: their ends,
-    /// `NearbyLines.reach` out, would show, stopping short in the middle of the map.
+    /// Meters a point is, past which the map's zoomed out too far for the bus lines: a tangle of
+    /// pale lines across the borough, under the subway's.
     private static let farthest: Double = 8
+    /// And for the subway's, drawn their whole length: past the city, as far out as the maps go.
+    private static let farthestSubway: Double = 150
 
-    /// The lines, from `cache` while they're the same lines at the same zoom.
+    /// The lines, from `cache` while they're the same lines at the same zoom; the subway's
+    /// while they're the same tracks.
     private var drawn: [Drawn] {
-        let key = Cache.Key(version: version, mapPointsPerPoint: mapPointsPerPoint, zoom: zoom)
-        if cache.key != key {
-            cache.drawn = drawLines()
-            cache.key = key
+        let detail = SubwayDetail(metersPerPoint: metersPerPoint, from: cache.subwayKey?.detail)
+        let subwayKey = Cache.SubwayKey(tracksID: lines.tracksID, shown: metersPerPoint <= Self.farthestSubway,
+                                        detail: detail)
+        let key = Cache.Key(version: version, busesShown: metersPerPoint <= Self.farthest)
+        guard cache.key != key || cache.subwayKey != subwayKey else { return cache.drawn }
+        if cache.subwayKey != subwayKey {
+            cache.subway = drawSubway(detail: detail)
+            cache.subwayKey = subwayKey
         }
+        cache.drawn = drawBuses() + cache.subway
+        cache.key = key
         return cache.drawn
     }
 
-    /// New lines for each zoom, as MapKit keeps a line's last shape while its id stays.
-    private func drawLines() -> [Drawn] {
-        let metersPerPoint = mapPointsPerPoint / MKMapPointsPerMeterAtLatitude(lines.latitude)
-        guard metersPerPoint <= Self.farthest else { return [] }
-        let apart = Double(Self.besideWidth) * mapPointsPerPoint
-        let zoomStep = LineScale.id(of: mapPointsPerPoint)
-        // Bus lines drawn once keep theirs across zooms; each way's, apart by points, don't
-        // Moved out from under the subway by points, so new for each zoom
-        let buses = busLines(lines.buses, runs: lines.busRuns, id: "bus-\(version)-\(zoomStep)-\(zoom)", color: Self.busColor)
-        let faded = busLines(lines.fadedBuses, runs: lines.fadedRuns, id: "faded-bus-\(version)-\(zoomStep)-\(zoom)",
-                             color: Self.fadedBusColor)
-        let subway = lines.tracks.indices.map { index in
-            let track = lines.tracks[index]
-            return Drawn(id: "line-\(version)-\(zoomStep)-\(index)",
-                         coordinates: TripMap.offset(track.coordinates, by: track.lanes.map { $0 * apart }),
-                         color: LineStyle.of(track.route).swiftUIColor,
-                         width: track.isBeside ? Self.besideWidth : Self.lineWidth)
-        }
-        return faded + buses + subway
+    /// Meters a point is at the map's zoom.
+    private var metersPerPoint: Double {
+        mapPointsPerPoint / MKMapPointsPerMeterAtLatitude(lines.latitude)
     }
 
-    /// Bus streets as drawn (`runs`, `lines.sides`' runs): once, or a line each way where
-    /// `NearbyLines.busLanes` says, each way's to its right as buses keep; moved out from under
-    /// any subway lines over them (`NearbyLines.busOut`).
-    private func busLines(_ streets: [[CLLocationCoordinate2D]], runs: [Int], id: String, color: Color) -> [Drawn] {
-        let metersPerPoint = mapPointsPerPoint / MKMapPointsPerMeterAtLatitude(lines.latitude)
-        return streets.indices.flatMap { index -> [Drawn] in
-            let street = streets[index]
-            guard runs.indices.contains(index) else {
-                return [Drawn(id: "\(id)-\(index)", coordinates: street, color: color, width: Self.busWidth)]
-            }
-            let drawing = lines.busDrawing(run: runs[index], zoom: zoom, metersPerPoint: metersPerPoint)
-            guard drawing.both.count == street.count else {
-                return [Drawn(id: "\(id)-\(index)", coordinates: street, color: color, width: Self.busWidth)]
-            }
-            let both = drawing.both
-            // The way it's drawn, the whole street: its middle, or its way's line where there are two
-            let middles = drawing.middles.map { Double($0) * mapPointsPerPoint }
-            var drawn = [Drawn(id: "\(id)-\(index)", coordinates: TripMap.offset(street, by: middles), color: color,
-                               width: both.contains(true) ? Self.laneWidth : Self.busWidth)]
-            // The other way, only where there are two, joined to the one line either end
-            var start = 0
-            while start < both.count {
-                guard both[start] else {
-                    start += 1
-                    continue
+    /// Meters apart side-by-side subway lines' middles are, on the ground, and about how long
+    /// each piece of their strips is (`drawSubway`).
+    static let subwaySpacing: Double = 6
+    private static let pieceMeters: Double = 1609
+
+    /// The subway's lines, each laid out once for its tracks (`NearbyLines.tracksID`), not for
+    /// each zoom or each new `version`: side by side `subwaySpacing` apart on the ground, each a
+    /// line a fixed width over a strip as wide as the spacing, so lines side by side touch close
+    /// in and lie over each other further out, all scaling with the map as it zooms. The strips
+    /// in pieces about a mile long: whole, MapKit drew them flickering; shorter, there were too
+    /// many to draw smoothly. Each line with as many points as `detail` needs (`SubwayDetail`),
+    /// each detail worked out once; the strips the same at every zoom, as they're under their
+    /// lines past close in, and not added to the map again.
+    private func drawSubway(detail: SubwayDetail) -> [Drawn] {
+        guard metersPerPoint <= Self.farthestSubway else { return [] }
+        if cache.laidOutFor != lines.tracksID {
+            cache.strips = Self.strips(of: lines.tracks, tracksID: lines.tracksID, latitude: lines.latitude)
+            cache.linesByDetail = [:]
+            cache.laidOutFor = lines.tracksID
+        }
+        let drawnLines = cache.linesByDetail[detail] ?? Self.subwayLines(of: lines.tracks, tracksID: lines.tracksID,
+                                                                       detail: detail, latitude: lines.latitude).map { line in
+            line.map { Drawn(id: $0.id, coordinates: $0.coordinates, color: $0.color, width: $0.width) }
+        }
+        cache.linesByDetail[detail] = drawnLines
+        // Each track's strips under its line, as they always were
+        return lines.tracks.indices.flatMap { index in
+            (cache.strips.indices.contains(index) ? cache.strips[index] : [])
+                + (drawnLines.indices.contains(index) ? drawnLines[index].map { [$0] } ?? [] : [])
+        }
+    }
+
+    /// Each of `tracks`' strips, in pieces (`drawSubway`).
+    private static func strips(of tracks: [NearbyLines.Track], tracksID: Int, latitude: Double) -> [[Drawn]] {
+        let perMeter = MKMapPointsPerMeterAtLatitude(latitude)
+        let apart = subwaySpacing * perMeter
+        // A hair wider than the spacing, so neighbouring strips show no seam
+        let half = apart * 0.53
+        let limit = pieceMeters * perMeter
+        return tracks.enumerated().map { index, track in
+            guard track.coordinates.count > 1 else { return [] }
+            let middle = lanes(of: track).map { $0 * apart }
+            let color = LineStyle.of(track.route).swiftUIColor
+            let left = TripMap.offset(track.coordinates, by: middle.map { $0 - half })
+            let right = TripMap.offset(track.coordinates, by: middle.map { $0 + half })
+            guard left.count == right.count, left.count > 1 else { return [] }
+            var drawn: [Drawn] = []
+            let along = left.map(MKMapPoint.init)
+            var start = 0, piece = 0
+            while start < left.count - 1 {
+                var end = start + 1
+                var length = along[start].distance(to: along[end])
+                while end < left.count - 1, length < limit {
+                    length += along[end].distance(to: along[end + 1])
+                    end += 1
                 }
-                var end = start
-                while end + 1 < both.count, both[end + 1] { end += 1 }
-                let range = max(0, start - 1)...min(both.count - 1, end + 1)
-                drawn.append(Drawn(id: "\(id)-\(index)-other-\(start)",
-                                   coordinates: TripMap.offset(Array(street[range]), by: range.map { both[$0] ? Double(drawing.lefts[$0]) * mapPointsPerPoint : middles[$0] }),
-                                   color: color, width: Self.laneWidth))
-                start = end + 1
+                drawn.append(Drawn(id: "strip-\(tracksID)-\(index)-\(piece)",
+                                   coordinates: Array(left[start...end]) + Array(right[start...end]).reversed(),
+                                   color: color, width: 0, filled: true))
+                start = end
+                piece += 1
             }
             return drawn
+        }
+    }
+
+    /// A track's lanes, one for each of its points (none moved, if it has the wrong number).
+    private static func lanes(of track: NearbyLines.Track) -> [Double] {
+        track.lanes.count == track.coordinates.count ? track.lanes : Array(repeating: 0, count: track.coordinates.count)
+    }
+
+    /// A subway line as drawn: its id, its points moved out to its lane, its colour and width.
+    struct SubwayLine {
+        let id: String
+        let coordinates: [CLLocationCoordinate2D]
+        let color: Color
+        let width: CGFloat
+    }
+
+    /// Each of `tracks`' lines at `detail`, nil for one too short to draw: moved out to its lane,
+    /// then simplified (`simplified`), so it keeps within `tolerance` of where it's drawn whole,
+    /// and two side by side within twice that of where they were apart. Simplified before
+    /// they're moved out, keeping each point where a lane changes, too few were left out: lanes
+    /// ease from one to the next over most of their points. Its id the same for the same tracks
+    /// and detail; close in, as it always was.
+    static func subwayLines(of tracks: [NearbyLines.Track], tracksID: Int, detail: SubwayDetail,
+                            latitude: Double) -> [SubwayLine?] {
+        let perMeter = MKMapPointsPerMeterAtLatitude(latitude)
+        let apart = subwaySpacing * perMeter
+        return tracks.enumerated().map { index, track in
+            guard track.coordinates.count > 1 else { return nil }
+            var coordinates = TripMap.offset(track.coordinates, by: lanes(of: track).map { $0 * apart })
+            if let tolerance = detail.tolerance {
+                coordinates = simplified(coordinates, tolerance: tolerance * perMeter)
+            }
+            return SubwayLine(id: "line-\(tracksID)-\(detail.idPart)\(index)", coordinates: coordinates,
+                              color: LineStyle.of(track.route).swiftUIColor,
+                              width: track.isBeside ? besideWidth : lineWidth)
+        }
+    }
+
+    /// `coordinates` with only the points needed to keep within `tolerance` map points of the
+    /// line through them all (Douglas–Peucker), its ends kept: its points along a straight
+    /// stretch, every `TripMap.densified` step, aren't needed.
+    static func simplified(_ coordinates: [CLLocationCoordinate2D], tolerance: Double) -> [CLLocationCoordinate2D] {
+        let count = coordinates.count
+        guard count > 2, tolerance > 0 else { return coordinates }
+        let points = coordinates.map(MKMapPoint.init)
+        var keep = Array(repeating: false, count: count)
+        keep[0] = true
+        keep[count - 1] = true
+        // Between each two points kept, the farthest off the line between them kept, and so on
+        // till none is more than `tolerance` off
+        var stretches = [(0, count - 1)]
+        while let (first, end) = stretches.popLast() {
+            let a = points[first], b = points[end]
+            let dx = b.x - a.x, dy = b.y - a.y
+            let squared = dx * dx + dy * dy
+            var farthest = 0.0, farthestIndex = first
+            for index in (first + 1)..<end {
+                let p = points[index]
+                // How far `p` is from the segment a–b (from `a`, where they're the same point)
+                let along = squared == 0 ? 0 : max(0, min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / squared))
+                let x = a.x + along * dx - p.x, y = a.y + along * dy - p.y
+                let off = (x * x + y * y).squareRoot()
+                if off > farthest {
+                    farthest = off
+                    farthestIndex = index
+                }
+            }
+            guard farthest > tolerance else { continue }
+            keep[farthestIndex] = true
+            if farthestIndex - first > 1 { stretches.append((first, farthestIndex)) }
+            if end - farthestIndex > 1 { stretches.append((farthestIndex, end)) }
+        }
+        return keep.indices.filter { keep[$0] }.map { coordinates[$0] }
+    }
+
+    /// An id for a line drawn `coordinates`, as `kind` (its colour and zoom): the same while its
+    /// shape is, so a line that's the same as before keeps its place on the map, not taken off
+    /// and added again each time the lines are laid out (each a costly change to MapKit's map,
+    /// which flickered); new when its shape changes, as MapKit keeps a line's shape for its id.
+    private static func shapeID(_ kind: String, _ coordinates: [CLLocationCoordinate2D]) -> String {
+        var hasher = Hasher()
+        for point in coordinates {
+            hasher.combine(point.latitude)
+            hasher.combine(point.longitude)
+        }
+        return "\(kind)-\(hasher.finalize())"
+    }
+
+    /// The bus lines, faded first, each way on its own side of the street as it's placed on
+    /// the ground (`BusNetwork`): the same at every zoom, each kept on the map by its shape's id
+    /// while it's drawn. Ways the same as another's (a line and its Select Bus Service on one
+    /// lane) once.
+    private func drawBuses() -> [Drawn] {
+        guard metersPerPoint <= Self.farthest else { return [] }
+        var seen: Set<String> = []
+        let faded = lines.fadedBuses.map { (Self.shapeID("faded-bus", $0), $0, Self.fadedBusColor) }
+        let bright = lines.buses.map { (Self.shapeID("bus", $0), $0, Self.busColor) }
+        return (faded + bright).compactMap { id, coordinates, color in
+            guard coordinates.count > 1, seen.insert(id).inserted else { return nil }
+            return Drawn(id: id, coordinates: coordinates, color: color, width: Self.laneWidth)
         }
     }
 }

@@ -71,13 +71,24 @@ import Testing
         return Connection(first: arrival(4, trip: "r1"), arrival: atChange, next: next)
     }
 
-    @Test func waitsAreSpokenAsTheyreShown() {
-        #expect(connection(wait: 2).spokenWait(quick: false) == "2 minute wait")
-        #expect(connection(wait: 2).spokenWait(quick: true) == "2 minute wait, quick change")
-        // "<1 min" on the pill, not "0 minute wait"
-        #expect(connection(wait: 0.4).waitLabel == "<1 min")
-        #expect(connection(wait: 0.4).spokenWait(quick: true) == "under a minute's wait, quick change")
-        #expect(connection(wait: nil).spokenWait(quick: false) == "No train to change to")
-        #expect(connection(wait: 0, staysOn: true).spokenWait(quick: true) == "Stay on")
+    @Test func leewayIsSpokenAsItsShown() {
+        #expect(connection(wait: 2).spokenLeeway == "2 minutes of leeway")
+        #expect(connection(wait: 1.5).spokenLeeway == "1 minute of leeway")
+        // The walk to the other platform comes out of it
+        var walked = connection(wait: 6)
+        walked.walk = 120
+        #expect(walked.spokenLeeway == "4 minutes of leeway")
+        // Rounded down: 0.9 minutes is no leeway, not "1 minute"
+        #expect(connection(wait: 0.9).spokenLeeway == "no leeway")
+        #expect(connection(wait: nil).spokenLeeway == "No train to change to")
+        #expect(connection(wait: 0, staysOn: true).spokenLeeway == "Stay on")
+    }
+
+    @Test func leewayLabels() {
+        #expect(Leeway.label(6) == "6 minutes of leeway")
+        #expect(Leeway.label(1) == "1 minute of leeway")
+        #expect(Leeway.label(6, short: true) == "6 mins of leeway")
+        #expect(Leeway.label(1, short: true) == "1 min of leeway")
+        #expect(Leeway.label(0) == "No leeway")
     }
 }

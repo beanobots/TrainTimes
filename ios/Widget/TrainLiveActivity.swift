@@ -8,17 +8,16 @@ import WidgetKit
 struct TrainLiveActivity: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: TrainActivityAttributes.self) { context in
-            Group {
-                if let walk = shownState(context).walk {
-                    WalkBanner(context: context, walk: walk)
-                } else {
-                    CountdownBanner(context: context)
-                }
+            if let walk = shownState(context).walk {
+                // Light or dark as the phone's set to
+                WalkBanner(context: context, walk: walk)
+            } else {
+                CountdownBanner(context: context)
+                    // Always dark; the widget colours adapt to it
+                    .environment(\.colorScheme, .dark)
+                    .activityBackgroundTint(Color.boardBlack)
+                    .activitySystemActionForegroundColor(.white)
             }
-                // Always dark; the widget colours adapt to it
-                .environment(\.colorScheme, .dark)
-                .activityBackgroundTint(Color.boardBlack)
-                .activitySystemActionForegroundColor(.white)
         } dynamicIsland: { context in
             DynamicIsland {
                 // All below the camera so station and countdown share a row; inset from the edges
@@ -48,12 +47,9 @@ struct TrainLiveActivity: Widget {
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(.horizontal, 8)
                         }
-                        HStack(spacing: 8) {
-                            RefreshButton(route: trainRoute(context), fills: true)
-                            WalkButton(intent: StopCountdownIntent(), route: trainRoute(context), running: true, fills: true)
-                        }
-                        .environment(\.colorScheme, .dark)
-                        .padding(.horizontal, 24)
+                        RefreshButton(route: trainRoute(context), fills: true)
+                            .environment(\.colorScheme, .dark)
+                            .padding(.horizontal, 24)
                     }
                     }
                 }
@@ -83,7 +79,7 @@ struct TrainLiveActivity: Widget {
             } compactTrailing: {
                 if let walk = shownState(context).walk {
                     // The train and its minutes ("R 6:00"), the minutes alone where there's no
-                    // room; getting off on it; there, walking out. Sized to the digits, as a
+                    // room; getting off on it; walking out, the next turn. Sized to the digits, as a
                     // timer takes all the width it's offered.
                     let minutes = sizedWalkCountdown(context, walk: walk)
                         .font(.caption.weight(.semibold))
@@ -182,8 +178,37 @@ private struct CountdownBanner: View {
 private struct WalkBanner: View {
     let context: ActivityViewContext<TrainActivityAttributes>
     let walk: WalkState
+    @Environment(\.dynamicTypeSize) private var typeSize
+    @Environment(\.colorScheme) private var lockScreenScheme
+    @Environment(\.isLuminanceReduced) private var isLuminanceReduced
+
+    /// Light or dark as the phone's set to (`WalkState.dark`), not as the Lock Screen's
+    /// wallpaper is; dark whenever the Always-On display dims it.
+    private var colorScheme: ColorScheme {
+        isLuminanceReduced ? .dark : walk.dark.map { $0 ? .dark : .light } ?? lockScreenScheme
+    }
 
     var body: some View {
+        content
+            // Painted here as well as tinted, so the card's always the same light or dark as
+            // the words and map on it
+            .background(Color.boardBackground)
+            .environment(\.colorScheme, colorScheme)
+            .activityBackgroundTint(colorScheme == .dark ? Color.boardBlack : .white)
+            .activitySystemActionForegroundColor(colorScheme == .dark ? .white : .black)
+    }
+
+    @ViewBuilder private var content: some View {
+        // Walking, the turn over a map of it, once the app's drawn one; not at the biggest text
+        // sizes, whose words wouldn't fit over it
+        if let map = TurnMapPicture.load(walk, dark: colorScheme == .dark), !typeSize.isAccessibilitySize {
+            TurnCard(context: context, walk: walk, map: map)
+        } else {
+            plain
+        }
+    }
+
+    private var plain: some View {
         VStack(alignment: .leading, spacing: 10) {
             TurnRow(walk: walk, size: 44)
             Divider().overlay(Color.boardGray.opacity(0.4))
@@ -198,6 +223,158 @@ private struct WalkBanner: View {
         }
         .padding(16)
         .accessibilityElement(children: .contain)
+    }
+}
+
+/// The app's picture of the map round the next turn (`TurnMap`), walking to or from the train:
+/// light or dark, as the Lock Screen is.
+private enum TurnMapPicture {
+    static func load(_ walk: WalkState, dark: Bool) -> UIImage? {
+        guard walk.phase == .toTrain || walk.phase == .fromTrain, let name = walk.mapFile(dark: dark) else { return nil }
+        #if DEBUG
+        if walk.map == previewName { return preview(dark: dark) }
+        #endif
+        guard let url = SharedStore.url(named: name) else { return nil }
+        return UIImage(contentsOfFile: url.path)
+    }
+
+    #if DEBUG
+    /// The previews' `WalkState.map`: a drawn stand-in, as they have no App Group pictures.
+    static let previewName = "preview"
+
+    /// Blocks and streets with the walk up to the turn and right, as `TurnMap` places it.
+    private static func preview(dark: Bool) -> UIImage {
+        let size = CGSize(width: 360, height: WalkState.mapHeight)
+        return UIGraphicsImageRenderer(size: size).image { renderer in
+            let context = renderer.cgContext
+            (dark ? UIColor(white: 0.27, alpha: 1) : .white).setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+            (dark ? UIColor(white: 0.18, alpha: 1) : UIColor(red: 0.92, green: 0.91, blue: 0.89, alpha: 1)).setFill()
+            let turn = CGPoint(x: size.width * 0.8, y: size.height * 0.42)
+            for x in stride(from: turn.x - 300, through: size.width, by: 75) {
+                for y in stride(from: turn.y - 120, through: size.height, by: 60) {
+                    context.fill(CGRect(x: x + 9, y: y + 9, width: 57, height: 42))
+                }
+            }
+            let route = UIBezierPath()
+            route.move(to: CGPoint(x: turn.x, y: size.height))
+            route.addLine(to: turn)
+            route.addLine(to: CGPoint(x: size.width, y: turn.y))
+            route.lineWidth = 5
+            route.lineJoinStyle = .round
+            UIColor(red: 0, green: 0.48, blue: 1, alpha: 1).setStroke()
+            route.stroke()
+        }
+    }
+    #endif
+}
+
+/// The next turn over its map, the map the whole countdown: the arrow, how far and what to do,
+/// and the turn after or a faster trip, with the train on one line under them, on the left as
+/// the map fades out under them; the turn itself on the right.
+private struct TurnCard: View {
+    let context: ActivityViewContext<TrainActivityAttributes>
+    let walk: WalkState
+    let map: UIImage
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            // Filling the card without sizing it, which a filled picture would
+            Color.clear
+                .overlay {
+                    Image(uiImage: map)
+                        .resizable()
+                        .scaledToFill()
+                }
+                .clipped()
+                .accessibilityHidden(true)
+            // Solid enough under the words that the map's own labels don't show through
+            LinearGradient(stops: [.init(color: .boardBackground.opacity(0.97), location: 0),
+                                   .init(color: .boardBackground.opacity(0.92), location: 0.6),
+                                   .init(color: .clear, location: 0.84)],
+                           startPoint: .leading, endPoint: .trailing)
+            // The words wrap, never cut off: all of them if they fit the Lock Screen's height,
+            // else without the line after
+            ViewThatFits(in: .vertical) {
+                column(showsLine: true)
+                column(showsLine: false)
+            }
+            // Clear of the turn, right of the middle
+            .frame(maxWidth: 262, maxHeight: .infinity, alignment: .topLeading)
+            .padding(12)
+        }
+        // The Lock Screen's tallest, which `TurnMap` draws the map for
+        .frame(height: WalkState.mapHeight)
+        .accessibilityElement(children: .contain)
+    }
+
+    private func column(showsLine: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: walk.symbol)
+                    .font(.system(size: 21, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 38, height: 38)
+                    .background(Color.walkBlue, in: RoundedRectangle(cornerRadius: 9.5, style: .continuous))
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(walk.distance)
+                        .font(.system(size: 22, weight: .bold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(Color.boardText)
+                    Text(walk.instruction)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color.boardText)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if showsLine, let line = walk.faster ?? walk.detail {
+                        Text(line).font(.caption.weight(walk.faster == nil ? .regular : .semibold))
+                            .foregroundStyle(walk.faster == nil ? Color.boardGray : .orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.top, 1)
+                    }
+                }
+            }
+            .accessibilityElement(children: .combine)
+            Spacer(minLength: 8)
+            walkFooterRow(context, walk: walk)
+        }
+    }
+}
+
+/// `walkFooter` on one line, under the turn over its map: "(R) 7:35  4 mins of leeway",
+/// walking out "📍 The Town Hall  Arrive 9:52 AM".
+@ViewBuilder
+private func walkFooterRow(_ context: ActivityViewContext<TrainActivityAttributes>, walk: WalkState) -> some View {
+    switch walk.phase {
+    case .fromTrain, .off:
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: "mappin.circle.fill")
+                .font(.system(size: 22))
+                .foregroundStyle(.white, .red)
+                .accessibilityHidden(true)
+            Text(walk.endName).font(.subheadline.weight(.semibold)).foregroundStyle(Color.boardText)
+                .lineLimit(1)
+            if let arrives = walk.arrives {
+                Text("Arrive \(Spoken.clock(arrives))").font(.caption.weight(.medium)).foregroundStyle(Color.boardGray)
+                    .lineLimit(1)
+                    .fixedSize()
+            }
+        }
+        .accessibilityElement(children: .combine)
+    default:
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            RouteMark(route: trainRoute(context), size: 24)
+                // Centred on the countdown's digits
+                .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 7 }
+            markedCountdown(context, markSize: 11, size: 22)
+                .foregroundStyle(walkStatusColor(context))
+                .fixedSize()
+            Text(walkNote(walk) ?? context.attributes.heading)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(walkNoteColor(walk))
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+        }
     }
 }
 
@@ -216,23 +393,19 @@ private struct WalkIsland: View {
             }
         }
         .padding(.horizontal, 8)
+        // The island's always black; the colours adapt to it
+        .environment(\.colorScheme, .dark)
     }
 }
 
-/// A walk's buttons: "I'm on the train" at the station or the change, ↻ while there's a train
-/// to catch or ride, and the lit walk button, which ends the walk.
+/// A walk's buttons: "I'm on the train" at the station or the change. No ↻: the app and the
+/// push server keep a walk's times current. Swiping the activity away ends the walk.
 private func walkButtons(_ context: ActivityViewContext<TrainActivityAttributes>, walk: WalkState) -> some View {
     HStack(spacing: 6) {
         if walk.phase == .atStation || walk.phase == .changing {
             BoardButton(route: trainRoute(context))
         }
-        if walk.phase != .fromTrain && walk.phase != .off {
-            RefreshButton(route: trainRoute(context))
-        }
-        WalkButton(intent: StopCountdownIntent(), route: trainRoute(context), running: true)
-            .accessibilityLabel("End the walk")
     }
-    .environment(\.colorScheme, .dark)
 }
 
 /// The next turn, big: its arrow in a blue tile, how far, and what to do.
@@ -252,11 +425,11 @@ private struct TurnRow: View {
                 Text(walk.distance)
                     .font(.system(size: size * 0.5, weight: .bold, design: .rounded))
                     .monospacedDigit()
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Color.boardText)
                 // A little smaller rather than cut off: "Down the stairs at the NE corner of …"
                 Text(walk.instruction)
                     .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Color.boardText)
                     .lineLimit(2)
                     .minimumScaleFactor(0.6)
                 // A faster trip from here over the turn after
@@ -282,7 +455,7 @@ private func walkFooter(_ context: ActivityViewContext<TrainActivityAttributes>,
             RouteMark(route: trainRoute(context), size: 28)
             VStack(alignment: .leading, spacing: 0) {
                 markedCountdown(context, markSize: 12, size: 24)
-                    .foregroundStyle(statusColor(context))
+                    .foregroundStyle(walkStatusColor(context))
                 Text(walkNote(walk) ?? context.attributes.heading)
                     .font(.caption.weight(.medium))
                     .foregroundStyle(walkNoteColor(walk))
@@ -298,7 +471,7 @@ private func walkFooter(_ context: ActivityViewContext<TrainActivityAttributes>,
                     Text(timerInterval: now...getOff, countsDown: true)
                         .font(.system(size: 24, weight: .bold, design: .rounded))
                         .monospacedDigit()
-                        .foregroundStyle(.white)
+                        .foregroundStyle(Color.boardText)
                 }
                 Text("to \(walk.getOffAt ?? "your stop")")
                     .font(.caption.weight(.medium)).foregroundStyle(Color.boardGray).lineLimit(1)
@@ -311,7 +484,7 @@ private func walkFooter(_ context: ActivityViewContext<TrainActivityAttributes>,
                 .foregroundStyle(.white, .red)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 0) {
-                Text(walk.endName).font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
+                Text(walk.endName).font(.subheadline.weight(.semibold)).foregroundStyle(Color.boardText).lineLimit(1)
                 if let arrives = walk.arrives {
                     Text("Arrive \(Spoken.clock(arrives))").font(.caption.weight(.medium)).foregroundStyle(Color.boardGray)
                 }
@@ -320,18 +493,24 @@ private func walkFooter(_ context: ActivityViewContext<TrainActivityAttributes>,
     }
 }
 
-/// "2 min to spare", "You'll miss it", or which part to board once you're there (at a change,
-/// once there's no walk to it left to time).
+/// "2 mins of leeway", or which part to board once you're there (at a change, once there's no
+/// walk to it left to time). The countdown's always to a train you can catch (`WalkSession`),
+/// so never one you'll miss.
 private func walkNote(_ walk: WalkState) -> String? {
     let board = walk.part.map { "Board near the \($0)" }
     if walk.phase == .atStation || (walk.phase == .changing && walk.spare == nil) { return board }
-    guard let spare = walk.spare else { return nil }
-    return spare < 0 ? "You'll miss it · next train" : "\(spare) min to spare"
+    return walk.spare.map { Leeway.label($0, short: true) }
 }
 
 private func walkNoteColor(_ walk: WalkState) -> Color {
     guard walk.phase == .toTrain || walk.phase == .changing, let spare = walk.spare else { return .boardGray }
-    return spare >= 1 ? .liveGreen : .orange
+    return spare >= 1 ? .liveText : .orange
+}
+
+/// `statusColor`, for a walk's countdown, which is light or dark as the Lock Screen is:
+/// darker green, and black, in light.
+private func walkStatusColor(_ context: ActivityViewContext<TrainActivityAttributes>) -> Color {
+    shownState(context).isLive ? .liveText : .boardText
 }
 
 /// `walkCountdown` sized to its digits by a hidden placeholder, so it can sit beside a bullet.
@@ -346,7 +525,7 @@ private func sizedWalkCountdown(_ context: ActivityViewContext<TrainActivityAttr
         .monospacedDigit()
 }
 
-/// The compact island's countdown: to the train, to getting off on it, or to getting there.
+/// The compact island's countdown: to the train, to getting off on it, or to the next turn.
 private func walkCountdown(_ context: ActivityViewContext<TrainActivityAttributes>, walk: WalkState) -> Text {
     if walksToTrain(walk), isAtStation(context) { return Text(AtStation.shortLabel) }
     let now = Date.now
@@ -362,12 +541,13 @@ private func walksToTrain(_ walk: WalkState) -> Bool {
 }
 
 /// What the compact island counts down to: the train to catch, getting off the one you're on,
-/// or getting there.
+/// or walking out, the next turn.
 private func walkTarget(_ context: ActivityViewContext<TrainActivityAttributes>, walk: WalkState) -> Date? {
     switch walk.phase {
     case .toTrain, .atStation, .changing: shownState(context).train
     case .riding: walk.getOff
-    case .fromTrain, .off: walk.arrives
+    case .fromTrain: walk.turnAt ?? walk.arrives
+    case .off: walk.arrives
     }
 }
 
@@ -387,13 +567,10 @@ private func isAtStation(_ context: ActivityViewContext<TrainActivityAttributes>
     AtStation.covers(shownState(context).train, at: .now, seconds: context.state.heldSeconds)
 }
 
-/// ↻ and a lit walk button (stops the countdown).
+/// ↻. Swiping the activity away stops the countdown.
 private func buttons(_ context: ActivityViewContext<TrainActivityAttributes>) -> some View {
-    HStack(spacing: 6) {
-        RefreshButton(route: trainRoute(context))
-        WalkButton(intent: StopCountdownIntent(), route: trainRoute(context), running: true)
-    }
-    .environment(\.colorScheme, .dark)
+    RefreshButton(route: trainRoute(context))
+        .environment(\.colorScheme, .dark)
 }
 
 /// Live countdown to the train, stopping at 0:00; "At Station" once it's due, until it moves on
@@ -532,6 +709,15 @@ private extension TrainActivityAttributes {
         stationName: "4 Av-9 St", heading: "Manhattan", ends: .now.addingTimeInterval(2 * 60 * 60))
 }
 
+/// `walk` with the previews' stand-in map, as when the app's drawn one.
+private func mapped(_ walk: WalkState) -> WalkState {
+    var walk = walk
+    #if DEBUG
+    walk.map = TurnMapPicture.previewName
+    #endif
+    return walk
+}
+
 private extension CountdownState {
     static func walkPreview(_ walk: WalkState, route: String = "R") -> CountdownState {
         CountdownState(train: .now.addingTimeInterval(6 * 60), trip: route, isLive: true, terminal: "Forest Hills-71 Av",
@@ -577,6 +763,28 @@ private extension CountdownState {
     CountdownState.walkPreviews[3]
     CountdownState.walkPreviews[4]
     CountdownState.walkPreviews[5]
+}
+
+#Preview("Walk · Lock Screen map", as: .content, using: TrainActivityAttributes.walkPreview) {
+    TrainLiveActivity()
+} contentStates: {
+    CountdownState.walkPreview(mapped(WalkState(phase: .toTrain, symbol: "figure.walk", distance: "250 ft",
+                                                 instruction: "Cross 4th Ave",
+                                                 detail: "Then down the stairs at the 4 Av & Prospect Av entrance",
+                                                 spare: 4, part: "front", endName: "The Town Hall")))
+    CountdownState.walkPreview(mapped(WalkState(phase: .toTrain, symbol: "stairs", distance: "60 ft",
+                                                 instruction: "Down the stairs at the NE corner of 4 Av & Prospect Av",
+                                                 detail: "Then through the turnstiles to the Manhattan-bound platform",
+                                                 spare: 4, part: "front", endName: "The Town Hall")))
+    // Too long for everything: the line after goes
+    CountdownState.walkPreview(mapped(WalkState(phase: .toTrain, symbol: "figure.walk", distance: "400 ft",
+                                                 instruction: "Cross Flatbush Ave Extension at the light, then keep on along the north side of Tillary St",
+                                                 detail: "Then down the stairs at the SW corner of Jay St & Tillary St",
+                                                 spare: 0, part: "front", endName: "The Town Hall")))
+    CountdownState.walkPreview(mapped(WalkState(phase: .fromTrain, symbol: "arrow.turn.up.right", distance: "230 ft",
+                                                 instruction: "Take a right onto W 43rd St",
+                                                 detail: "Then arrive at the destination",
+                                                 endName: "The Town Hall", arrives: .now.addingTimeInterval(3 * 60))))
 }
 
 #Preview("Walk · Island compact", as: .dynamicIsland(.compact), using: TrainActivityAttributes.walkPreview) {

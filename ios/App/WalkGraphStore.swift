@@ -63,6 +63,11 @@ actor WalkGraphStore {
     /// it, then a wider band of them if there's no route in those.
     func walk(from start: Walk.Point, to end: Walk.Point, options: WalkRouter.Options) -> Result<Walk, Missed> {
         guard open() != nil else { return .failure(.noFile) }
+        // Not a place at all (NaN, kCLLocationCoordinate2DInvalid): its tiles can't be counted,
+        // and the box round one would be most of the world's
+        guard [start, end].allSatisfy({ abs($0.lat) <= 90 && abs($0.lon) <= 180 }) else { return .failure(.noGraph) }
+        // Far past any walk `mostForAWalk` tiles could hold, without making the box of them first
+        guard start.metres(to: end) <= Double(Self.mostForAWalk) * WalkGraph.tile else { return .failure(.tooFar) }
         var missed = Missed.noGraph
         for margin in Self.margins {
             let along = WalkGraph.tiles(along: start, to: end, metres: margin)
@@ -85,6 +90,23 @@ actor WalkGraphStore {
         tiles = [:]
         used = []
         routers = []
+    }
+
+    /// The graph of the tiles round `points`' box, for Prototyping's map overlays; nil past
+    /// `most` tiles, or without the file.
+    func graph(around points: [Walk.Point], most: Int) -> WalkGraph? {
+        guard let database = open() else { return nil }
+        let wanted = WalkGraph.tiles(around: points, metres: 0)
+        guard wanted.count <= most else { return nil }
+        var arrays: [[String: Data]] = []
+        for (x, y) in wanted {
+            let key = "\(x),\(y)"
+            if let tile = tiles[key] ?? read(x: x, y: y, from: database) {
+                remember(tile, as: key)
+                arrays.append(tile)
+            }
+        }
+        return arrays.isEmpty ? nil : try? WalkGraph(tiles: arrays, names: names)
     }
 
     /// The router on `wanted` tiles: one kept, if there's one on the same tiles, or made.

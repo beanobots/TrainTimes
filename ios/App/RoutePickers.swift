@@ -2,9 +2,10 @@ import CoreLocation
 import MapKit
 import SwiftUI
 
-/// New Widget: Subway, Bus or Citi Bike first, then that kind's steps (a train's Station →
-/// Lines → Direction; a bus's Stop → Route → Direction; a dock), which hand `done` the widget to
-/// name. With `kind`, straight to that kind's steps, to change a widget's bus or dock.
+/// New Widget: Subway or Bus first, then that kind's steps (a train's Station → Lines →
+/// Direction; a bus's Stop → Route → Direction), which hand `done` the widget to name. With
+/// `kind`, straight to that kind's steps, to change a widget's bus. Citi Bike docks are the
+/// Citi Bike widget's, picked in its Edit menu.
 struct NewWidgetPicker: View {
     var kind: SavedRouteKind? = nil
     /// The route whose departure is being changed: its train is ticked and kept as the start,
@@ -29,7 +30,6 @@ struct NewWidgetPicker: View {
         case busStop
         case busRoute(NearbyBusPlace)
         case busDirection(NearbyBusPick, stopName: String)
-        case dock
     }
 
     var body: some View {
@@ -49,12 +49,12 @@ struct NewWidgetPicker: View {
         case nil:
             KindStep { kind in
                 switch kind {
-                case .subway: path.append(.station)
+                // From your Home Station; From, To and the ways there are planned on the route's page
+                case .subway, .bike: finish(SavedWidget(selection: subwayStart))
                 case .bus: path.append(.busStop)
-                case .bike: path.append(.dock)
                 }
             }
-        case .subway, .bus:
+        case .subway, .bus, .bike:
             if editing != nil {
                 departureStep
             } else if kind == .subway {
@@ -62,7 +62,6 @@ struct NewWidgetPicker: View {
             } else {
                 busStopStep
             }
-        case .bike: dockStep
         }
     }
 
@@ -110,8 +109,6 @@ struct NewWidgetPicker: View {
             }
         case .busDirection(let pick, let stopName):
             BusDirectionStep(pick: pick, stopName: stopName) { finish(.bus($0)) }
-        case .dock:
-            dockStep
         }
     }
 
@@ -130,7 +127,7 @@ struct NewWidgetPicker: View {
     private var busStopStep: some View {
         BusStopStep { place in
             // One line there: straight to its direction
-            let lines = place.lines(at: .now)
+            let lines = place.lines(at: AppClock.now)
             if lines.count == 1, let line = lines.first {
                 path.append(.busDirection(line, stopName: place.name))
             } else {
@@ -139,8 +136,11 @@ struct NewWidgetPicker: View {
         }
     }
 
-    private var dockStep: some View {
-        DockStep { finish(.dock($0)) }
+    /// Where a new subway route starts: your Home Station, all its lines.
+    private var subwayStart: Selection {
+        var start = settings.defaultTrain
+        if let station = start.station { start.routes = station.routes }
+        return start
     }
 
     private func finish(_ widget: SavedWidget) {
@@ -151,15 +151,14 @@ struct NewWidgetPicker: View {
 
 // MARK: - Kind
 
-/// The first page: Subway, Bus and Citi Bike, each with a sample from where you are: your Home
-/// Station's lines (else the nearest station's), the nearest stop's routes, the nearest dock's
-/// counts. Without them, just the icon and name.
+/// The first page: Subway and Bus, each with a sample from where you are: your Home Station's
+/// lines (else the nearest station's), the nearest stop's routes. Without them, just the icon
+/// and name.
 private struct KindStep: View {
     let pick: (SavedRouteKind) -> Void
     @Environment(SettingsStore.self) private var settings
     @State private var location = NearbyLocation()
     @State private var busLines: [String] = []
-    @State private var dock: CitiBike.Dock?
 
     /// Home Station's lines, else the nearest station's.
     private var subwayLines: [String] {
@@ -173,27 +172,25 @@ private struct KindStep: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 12) {
-                tile(.subway, tint: .black) {
+                tile(.subway, tint: .black, value: Lines.spokenList(Array(subwayLines.prefix(5)))) {
                     if !subwayLines.isEmpty {
                         HStack(spacing: 5) {
                             ForEach(subwayLines.prefix(5), id: \.self) { LineBullet(route: $0, size: 26) }
                         }
                     }
                 }
-                tile(.bus, tint: BusBadge.blue) {
+                tile(.bus, tint: BusBadge.blue, value: Lines.joined(Array(busLines.prefix(3)))) {
                     if !busLines.isEmpty {
                         HStack(spacing: 5) {
                             ForEach(busLines.prefix(3), id: \.self) { BusBadge(line: $0, size: 26) }
                         }
                     }
                 }
-                tile(.bike, tint: CitiBikeMark.blue) {
-                    if let dock {
-                        Text("\(CitiBike.Kind.bike.count(dock.available(.bike))) · \(CitiBike.Kind.eBike.count(dock.available(.eBike))) · \(dock.free) docks")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(CitiBikeMark.blue)
-                    }
-                }
+                Text("Citi Bike docks are now their own widget. Add the Citi Bike widget from the Home Screen.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 4)
             }
             .padding(.horizontal, 16)
             .padding(.top, 12)
@@ -206,16 +203,16 @@ private struct KindStep: View {
             // Only where you've already allowed it: this page doesn't ask
             if location.isAllowed { location.find() }
         }
-        .task(id: location.location.map { "\($0.coordinate.latitude),\($0.coordinate.longitude)" }) {
+        // Again once you've moved about 100 m, as the server keys its answers, not with each fix
+        .task(id: location.location.map { String(format: "%.3f,%.3f", $0.coordinate.latitude, $0.coordinate.longitude) }) {
             guard let here = location.location else { return }
-            async let places = NearbyBuses.places(near: here, wait: NearbyBuses.appWait)
-            async let docks = CitiBike.docks()
-            dock = await docks?.min { $0.location.distance(from: here) < $1.location.distance(from: here) }
-            busLines = await places?.first?.lines(at: .now).map(\.line) ?? []
+            let places = await NearbyBuses.places(near: here, wait: NearbyBuses.appWait)
+            busLines = places?.first?.lines(at: AppClock.now).map(\.line) ?? []
         }
     }
 
-    private func tile(_ kind: SavedRouteKind, tint: Color, @ViewBuilder sample: () -> some View) -> some View {
+    private func tile(_ kind: SavedRouteKind, tint: Color, value: String,
+                      @ViewBuilder sample: () -> some View) -> some View {
         Button {
             pick(kind)
         } label: {
@@ -242,6 +239,8 @@ private struct KindStep: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(kind.name)
+        // What the sample shows: the lines near you, or the dock's counts
+        .accessibilityValue(value)
     }
 }
 
@@ -350,7 +349,8 @@ private struct BusStopStep: View {
             location.start()
             if location.isAllowed { location.find() }
         }
-        .task(id: location.location.map { "\($0.coordinate.latitude),\($0.coordinate.longitude)" }) {
+        // Again once you've moved about 100 m, as the server keys its answers, not with each fix
+        .task(id: location.location.map { String(format: "%.3f,%.3f", $0.coordinate.latitude, $0.coordinate.longitude) }) {
             guard searched == nil, let here = location.location else { return }
             await find(near: here, named: nil)
         }
@@ -376,7 +376,7 @@ private struct BusStopStep: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(place.name)
                 HStack(spacing: 4) {
-                    ForEach(place.lines(at: .now).prefix(5).map(\.line), id: \.self) { BusBadge(line: $0, size: 16) }
+                    ForEach(place.lines(at: AppClock.now).prefix(5).map(\.line), id: \.self) { BusBadge(line: $0, size: 16) }
                 }
             }
             Spacer()
@@ -397,12 +397,12 @@ private struct BusRouteStep: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(place.name).font(.title2.bold())
-                    Text("Pick the route to show").font(.subheadline).foregroundStyle(.secondary)
+                    Text(place.name).font(.title2.bold()).accessibilityAddTraits(.isHeader)
+                    Text("Pick the bus to show").font(.subheadline).foregroundStyle(.secondary)
                 }
                 .padding(.vertical, 12)
                 VStack(alignment: .leading, spacing: 14) {
-                    let lines = place.lines(at: .now)
+                    let lines = place.lines(at: AppClock.now)
                     ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
                         if index > 0 { Divider() }
                         Button {
@@ -433,15 +433,18 @@ private struct BusRouteStep: View {
         .background(Color(.systemGroupedBackground))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .principal) { StepTitle(title: "Route", step: 1) }
+            ToolbarItem(placement: .principal) { StepTitle(title: "Bus", step: 1) }
         }
     }
 }
 
 /// Bus step 3: which way, as a train's Direction tiles in bus blue, with Both where it goes two.
-private struct BusDirectionStep: View {
+struct BusDirectionStep: View {
     let pick: NearbyBusPick
     let stopName: String
+    /// The way ticked, by index in `pick.ways`, and whether Both is; nil for none.
+    var chosen: Int? = nil
+    var bothChosen = false
     let done: (BusChoice) -> Void
     @Environment(\.dynamicTypeSize) private var textSize
 
@@ -460,14 +463,14 @@ private struct BusDirectionStep: View {
             VStack(spacing: 12) {
                 VStack(spacing: 6) {
                     BusBadge(line: pick.line, size: 44)
-                    Text(stopName).font(.title2.bold())
+                    Text(stopName).font(.title2.bold()).accessibilityAddTraits(.isHeader)
                     Text("Which way are you going?").font(.subheadline).foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 16)
                 TimelineView(.periodic(from: .now, by: 15)) { context in
                     tiles {
-                        ForEach(pick.ways.indices, id: \.self) { tile($0, now: context.date) }
+                        ForEach(pick.ways.indices, id: \.self) { tile($0, now: AppClock.pretend(context.date)) }
                     }
                 }
                 if pick.ways.count == 2 {
@@ -482,12 +485,17 @@ private struct BusDirectionStep: View {
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                             Spacer(minLength: 0)
+                            if chosen != nil || bothChosen { ChosenMark(chosen: bothChosen) }
                         }
                         .padding(16)
                         .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle.pickerCard)
+                        .overlay {
+                            if bothChosen { RoundedRectangle.pickerCard.strokeBorder(Color.accentColor, lineWidth: 3) }
+                        }
                         .contentShape(RoundedRectangle.pickerCard)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityAddTraits(bothChosen ? .isSelected : [])
                 }
             }
             .padding(.horizontal, 16)
@@ -532,7 +540,11 @@ private struct BusDirectionStep: View {
             done(choice(index, both: false))
         } label: {
             VStack(alignment: .leading, spacing: 0) {
-                disc(compass?.symbol ?? "arrow.forward")
+                HStack {
+                    disc(compass?.symbol ?? "arrow.forward")
+                    Spacer()
+                    if chosen != nil || bothChosen { ChosenMark(chosen: chosen == index && !bothChosen) }
+                }
                 Spacer(minLength: 18)
                 if let compass {
                     Text(compass.name).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
@@ -556,152 +568,38 @@ private struct BusDirectionStep: View {
             .padding(16)
             .frame(maxWidth: .infinity, minHeight: 210, alignment: .topLeading)
             .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+            .chosenRing(chosen == index && !bothChosen)
             .contentShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
         }
         .buttonStyle(.plain)
-    }
-}
-
-// MARK: - Citi Bike
-
-/// Citi Bike's one step: a dock, nearest first (to you, or to a street or place searched for),
-/// each with its bikes, e-bikes and free docks in columns. Typing filters by name too.
-private struct DockStep: View {
-    let pick: (DockChoice) -> Void
-    @Environment(\.openURL) private var openURL
-    @State private var location = NearbyLocation()
-    @State private var search = ""
-    @State private var docks: [CitiBike.Dock]?
-    @State private var failed = false
-    /// Where a submitted search found, to sort by; nil for near you.
-    @State private var searchedPlace: (name: String, location: CLLocation)?
-
-    private var origin: CLLocation? { searchedPlace?.location ?? location.location }
-
-    private var shown: [CitiBike.Dock] {
-        guard let docks else { return [] }
-        let text = search.trimmingCharacters(in: .whitespaces)
-        let named = text.isEmpty || searchedPlace != nil ? docks : docks.filter { $0.name.localizedCaseInsensitiveContains(text) }
-        guard let origin else { return Array(named.sorted { $0.name < $1.name }.prefix(60)) }
-        // Each dock's distance once, not again at every comparison of the sort
-        return named.map { (dock: $0, meters: $0.location.distance(from: origin)) }
-            .sorted { $0.meters < $1.meters }.prefix(30).map { $0.dock }
+        .accessibilityAddTraits(chosen == index && !bothChosen ? .isSelected : [])
+        // The minutes as one phrase, not "5, min, then 7, 12"
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel([compass?.name, way.name].compactMap(\.self).joined(separator: ", "))
+        .accessibilityValue(spokenMinutes(coming, now: now))
+        .accessibilityAddTraits(.isButton)
     }
 
-    var body: some View {
-        List {
-            if search.isEmpty, !location.isAllowed {
-                Section {
-                    Button {
-                        // Denied: find() asks nothing, so Settings is where to turn it on
-                        if location.status == .denied, let url = URL(string: UIApplication.openSettingsURLString) {
-                            openURL(url)
-                        } else {
-                            location.find()
-                        }
-                    } label: {
-                        Label("Show docks near you", systemImage: "location")
-                    }
-                }
-            }
-            if docks != nil {
-                Section {
-                    ForEach(shown, id: \.id) { dock in
-                        Button {
-                            pick(DockChoice(dock))
-                        } label: {
-                            row(dock)
-                        }
-                        .foregroundStyle(.primary)
-                    }
-                } header: {
-                    Text(searchedPlace.map { "Near \($0.name)" } ?? (origin == nil ? "Docks" : "Near you"))
-                } footer: {
-                    if !search.isEmpty, searchedPlace == nil {
-                        Text("Search to find docks near a street or place.")
-                    }
-                }
-            } else if failed {
-                Section { Text("Couldn't reach Citi Bike").foregroundStyle(.secondary) }
-            } else {
-                Section {
-                    HStack(spacing: 8) {
-                        ProgressView()
-                        Text("Finding docks…").foregroundStyle(.secondary)
-                    }
-                }
-            }
-        }
-        .searchable(text: $search, prompt: "Search docks or streets")
-        .onSubmit(of: .search) {
-            let text = search.trimmingCharacters(in: .whitespaces)
-            guard !text.isEmpty else { return }
-            Task {
-                if let found = await findPlace(text) { searchedPlace = (text, found) }
-            }
-        }
-        .onChange(of: search) { _, text in
-            if searchedPlace != nil, text != searchedPlace?.name { searchedPlace = nil }
-        }
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .principal) { StepTitle(title: "Dock", step: 0, count: 1) }
-        }
-        .onAppear {
-            location.start()
-            if location.isAllowed { location.find() }
-        }
-        .task {
-            let found = await CitiBike.docks()
-            failed = found == nil
-            docks = found
-        }
-    }
-
-    private func row(_ dock: CitiBike.Dock) -> some View {
-        HStack(spacing: 12) {
-            CitiBikeMark(size: 30)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(dock.name).lineLimit(2)
-                if let origin {
-                    Text(distance(dock.location.distance(from: origin)))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            Spacer(minLength: 8)
-            HStack(spacing: 10) {
-                column(dock.available(.bike), "Bikes")
-                column(dock.available(.eBike), "E-Bikes")
-                column(dock.free, "Docks")
-            }
-        }
-        .accessibilityElement(children: .combine)
-    }
-
-    private func column(_ number: Int, _ name: String) -> some View {
-        VStack(spacing: 0) {
-            Text("\(number)")
-                .font(.headline)
-                .monospacedDigit()
-            Text(name)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-        }
-        .frame(minWidth: 38)
+    /// "Next in 5 minutes, then 7 and 12 minutes".
+    private func spokenMinutes(_ coming: [Date], now: Date) -> String {
+        guard let next = coming.first else { return "" }
+        let first = MinutesToGo(until: next, from: now)
+        let lead = first.isNow ? "Next now" : "Next in \(first.spoken)"
+        let then = coming.dropFirst().prefix(2).map { "\(MinutesToGo(until: $0, from: now).count)" }
+        return then.isEmpty ? lead : "\(lead), then \(Lines.joined(then)) minutes"
     }
 }
 
 // MARK: - Fields
 
-/// A bus or dock widget's fields, for adding and editing it: its name, then its bus or dock (a
-/// tap picks another), and for a bus going two ways, Both directions.
+/// A bus widget's fields, for adding and editing it: its name, then its bus (a tap picks
+/// another), and for a bus going two ways, Both directions.
 struct RouteFields: View {
     @Binding var widget: SavedWidget
     @State private var choosing = false
     @State private var addingChange = false
 
-    private var placeholder: String { widget.bus?.stopName ?? widget.dock?.name ?? "Name" }
+    private var placeholder: String { widget.summary }
 
     var body: some View {
         Section {
@@ -726,12 +624,6 @@ struct RouteFields: View {
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
                         }
-                    } else if let dock = widget.dock {
-                        CitiBikeMark(size: 28)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(dock.name).font(.body)
-                            Text("Citi Bike dock").font(.subheadline).foregroundStyle(.secondary)
-                        }
                     }
                     Spacer()
                     Image(systemName: "chevron.right")
@@ -741,7 +633,7 @@ struct RouteFields: View {
                 .contentShape(Rectangle())
             }
             .foregroundStyle(.primary)
-            .accessibilityHint(widget.kind == .bus ? "Picks another bus" : "Picks another dock")
+            .accessibilityHint("Picks another bus")
             if widget.kind == .bus, widget.bus?.otherStop != nil {
                 Toggle("Both directions", isOn: Binding {
                     widget.bus?.bothWays ?? false
@@ -777,6 +669,7 @@ struct RouteFields: View {
                     }
                 }
                 .padding(.vertical, 4)
+                .accessibilityElement(children: .combine)
             }
             .onDelete { offsets in
                 widget.bus?.changes?.remove(atOffsets: offsets)
@@ -805,7 +698,7 @@ extension SavedWidget {
     mutating func takeDeparture(_ picked: SavedWidget) {
         bothWays = picked.bothWays
         switch picked.kind {
-        case .subway:
+        case .subway, .bike:
             // From a bus there's no train to keep a change or destination for
             if kind != .subway {
                 change = nil
@@ -820,11 +713,8 @@ extension SavedWidget {
             destinationID = nil
             bus = picked.bus
             dock = nil
-        case .bike:
-            bus = nil
-            dock = picked.dock
         }
-        kind = picked.kind
+        kind = picked.kind == .bike ? .subway : picked.kind
     }
 }
 

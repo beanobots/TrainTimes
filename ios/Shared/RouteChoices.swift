@@ -56,9 +56,22 @@ struct BusChoice: Codable, Hashable, Sendable {
     /// Changes to a train further on, each an alternative: the medium and large widgets show the
     /// ways on, as a train's change does. Nil in saves from before.
     var changes: [BusChange]? = nil
+    /// Planned From and To (`SavedWidget.trip`): the widget follows these ways rather than
+    /// `changes`.
+    var planned: PlannedTrip? = nil
 
     /// The lines ridden, `line` first.
     var allLines: [String] { lines.flatMap { $0.isEmpty ? nil : $0 } ?? [line] }
+
+    /// As a countdown keeps it (`TrainActivityAttributes.bus`, the push server's sign-up): its
+    /// stop and lines, without the changes and plan on that only widgets follow, which the
+    /// server refuses and which can take the activity over iOS's limit.
+    var forCountdown: BusChoice {
+        var bus = self
+        bus.changes = nil
+        bus.planned = nil
+        return bus
+    }
 
     /// "4 Av & 9 St".
     var stopName: String { BusNames.readable(stop.name) }
@@ -86,6 +99,7 @@ extension BusChoice {
         otherDestination = try values.decodeIfPresent(String.self, forKey: .otherDestination)
         bothWays = try values.decodeIfPresent(Bool.self, forKey: .bothWays) ?? false
         changes = try values.decodeIfPresent([BusChange].self, forKey: .changes)
+        planned = try? values.decodeIfPresent(PlannedTrip.self, forKey: .planned)
     }
 
     /// "Q06" as "Q6": the number without its leading zeros.
@@ -174,7 +188,7 @@ enum BusNames {
         return name.isEmpty ? line : name
     }
 
-    /// Bus Time's capitals, or Google's names, as a sign has them: "7 AV/9 ST" as "7 Av & 9 St",
+    /// Bus Time's capitals, or the timetable's, as a sign has them: "7 AV/9 ST" as "7 Av & 9 St",
     /// "via" and "at" kept small, "LGA/TERMINAL B" as "LGA & Terminal B".
     static func readable(_ name: String) -> String {
         name.capitalized
@@ -194,12 +208,146 @@ enum BusNames {
     /// via Nstrnd via Rgrs".
     static func destination(_ name: String) -> String {
         var shown = readable(name)
-        while let service = services.first(where: { shown.hasPrefix($0 + " ") }) {
+        // Not where what's left is only a service's name: "Select Bus Service" isn't "Service"
+        while !services.contains(shown), let service = services.first(where: { shown.hasPrefix($0 + " ") }) {
             shown = String(shown.dropFirst(service.count + 1))
         }
         return shown
     }
 
-    /// How Bus Time and Google start a headsign with a bus's service, after `readable`.
+    /// How Bus Time and the timetable start a headsign with a bus's service, after `readable`.
     private static let services = ["Select Bus Service", "Select Bus", "Sbs", "+", "Limited", "Ltd", "Rush"]
+}
+
+/// A saved route planned From and To (`SavedWidget.trip`): the ways there ticked, each up to
+/// three rides, every one a train or a bus, and where it goes. The widgets follow each first
+/// train or bus through every ride (`PlannedTrips`).
+struct PlannedTrip: Codable, Hashable, Sendable {
+    var ways: [PlannedWay]
+    /// Where it goes: a station, or a bus stop.
+    var destinationID: String?
+    var destinationStop: BusStop?
+    /// Ways from another start, taken only when no first train or bus of `ways` is coming: with
+    /// no Manhattan-bound R at Prospect Av, the R the other way to 36 St, back on the D or N.
+    var fallback: Fallback? = nil
+
+    struct Fallback: Codable, Hashable, Sendable {
+        var ways: [PlannedWay]
+        /// When it's taken, as the widget says it: "No Manhattan-bound R".
+        var when: String
+        /// What it takes: "R to 36 St, back on the D or N".
+        var takes: String
+    }
+
+    init(ways: [PlannedWay], destinationID: String? = nil, destinationStop: BusStop? = nil) {
+        self.ways = ways
+        self.destinationID = destinationID
+        self.destinationStop = destinationStop
+    }
+
+    /// The first ride, which every way shares the start of.
+    var start: PlannedRide? { ways.first?.rides.first?.first }
+
+    /// The same for the same trip in the app and the widget, to tell trips' saved times apart.
+    var key: String {
+        Self.key(ways) + " to \(destinationID ?? destinationStop?.id ?? "")"
+            + (fallback.map { " else " + Self.key($0.ways) } ?? "")
+    }
+
+    private static func key(_ ways: [PlannedWay]) -> String {
+        ways.map { way in
+            way.rides.map { options in
+                options.map { ride in
+                    (ride.train.map { "\($0.stationID) \($0.routes.joined(separator: ",")) \($0.direction.rawValue)" } ?? "")
+                        + (ride.bus.map { "\($0.line) \($0.stop.id)" } ?? "")
+                        + " \(ride.offStationID ?? ride.offStop?.id ?? "")"
+                        + (ride.walkMinutes > 0 ? " walk \(ride.walkMinutes)" : "")
+                }.joined(separator: " or ")
+            }.joined(separator: " > ") + (way.endStop.map { " end \($0.id)" } ?? "")
+                + (way.endStationID.map { " off \($0)" } ?? "") + (way.endWalk > 0 ? " walk \(way.endWalk)" : "")
+        }.joined(separator: " | ")
+    }
+}
+
+/// One way there: its rides in turn. After the first, each ride is any of several places to
+/// change, any of which will do (the widget takes whichever gets there soonest).
+struct PlannedWay: Codable, Hashable, Sendable {
+    var rides: [[PlannedRide]]
+    /// Off a last ride by bus: the stop to get off at near the destination, and the walk on.
+    var endStop: BusStop? = nil
+    var endWalk: Int = 0
+    /// Off a last ride by train: the station it's left at (the destination, or one near a stop
+    /// that's the destination).
+    var endStationID: String? = nil
+
+    init(rides: [[PlannedRide]], endStop: BusStop? = nil, endWalk: Int = 0, endStationID: String? = nil) {
+        self.rides = rides
+        self.endStop = endStop
+        self.endWalk = endWalk
+        self.endStationID = endStationID
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case rides, endStop, endWalk, endStationID
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        rides = try container.decode([[PlannedRide]].self, forKey: .rides)
+        endStop = try container.decodeIfPresent(BusStop.self, forKey: .endStop)
+        endWalk = try container.decodeIfPresent(Int.self, forKey: .endWalk) ?? 0
+        endStationID = try container.decodeIfPresent(String.self, forKey: .endStationID)
+    }
+}
+
+/// A ride on a planned way: a train's lines from a station going one way, or a bus line from a
+/// stop going one way; and for a ride after the first, how it's changed to.
+struct PlannedRide: Codable, Hashable, Sendable {
+    /// A train: its station, lines and way; nil for a bus.
+    var train: Selection?
+    /// A bus: its line, the stop it's boarded at and where it's going; nil for a train.
+    var bus: BusLeg?
+    /// Off the ride before, onto this: the walk, in minutes (none across the platform).
+    var walkMinutes: Int = 0
+    /// Off the ride before: the station its train is left at (nil: this train's own station),
+    /// or the stop its bus is left at.
+    var offStationID: String? = nil
+    var offStop: BusStop? = nil
+    /// A bus's timetable minutes from where it's boarded to each stop it's left at, by stop code,
+    /// worked out when planned (`PlannedTrip.timingBuses()`) so widgets needn't load every bus
+    /// route; nil for a train, and in saves from before (the widget then works them out).
+    var busMinutes: [String: Double]? = nil
+
+    init(train: Selection? = nil, bus: BusLeg? = nil, walkMinutes: Int = 0, offStationID: String? = nil,
+         offStop: BusStop? = nil, busMinutes: [String: Double]? = nil) {
+        self.train = train
+        self.bus = bus
+        self.walkMinutes = walkMinutes
+        self.offStationID = offStationID
+        self.offStop = offStop
+        self.busMinutes = busMinutes
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case train, bus, walkMinutes, offStationID, offStop, busMinutes
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        train = try container.decodeIfPresent(Selection.self, forKey: .train)
+        bus = try container.decodeIfPresent(BusLeg.self, forKey: .bus)
+        walkMinutes = try container.decodeIfPresent(Int.self, forKey: .walkMinutes) ?? 0
+        offStationID = try container.decodeIfPresent(String.self, forKey: .offStationID)
+        offStop = try container.decodeIfPresent(BusStop.self, forKey: .offStop)
+        busMinutes = try? container.decodeIfPresent([String: Double].self, forKey: .busMinutes)
+    }
+
+    /// Its lines as the boards mark them: a train's routes, or a bus's ("bus:B63").
+    var routes: [String] { bus.map { [$0.route] } ?? train?.routes ?? [] }
+
+    /// Where it's boarded: the station's name, or the stop's.
+    var placeName: String {
+        if let bus { return bus.stopName }
+        return train?.station?.name ?? ""
+    }
 }

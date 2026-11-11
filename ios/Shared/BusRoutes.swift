@@ -89,6 +89,35 @@ enum BusRoutes {
     /// Every line's name as keyed: "B63", "M15+". Sorted once: the line search asks as it redraws.
     static let lineNames: [String] = loaded.lines.keys.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
 
+    /// Every stop once, by its code, as the lines call at them.
+    static let allStops: [Stop] = {
+        var seen = Set<String>()
+        return loaded.lines.values.joined().flatMap(\.stops).filter { seen.insert($0.code).inserted }
+    }()
+
+    /// Every line's stop patterns, each line and way: what the route planner rides.
+    static var everyWay: [(line: String, way: Way)] {
+        loaded.lines.flatMap { line, ways in ways.map { (line, $0) } }
+    }
+
+    /// Each stop by its code.
+    static let stopByCode: [String: Stop] = Dictionary(allStops.map { ($0.code, $0) }, uniquingKeysWith: { first, _ in first })
+
+    /// The lines calling at each stop, by its code, each with which way it's going (its
+    /// headsign), each once.
+    static let linesAtStop: [String: [(line: String, to: String)]] = {
+        var found: [String: [(line: String, to: String)]] = [:]
+        for (line, ways) in loaded.lines {
+            for way in ways {
+                // Not where its last stop is: nothing to ride on to
+                for stop in way.stops.dropLast() where !(found[stop.code] ?? []).contains(where: { $0.line == line && $0.to == way.to }) {
+                    found[stop.code, default: []].append((line, way.to))
+                }
+            }
+        }
+        return found.mapValues { $0.sorted { ($0.line, $0.to) < ($1.line, $1.to) } }
+    }()
+
     static func ways(of line: String) -> [Way] {
         loaded.lines[key(line)] ?? []
     }

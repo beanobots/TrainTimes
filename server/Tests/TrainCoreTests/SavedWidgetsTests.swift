@@ -40,7 +40,7 @@ import Testing
         #expect(home.commute?.weekdays == [2, 3, 4, 5, 6])
         #expect(home.commute?.start == 17 * 60)
         #expect(saved.widgets[1].name.isEmpty)
-        #expect(saved.widgets[1].title == "Atlantic Av")
+        #expect(saved.widgets[1].title == "L from Atlantic Av")
     }
 
     @Test func aChangeThatCantBeReadIsLostOnItsOwn() throws {
@@ -65,6 +65,21 @@ import Testing
         ])
         let data = try JSONEncoder().encode(saved)
         #expect(try JSONDecoder().decode(SavedWidgets.self, from: data) == saved)
+    }
+
+    @Test func aDockFromBeforeTheCitiBikeWidgetIsKeptApart() throws {
+        let dock = SavedWidget.dock(DockChoice(id: "66db", name: "5 Av & 3 St", latitude: 40.67, longitude: -73.98))
+        let train = SavedWidget(name: "Home", selection: prospect)
+        let saved = try JSONDecoder().decode(SavedWidgets.self, from: try JSONEncoder().encode(
+            SavedWidgets(widgets: [dock, train])))
+        // Not listed, but still found, to say it's moved
+        #expect(saved.widgets == [train])
+        #expect(saved.widget(dock.id) == nil)
+        #expect(saved.movedDock(dock.id)?.dock == dock.dock)
+        // And saved again, not erased
+        let again = try JSONDecoder().decode(SavedWidgets.self, from: try JSONEncoder().encode(saved))
+        #expect(again.movedDock(dock.id)?.dock == dock.dock)
+        #expect(again.widgets == [train])
     }
 
     // MARK: Checking
@@ -141,6 +156,30 @@ import Testing
         #expect(widget.shown(at: .now).directDestination?.name == "Prospect Av")
     }
 
+    @Test func widgetsANewerVersionSavedAreKeptAsTheyWere() throws {
+        // A kind with no train, between two that read
+        let json = #"""
+        {"widgets": [
+            {"id": "5D1C8A0E-0F57-4E2B-9C3A-7B1E2D4F6A01", "selection": {"stationID": "R34", "routes": ["R"], "direction": "N"}},
+            {"id": "ferry-1", "kind": "ferry", "ferry": {"pier": 11, "fare": 2.75, "night": false, "note": null}},
+            {"id": "6E2D9B1F-1A68-4F3C-8D4B-8C2F3E5A7B12", "selection": {"stationID": "L24", "routes": ["L"], "direction": "N"}}
+        ]}
+        """#
+        let saved = try JSONDecoder().decode(SavedWidgets.self, from: Data(json.utf8))
+        #expect(saved.widgets.count == 2)
+        #expect(saved.unreadable.count == 1)
+        // Written again in its place, as it was
+        let read = try JSONDecoder().decode([String: [SavedJSON]].self, from: Data(json.utf8))["widgets"] ?? []
+        let written = try JSONDecoder().decode([String: [SavedJSON]].self, from: JSONEncoder().encode(saved))["widgets"] ?? []
+        #expect(written.count == 3)
+        #expect(written.count == 3 && written[1] == read[1])
+        let id = { (entry: SavedJSON) -> SavedJSON? in
+            if case .object(let fields) = entry { return fields["id"] }
+            return nil
+        }
+        #expect(written.map(id) == read.map(id))
+    }
+
     // MARK: Ordering
 
     @Test func movingWidgets() {
@@ -150,11 +189,14 @@ import Testing
         #expect(saved.widgets.map(\.id) == [ids[1], ids[3], ids[0], ids[2]])
         saved.move(fromOffsets: IndexSet([3]), toOffset: 0)
         #expect(saved.widgets.map(\.id) == [ids[2], ids[1], ids[3], ids[0]])
-        // The last one stays
         saved.delete(ids[2])
         #expect(saved.widgets.map(\.id) == [ids[1], ids[3], ids[0]])
+        // Every one can go: widgets then show the default train
         for id in ids { saved.delete(id) }
-        #expect(saved.widgets.count == 1)
+        #expect(saved.widgets.isEmpty)
+        // Saved empty, read back empty
+        let read = try? JSONDecoder().decode(SavedWidgets.self, from: JSONEncoder().encode(saved))
+        #expect(read?.widgets.isEmpty == true)
     }
 
     // MARK: Commuting hours

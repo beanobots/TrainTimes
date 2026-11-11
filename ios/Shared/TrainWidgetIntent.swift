@@ -5,9 +5,9 @@ import WidgetKit
 /// saved widget each Home Screen widget shows.
 struct TrainWidgetIntent: WidgetConfigurationIntent {
     static let title: LocalizedStringResource = "Choose a route"
-    static let description = IntentDescription("Pick a kind, then one of the routes of that kind saved in the app. Left empty, it shows your default train.")
+    static let description = IntentDescription("Show a route you've saved in the app. Pick a kind, then one of the routes of that kind. Left empty, it shows your default train.")
 
-    /// Subway, Bus or Citi Bike: which saved routes `widget` offers.
+    /// Subway or Bus: which saved routes `widget` offers.
     @Parameter(title: "Kind", default: .subway)
     var kind: RouteKindChoice
 
@@ -155,12 +155,22 @@ struct SavedWidgetEntity: AppEntity {
         case .subway:
             let selection = widget.selection
             var subtitle = "\(selection.station?.name ?? "") · \(selection.caption)"
-            if let change = widget.change, change.station != nil {
+            // A planned route with no second train has a stand-in change with no lines
+            if let change = widget.change, change.station != nil, !change.allRoutes.isEmpty {
                 subtitle += ", then \(Lines.list(change.allRoutes, joinedBy: "or")) at \(change.stationNames(for: selection))"
             }
             self.subtitle = subtitle
             routes = selection.routes
         }
+    }
+
+    /// A picked Citi Bike dock saved before docks were the Citi Bike widget's
+    /// (`SavedWidgets.movedDocks`): it stays picked, and the widget says it's moved.
+    init(moved widget: SavedWidget) {
+        id = widget.id.uuidString
+        title = widget.title
+        subtitle = "Moved to the Citi Bike widget"
+        routes = []
     }
 
     /// A picked widget since deleted in the app. It stays picked so the widget falls back as
@@ -183,13 +193,16 @@ struct SavedWidgetQuery: EntityQuery {
     func entities(for identifiers: [SavedWidgetEntity.ID]) async throws -> [SavedWidgetEntity] {
         let saved = SharedStore.loadWidgets()
         return identifiers.compactMap { id in
-            UUID(uuidString: id).map { uuid in saved.widget(uuid).map(SavedWidgetEntity.init) ?? SavedWidgetEntity(deleted: uuid) }
+            UUID(uuidString: id).map { uuid in
+                saved.widget(uuid).map { SavedWidgetEntity($0) } ?? saved.movedDock(uuid).map { SavedWidgetEntity(moved: $0) }
+                    ?? SavedWidgetEntity(deleted: uuid)
+            }
         }
     }
 
     /// In app order.
     func suggestedEntities() async throws -> [SavedWidgetEntity] {
-        SharedStore.loadWidgets().widgets.map(SavedWidgetEntity.init)
+        SharedStore.loadWidgets().widgets.map { SavedWidgetEntity($0) }
     }
 }
 
@@ -201,26 +214,24 @@ struct SavedWidgetOptions: DynamicOptionsProvider {
 
     func results() async throws -> [SavedWidgetEntity] {
         let kind = intent?.kind.kind ?? .subway
-        return SharedStore.loadWidgets().widgets.filter { $0.kind == kind }.map(SavedWidgetEntity.init)
+        return SharedStore.loadWidgets().widgets.filter { $0.kind == kind }.map { SavedWidgetEntity($0) }
     }
 }
 
-/// The Edit menu's Kind: which saved routes it lists.
+/// The Edit menu's Kind: which saved routes it lists. Citi Bike docks are the Citi Bike widget's.
 enum RouteKindChoice: String, AppEnum {
-    case subway, bus, bike
+    case subway, bus
 
     static let typeDisplayRepresentation: TypeDisplayRepresentation = "Kind"
     static let caseDisplayRepresentations: [RouteKindChoice: DisplayRepresentation] = [
         .subway: DisplayRepresentation(title: "Subway", image: .init(systemName: "tram.fill")),
         .bus: DisplayRepresentation(title: "Bus", image: .init(systemName: "bus.fill")),
-        .bike: DisplayRepresentation(title: "Citi Bike", image: .init(systemName: "bicycle")),
     ]
 
     var kind: SavedRouteKind {
         switch self {
         case .subway: .subway
         case .bus: .bus
-        case .bike: .bike
         }
     }
 }

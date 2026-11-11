@@ -248,6 +248,34 @@ private actor FakeBusTime {
         }
     }
 
+    @Test func oneLinesBusesComeFromEveryLinesKeptAndFailingIsKeptAWhile() async throws {
+        let fake = FakeBusTime(now: now)
+        let buses = BusTime(key: "k") { await fake.answer($0) }
+        // Every line's at 308209, as a countdown or Nearby asks
+        guard case .success = await buses.everyLine(atStop: "308209", client: "a", now: now) else {
+            Issue.record("expected every line's"); return
+        }
+        // A ride's B63 there: picked from those, not asked again
+        guard case .arrivals(let found) = await buses.arrivals(line: "B63", near: boarding, client: "a", now: now + 5) else {
+            Issue.record("expected arrivals"); return
+        }
+        #expect(found.stop.id == "308209")
+        #expect(found.arrivals.count == 3)
+        #expect(await fake.count("stop-monitoring") == 1)
+
+        // Bus Time down: asked once, then not again for `failedLifetime`, whoever asks
+        await fake.set(status: 500)
+        #expect(await buses.arrivals(line: "B63", near: boarding, client: "a", now: now + 60) == .unavailable)
+        #expect(await buses.arrivals(line: "B63", near: boarding, client: "b", now: now + 70) == .unavailable)
+        #expect(await fake.count("stop-monitoring") == 2)
+        await fake.set(status: 200)
+        guard case .arrivals = await buses.arrivals(line: "B63", near: boarding, client: "a",
+                                                    now: now + 60 + BusTime.failedLifetime) else {
+            Issue.record("expected arrivals again"); return
+        }
+        #expect(await fake.count("stop-monitoring") == 3)
+    }
+
     @Test func keepsToDailyLimitsOnWhatItAsksOfBusTime() async throws {
         let fake = FakeBusTime(now: now)
         let limited = BusTime.Failure.limited(retryAfter: DailyLimiter.secondsUntilReset(now: now))

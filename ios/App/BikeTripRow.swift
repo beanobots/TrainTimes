@@ -116,6 +116,8 @@ struct BikeTripRow: View {
             .frame(width: trip.rideAfter == nil ? 52 : 64)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
+                    // VoiceOver read "→" as "right arrow"
+                    .accessibilityLabel(title.replacingOccurrences(of: " → ", with: " to "))
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.primary)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -164,9 +166,12 @@ struct BikeTripRow: View {
     }
 
     /// The ride's percent on protected lanes; nil under 5%, where it's not shown.
-    private var protectedPercent: Int? {
-        guard let share = trip.protectedShare, share >= 0.05 else { return nil }
-        return Int((share * 100).rounded())
+    private var protectedPercent: Int? { Self.protectedPercent(of: trip.protectedShare) }
+
+    /// `share` as a percent; nil under 5%, or not known.
+    static func protectedPercent(of share: Double?) -> Int? {
+        guard let share, share >= 0.05 else { return nil }
+        return Int((min(share, 1) * 100).rounded())
     }
 
     /// Its docks' counts, and where they open, which way.
@@ -188,17 +193,17 @@ struct BikeTripRow: View {
         HStack(spacing: 4) {
             if let train = trip.train {
                 if trip.carried {
-                    Image(systemName: "tram.fill").foregroundStyle(.tint)
+                    Image(systemName: "tram.fill").foregroundStyle(.tint).accessibilityHidden(true)
                     Text("Bring it on the")
                     HStack(spacing: 2) {
                         ForEach(train.selection.routes, id: \.self) { LineBullet(route: $0, size: 14) }
                     }
                 } else {
-                    Image(systemName: "lock.fill").foregroundStyle(.tint)
+                    Image(systemName: "lock.fill").foregroundStyle(.tint).accessibilityHidden(true)
                     Text("Lock it at \(trip.dropoff.name)")
                 }
             } else {
-                Image(systemName: "house.fill").foregroundStyle(.tint)
+                Image(systemName: "house.fill").foregroundStyle(.tint).accessibilityHidden(true)
                 Text("Door to door, no docks")
             }
         }

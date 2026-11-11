@@ -56,7 +56,7 @@ import Testing
     /// What VoiceOver calls a train of each line, everywhere it names one.
     @Test func eachShuttleIsSpokenOfByItsName() {
         #expect(Lines.spokenName(of: "R") == "R train")
-        #expect(Lines.spokenName(of: "SI") == "SI train")
+        #expect(Lines.spokenName(of: "SI") == "Staten Island Railway")
         // All three are "S" on their bullets
         #expect(Lines.spokenName(of: "GS") == "42 St Shuttle")
         #expect(Lines.spokenName(of: "FS") == "Franklin Av Shuttle")

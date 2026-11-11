@@ -46,6 +46,29 @@ Safety data in `safety/` (NYC Open Data, data.cityofnewyork.us/resource/…):
                              (number_of_pedestrians_injured > 0 OR number_of_pedestrians_killed > 0)
     ramps.json               ufzp-rrqu.json?$select=the_geom,cornerid,ramp_width&$limit=300000
 
+Night data in `safety/night/` (`add_night`; `build` adds it, or `night walkgraph.sqlite
+safety/night` adds it again to a built graph):
+
+    complaints.json          NYPD complaints, qgea-i56i.json (historic) and 5uac-w243.json
+                             (this year) as one list, the last three years' to the latest quarter:
+                             $select=cmplnt_fr_dt,cmplnt_fr_tm,rpt_dt,ofns_desc,pd_desc,
+                             prem_typ_desc,latitude,longitude&$where=rpt_dt >= '…' AND
+                             prem_typ_desc IN ('STREET','PARK/PLAYGROUND','BUS STOP',
+                             'HIGHWAY/PARKWAY','BRIDGE','TUNNEL','OPEN AREAS (OPEN LOTS)')
+    shootings.json           5ucz-vwe8.json?$where=occur_date >= '…' (lat and lon swapped
+                             on rows before 2026: put right here)
+    storefronts.json         92iy-9c3n.json?$where=reporting_year='…' AND vacant_on_12_31='NO'
+                             &$select=latitude,longitude  (the latest whole year's)
+    osm_shops.json           Overpass: nwr[shop], nwr[amenity~restaurant|cafe|bar|pub|fast_food|
+                             pharmacy|bank|ice_cream|nightclub|theatre|cinema|fuel|library|
+                             community_centre|post_office]                     (out tags center)
+    osm_lit_paths.json       Overpass: way[highway~footway|path|pedestrian|steps|cycleway|track|
+                             bridleway|service|living_street][lit]             (out tags geom)
+    osm_parks.json           the same parks as `build`'s
+
+`build` opens the walkways of `WALKWAY_BRIDGES` (the Rockaways' two bridges, drawn by the city
+for cars only); `walkways walkgraph.sqlite` does the same to a graph already built.
+
 `inspect` prints what the data holds, to settle how to read it; `debug` writes
 GeoJSON of chosen places, each block coloured by how it's read, for
 `render_walk_debug.swift` to draw.
@@ -84,6 +107,93 @@ def classify(p):
     if rw in (PATH, BOARDWALK, STEP_STREET) or p.get("trafdir") == "NV":
         return PATH_
     return WALK
+
+
+# Bridges whose roadway CSCL marks for cars only (nonped V, or a ramp) though a walkway runs
+# beside it, which the city doesn't draw apart: the Rockaways' two bridges, without which the
+# peninsula's a walkable part of its own. Each by the labels of its roadway and approaches.
+WALKWAY_BRIDGES = {
+    "Cross Bay Veterans Memorial Bridge": ("CROSS BAY VETERANS MEMORIAL BRG", "CROSS BAY VET MEMORIAL BRIDGE"),
+    "Marine Parkway-Gil Hodges Memorial Bridge": ("MARINE PY-GIL HODGES MEMORIAL BRG", "MARINE PARKWAY BR"),
+}
+# Junctions in a walkable part this big or more are the land a bridge's walkway joins
+WALKWAY_LAND = 1000
+
+
+def walkway_chains(ends, walkable, labels, metres, part):
+    """The car-only blocks to open for walking along each of `WALKWAY_BRIDGES`: the shortest
+    run of those named for it (`labels`) from the biggest walkable part it touches to another
+    of `WALKWAY_LAND` junctions or more, walking free between. `ends` are each block's two
+    junctions (indices), `walkable` whether it's walked already, `metres` its length, `part`
+    each junction's walkable part (0 the biggest). A set of block indices."""
+    import heapq
+    sizes = Counter(part)
+    around = defaultdict(list)
+    for index, (a, b) in enumerate(ends):
+        around[a].append(index)
+        around[b].append(index)
+    opened = set()
+    for bridge, prefixes in WALKWAY_BRIDGES.items():
+        named = {i for i, label in enumerate(labels) if not walkable[i] and label and label.startswith(prefixes)}
+        touched = {part[j] for i in named for j in ends[i]}
+        if not named or not touched:
+            print(f"  {bridge}: not found")
+            continue
+        start = min(touched)
+        # From the biggest part's junctions near the bridge: those its walkable blocks reach
+        # from the bridge's ends, found as the search goes
+        sources = {j for i in named for j in ends[i] if part[j] == start}
+        best = {j: 0.0 for j in sources}
+        came = {}
+        queue = [(0.0, j) for j in sources]
+        heapq.heapify(queue)
+        found = None
+        while queue:
+            cost, j = heapq.heappop(queue)
+            if cost > best.get(j, math.inf):
+                continue
+            if part[j] != start and sizes[part[j]] >= WALKWAY_LAND:
+                found = j
+                break
+            for i in around[j]:
+                if not walkable[i] and i not in named:
+                    continue
+                k = ends[i][1] if ends[i][0] == j else ends[i][0]
+                step = 0.0 if walkable[i] else metres[i] + 1
+                if cost + step < best.get(k, math.inf):
+                    best[k] = cost + step
+                    came[k] = (j, i)
+                    heapq.heappush(queue, (cost + step, k))
+        if found is None:
+            print(f"  {bridge}: no way across")
+            continue
+        chain = []
+        j = found
+        while j in came:
+            j, i = came[j]
+            if not walkable[i]:
+                chain.append(i)
+        opened.update(chain)
+        print(f"  {bridge}: {len(chain)} blocks opened, {best[found]:.0f} m, part {start} to {part[found]}")
+    return opened
+
+
+def open_walkways(blocks, nodes):
+    """`WALKWAY_BRIDGES`' walkways: their car-only blocks across made paths."""
+    order = {j: n for n, (j, _) in enumerate(nodes)}
+    ends = [(order[b.a], order[b.b]) for b in blocks]
+    opened = walkway_chains(ends, [b.cls in (WALK, PATH_) for b in blocks], [b.name or "" for b in blocks],
+                            [length_xy(b.points) for b in blocks], parts(blocks, nodes))
+    for index in opened:
+        blocks[index].cls = PATH_
+        # An approach the walkway runs along is the bridge's, not a ramp onto a highway, which
+        # is only ever crossed
+        if blocks[index].rw == RAMP:
+            blocks[index].rw = BRIDGE
+
+
+def length_xy(points):
+    return sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(points, points[1:]))
 
 
 def lines(feature):
@@ -410,7 +520,7 @@ def debug(cscl, osm_paths, osm_parks, out_dir):
 
 # MARK: - Building the graph
 
-FORMAT = 4  # the file's layout, as `WalkGraph.format` expects
+FORMAT = 5  # the file's layout, as `WalkGraph.format` expects
 SIMPLIFY = 0.5  # metres a block's line may stray from the city's
 OSM_SIMPLIFY = 1.0  # metres an OSM way's may stray from OSM's: its sidewalks' corners have many points
 ALONGSIDE = 12.0  # metres within which an OSM way runs along a street: its sidewalk
@@ -1490,6 +1600,9 @@ def build(cscl, osm_paths, osm_parks, osm_sidewalks, sidewalks_db, safety, targe
     nodes, arms = topology(blocks)
     print(f"  {len(nodes)} junctions, {len(blocks)} blocks, {sum(len(a) for a in arms.values())} arms")
 
+    print("bridge walkways")
+    open_walkways(blocks, nodes)
+
     report_components(blocks)
 
     print("sidewalks either side")
@@ -1506,6 +1619,7 @@ def build(cscl, osm_paths, osm_parks, osm_sidewalks, sidewalks_db, safety, targe
     safety_data = safety_at(blocks, nodes, arms, corners, safety)
 
     write(target, blocks, nodes, arms, corners, signals_at, links, safety_data)
+    add_night(target, os.path.join(safety, "night"))
 
 
 # MARK: Safety data (Phase 6)
@@ -2071,6 +2185,10 @@ ARRAY_TYPES = {
     "corner_link": "I",
     "block_sides": "B",
     "node_safety": "B", "node_crashes": "B", "corner_ramp": "B", "block_safety": "B", "block_crashes": "B",
+    # Night (`add_night`)
+    "node_crime_day": "B", "node_crime_evening": "B", "node_crime_late": "B",
+    "block_crime_day": "B", "block_crime_evening": "B", "block_crime_late": "B",
+    "block_shops": "B", "block_night": "B",
     # In tiles only
     "node_id": "I", "node_arms": "H", "block_id": "I", "block_whole": "B",
 }
@@ -2421,13 +2539,471 @@ def offset_line(points, offset, side):
     return out
 
 
+# MARK: - Night: crime, shops and dark paths
+
+# A day's three parts, by the hour a crime started: day 6–18, evening 18–23, late 23–6
+BANDS = ("day", "evening", "late")
+# Where NYPD's crimes against people outdoors are counted: not inside, where a walk doesn't go
+OUTDOORS = {"STREET", "PARK/PLAYGROUND", "BUS STOP", "HIGHWAY/PARKWAY", "BRIDGE", "TUNNEL",
+            "OPEN AREAS (OPEN LOTS)"}
+# Assaults on police and other public workers: from their work, not a risk to someone walking by
+ON_DUTY = ("POLICE", "PEACE OFFICER", "PUBLIC SERVICE", "TRAFFIC AGENT", "SCHOOL SAFETY")
+CRIME_NEAR = 30.0  # metres from a street's or path's line a crime is counted on it
+CORNER_CRIME = 12.0  # metres from a street block's end a crime is its corner's (NYPD puts 41% at one)
+CORNER_NEAR = 25.0  # metres from a junction a crime or crosswalk off a city corner is still its
+SHOOTING_SAME = 60.0  # metres within which a shooting the same day is a complaint already counted
+LOCAL = 400.0  # metres round within which a street's crime is compared: with the streets beside it
+# 100 m of street (or corners) of the local average a street's own count is weighed with, so
+# one crime doesn't mark a quiet block
+PRIOR = 2.0
+SHORTEST = 30.0  # metres a block counts as at least, for its crimes per 100 m
+CRIME_UNIT = 4  # crimes stored ×4: quarters, per 100 m (a corner's per corner), over the years read
+SHOP_NEAR = 30.0  # metres from a street's line a storefront is on it
+SHOP_SAME = 8.0  # metres within which an OSM shop is one of the city's registry already
+ALONGSIDE_STREET = 25.0  # metres from a street's line its sidewalk takes the street's night data
+LIT_NEAR = 4.0  # metres from an OSM way tagged `lit` a path's middle is that way
+OFF_STREET = 25.0  # metres from every city street a path is past the street lights
+# A block's `block_night`
+NIGHT_DARK = 1 << 0  # a path away from the street lights, not tagged lit (or tagged unlit)
+NIGHT_PARK = 1 << 1  # a path in a park: closed 1–6
+
+
+def person_crime(row):
+    """Whether an NYPD complaint is a crime against someone outdoors: robbery (not of a car or
+    cab), theft from the person, assault (not of police or public workers), murder, sex crimes."""
+    offence, kind = row.get("ofns_desc", ""), row.get("pd_desc", "")
+    if row.get("prem_typ_desc") not in OUTDOORS or any(word in kind for word in ON_DUTY):
+        return False
+    if offence == "ROBBERY":
+        return not any(word in kind for word in ("CAR JACKING", "CAB", "HIRE VEHICLE"))
+    if offence in ("GRAND LARCENY", "PETIT LARCENY"):
+        return "FROM PERSON" in kind or "PERSON," in kind
+    return offence in ("FELONY ASSAULT", "ASSAULT 3 & RELATED OFFENSES", "MURDER & NON-NEGL. MANSLAUGHTER",
+                       "RAPE", "SEX CRIMES")
+
+
+def band_of(time):
+    """The day's part (index into `BANDS`) of "HH:MM:SS"; midday if there's none."""
+    hour = int(time[:2]) if time and time[:2].isdigit() else 12
+    return 0 if 6 <= hour < 18 else 1 if 18 <= hour < 23 else 2
+
+
+def night_crimes(folder):
+    """[(point, band)] of the crimes against people outdoors, and of the street shootings
+    not already a complaint."""
+    crimes, same_day = [], defaultdict(list)
+    for p, row in read_points(os.path.join(folder, "complaints.json")):
+        if person_crime(row):
+            crimes.append((p, band_of(row.get("cmplnt_fr_tm"))))
+            if row.get("ofns_desc") in ("FELONY ASSAULT", "MURDER & NON-NEGL. MANSLAUGHTER"):
+                same_day[(row.get("cmplnt_fr_dt") or "")[:10]].append(p)
+    added = 0
+    with open(os.path.join(folder, "shootings.json"), encoding="utf-8") as file:
+        for row in json.load(file):
+            if row.get("loc_classfctn_desc") != "STREET" or not row.get("latitude"):
+                continue
+            # Swapped on the older rows: the latitude's the one round 40
+            lat, lon = sorted((float(row["latitude"]), float(row["longitude"])), reverse=True)
+            p = xy(lon, lat)
+            if any(dist(p, q) <= SHOOTING_SAME for q in same_day.get(row["occur_date"][:10], ())):
+                continue
+            crimes.append((p, band_of(row.get("occur_time"))))
+            added += 1
+    print(f"  {len(crimes)} crimes against people outdoors, {added} of them shootings not in the complaints")
+    return crimes
+
+
+def night_shops(folder):
+    """Points of the city's storefronts in use, and of OSM's shops, restaurants and the
+    like that aren't one of them already."""
+    shops = [p for p, _ in read_points(os.path.join(folder, "storefronts.json"))]
+    grid = point_grid([(p, 1) for p in shops])
+    registry = len(shops)
+    with open(os.path.join(folder, "osm_shops.json"), encoding="utf-8") as file:
+        for element in json.load(file)["elements"]:
+            where = element.get("center") or element
+            if "lat" not in where:
+                continue
+            p = xy(where["lon"], where["lat"])
+            cx, cy = int(p[0] // 50), int(p[1] // 50)
+            if not any(dist(p, q) <= SHOP_SAME for dx in (-1, 0, 1) for dy in (-1, 0, 1)
+                       for q, _ in grid.get((cx + dx, cy + dy), ())):
+                shops.append(p)
+    print(f"  {len(shops)} shops: {registry} from the city's storefront registry, {len(shops) - registry} more from OSM")
+    return shops
+
+
+def add_night(walkgraph, folder):
+    """Each walked block's and city junction's crime at each part of the day, each street's
+    shops, and the paths that are dark or in a park at night, put in `walkgraph`'s tiles.
+
+    A crime's on the street or path it's on, or on the corner within `CORNER_CRIME` of a
+    street block's end. A block's crimes per 100 m (a junction's per corner) are weighed
+    with the average of those within `LOCAL` (`PRIOR`), each part of the day's weighed with
+    the whole day's there, then stored as how far over that local average they are: a
+    street worse than its neighbours, not a part of town. Sidewalks take their street's,
+    crosswalks their junction's."""
+    import sqlite3
+    import zlib
+    from array import array
+    print(f"night data from {folder}")
+    g, _ = read_graph(walkgraph)
+    node_count, block_count = len(g["node_lat"]), len(g["block_a"])
+    node_xy = [xy(g["node_lon"][n] / 1e6, g["node_lat"][n] / 1e6) for n in range(node_count)]
+    lines = []
+    for b in range(block_count):
+        s, e = g["geom_start"][b], g["geom_start"][b + 1]
+        lines.append([xy(g["geom_lon"][i] / 1e6, g["geom_lat"][i] / 1e6) for i in range(s, e)])
+    lengths = [polyline_length(line) for line in lines]
+    classes = {code: cls for cls, code in CLASS_CODE.items()}
+    cls = [classes[c] for c in g["block_class"]]
+    flags = g["block_flags"]
+
+    def city_street(b):
+        return not flags[b] & FROM_OSM and cls[b] in (WALK, ARM)
+
+    def own_path(b):
+        return cls[b] == PATH_ and not flags[b] & (OSM_SIDEWALK | CROSSWALK | ISLAND | CONNECTOR)
+
+    # Junctions where city streets meet on the ground, as `safety_at` has them
+    junction = [False] * node_count
+    for n in range(node_count):
+        if g["node_level"][n] == GRADE:
+            arms = g["arm_block"][g["arm_start"][n]:g["arm_start"][n + 1]]
+            junction[n] = sum(1 for b in arms if city_street(b)) >= 2
+    junction_grid = point_grid([(node_xy[n], n) for n in range(node_count) if junction[n]])
+
+    def nearest_junction(p, near=CORNER_NEAR):
+        best = None
+        cx, cy = int(p[0] // 50), int(p[1] // 50)
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for q, n in junction_grid.get((cx + dx, cy + dy), ()):
+                    d = dist(p, q)
+                    if d <= near and (best is None or d < best[0]):
+                        best = (d, n)
+        return best[1] if best else None
+
+    carriers = [b for b in range(block_count) if (city_street(b) or own_path(b)) and len(lines[b]) > 1]
+    street_grid = Grid(50)
+    for b in carriers:
+        street_grid.add(b, lines[b])
+
+    def nearest_carrier(p, near, keep=lambda b: True):
+        best = None
+        for b in street_grid.near(p, near):
+            if not keep(b):
+                continue
+            q, off, along, _ = nearest_on(lines[b], p)
+            if off <= near and (best is None or off < best[1]):
+                best = (b, off, along)
+        return best
+
+    # Crimes on blocks and corners, by part of the day
+    block_crimes = defaultdict(lambda: [0, 0, 0])
+    corner_crimes = defaultdict(lambda: [0, 0, 0])
+    lost = 0
+    for p, band in night_crimes(folder):
+        found = nearest_carrier(p, CRIME_NEAR)
+        if found is None:
+            lost += 1
+            continue
+        b, _, along = found
+        if city_street(b) and min(along, lengths[b] - along) < CORNER_CRIME:
+            end = g["block_a"][b] if along < lengths[b] / 2 else g["block_b"][b]
+            n = end if junction[end] else nearest_junction(p)
+            if n is not None:
+                corner_crimes[n][band] += 1
+                continue
+        block_crimes[b][band] += 1
+    print(f"  {sum(sum(c) for c in block_crimes.values())} along {len(block_crimes)} blocks, "
+          f"{sum(sum(c) for c in corner_crimes.values())} at {len(corner_crimes)} corners, {lost} off every street")
+
+    # The local averages: crimes and metres (corners) in each 100 m cell, then summed round
+    CELL = 100.0
+    reach = int(LOCAL // CELL)
+    disk = [(dx, dy) for dx in range(-reach, reach + 1) for dy in range(-reach, reach + 1)
+            if math.hypot(dx, dy) * CELL <= LOCAL]
+
+    def local_sums(items):
+        """items: [(point, exposure, [day, evening, late])] → by cell, (exposure, [3 counts])
+        within `LOCAL`."""
+        cells = defaultdict(lambda: [0.0, 0, 0, 0])
+        for p, exposure, counts in items:
+            c = cells[(int(p[0] // CELL), int(p[1] // CELL))]
+            c[0] += exposure
+            for i in range(3):
+                c[1 + i] += counts[i]
+        out = {}
+        for (cx, cy) in cells:
+            total = [0.0, 0, 0, 0]
+            for dx, dy in disk:
+                c = cells.get((cx + dx, cy + dy))
+                if c:
+                    for i in range(4):
+                        total[i] += c[i]
+            out[(cx, cy)] = total
+        return out
+
+    def excess(own, exposure, local):
+        """Quarter crimes per unit over the local average at each part of the day, ≤ 255."""
+        local_exposure, local_counts = local[0], local[1:]
+        local_all = sum(local_counts)
+        if local_exposure <= 0 or local_all == 0:
+            return [0, 0, 0]
+        mean = local_all / local_exposure
+        # The whole day's, weighed with the local average, then each part's with its share of it
+        rate = (sum(own) + PRIOR * mean) / (exposure + PRIOR)
+        out = []
+        for i in range(3):
+            share = local_counts[i] / local_all
+            part = (own[i] + PRIOR * rate * share) / (exposure + PRIOR)
+            out.append(min(255, max(0, round((part - mean * share) * CRIME_UNIT))))
+        return out
+
+    middles = {}
+    for b in carriers:
+        middles[b] = point_along(lines[b], lengths[b] / 2)[0]
+    street_items = [(middles[b], max(lengths[b], SHORTEST) / 100, block_crimes.get(b, [0, 0, 0]))
+                    for b in carriers if cls[b] != ARM]
+    street_local = local_sums(street_items)
+    corner_items = [(node_xy[n], 1.0, corner_crimes.get(n, [0, 0, 0])) for n in range(node_count) if junction[n]]
+    corner_local = local_sums(corner_items)
+
+    def cell(p):
+        return (int(p[0] // CELL), int(p[1] // CELL))
+
+    node_crime = [[0] * node_count for _ in range(3)]
+    for n in range(node_count):
+        if junction[n]:
+            values = excess(corner_crimes.get(n, [0, 0, 0]), 1.0, corner_local[cell(node_xy[n])])
+            for i in range(3):
+                node_crime[i][n] = values[i]
+    block_crime = [[0] * block_count for _ in range(3)]
+    for b in carriers:
+        if cls[b] == ARM:
+            continue
+        values = excess(block_crimes.get(b, [0, 0, 0]), max(lengths[b], SHORTEST) / 100,
+                        street_local[cell(middles[b])])
+        for i in range(3):
+            block_crime[i][b] = values[i]
+
+    # Shops: each on its nearest street within `SHOP_NEAR`, per 100 m
+    shop_count = Counter()
+    for p in night_shops(folder):
+        found = nearest_carrier(p, SHOP_NEAR, keep=lambda b: city_street(b) and cls[b] == WALK)
+        if found:
+            shop_count[found[0]] += 1
+    block_shops = [0] * block_count
+    for b, count in shop_count.items():
+        block_shops[b] = min(255, round(count / max(lengths[b], SHORTEST) * 100))
+
+    # Sidewalks and the like take their street's; crosswalks their junction's
+    taken = crossings = 0
+    for b in range(block_count):
+        if b in middles or len(lines[b]) < 2:
+            continue
+        middle, heading = point_along(lines[b], lengths[b] / 2)
+        if flags[b] & CROSSWALK:
+            n = nearest_junction(middle)
+            if n is not None:
+                for i in range(3):
+                    block_crime[i][b] = node_crime[i][n]
+                crossings += 1
+            continue
+        if cls[b] == ARM:
+            continue
+        best = None
+        for s in street_grid.near(middle, ALONGSIDE_STREET):
+            if not (city_street(s) and cls[s] == WALK):
+                continue
+            q, off, along, index = nearest_on(lines[s], middle)
+            a, z = lines[s][index], lines[s][index + 1]
+            if off <= ALONGSIDE_STREET and turn_apart(heading, bearing(a, z)) <= PARALLEL \
+                    and (best is None or off < best[1]):
+                best = (s, off)
+        if best:
+            for i in range(3):
+                block_crime[i][b] = block_crime[i][best[0]]
+            block_shops[b] = block_shops[best[0]]
+            taken += 1
+    print(f"  {taken} sidewalks and the like took their street's, {crossings} crosswalks their junction's")
+
+    # Paths: dark away from the street lights unless tagged lit, closed in parks 1–6
+    lit_lines = []
+    with open(os.path.join(folder, "osm_lit_paths.json"), encoding="utf-8") as file:
+        for element in json.load(file)["elements"]:
+            value = element.get("tags", {}).get("lit")
+            if element.get("geometry") and value in ("yes", "no", "24/7", "automatic", "limited"):
+                lit_lines.append(([xy(p["lon"], p["lat"]) for p in element["geometry"]], value != "no"))
+    lit_grid = Grid(50)
+    for i, (line, _) in enumerate(lit_lines):
+        lit_grid.add(i, line)
+    parks = Parks(park_polygons(os.path.join(folder, "osm_parks.json")))
+    block_night = [0] * block_count
+    for b in carriers:
+        if not own_path(b):
+            continue
+        middle = middles[b]
+        tagged = None
+        for i in lit_grid.near(middle, LIT_NEAR):
+            line, lit = lit_lines[i]
+            if nearest_on(line, middle)[1] <= LIT_NEAR:
+                tagged = lit if tagged is None else tagged and lit
+        by_street = nearest_carrier(middle, OFF_STREET, keep=city_street) is not None
+        if tagged is False or (tagged is None and not by_street):
+            block_night[b] |= NIGHT_DARK
+        if parks.contains(middle):
+            block_night[b] |= NIGHT_PARK
+    paths = sum(1 for b in carriers if own_path(b))
+    print(f"  {paths} paths: {sum(1 for v in block_night if v & NIGHT_DARK)} dark, "
+          f"{sum(1 for v in block_night if v & NIGHT_PARK)} in parks")
+    for name, values in (("blocks", block_crime), ("junctions", node_crime)):
+        print(f"  {name} over their neighbours' (day, evening, late): "
+              f"{[sum(1 for v in values[i] if v) for i in range(3)]}")
+
+    # Into each tile, in its own order of ids
+    arrays = {f"node_crime_{BANDS[i]}": node_crime[i] for i in range(3)}
+    arrays.update({f"block_crime_{BANDS[i]}": block_crime[i] for i in range(3)})
+    arrays["block_shops"], arrays["block_night"] = block_shops, block_night
+    db = sqlite3.connect(walkgraph)
+    db.execute(f"DELETE FROM tiles WHERE name IN ({','.join('?' * len(arrays))})", list(arrays))
+    rows = []
+    ids = defaultdict(dict)
+    for x, y, name, data in db.execute("SELECT x, y, name, data FROM tiles WHERE name IN ('node_id', 'block_id')"):
+        a = array("I")
+        a.frombytes(zlib.decompress(data, -15))
+        if sys.byteorder != "little":
+            a.byteswap()
+        ids[(x, y)][name] = a
+    for (x, y), tile in ids.items():
+        for name, values in arrays.items():
+            own = tile["node_id"] if name.startswith("node_") else tile["block_id"]
+            a = array(ARRAY_TYPES[name], (values[i] for i in own))
+            if sys.byteorder != "little":
+                a.byteswap()
+            rows.append((x, y, name, deflate(a.tobytes())))
+    db.executemany("INSERT INTO tiles VALUES (?, ?, ?, ?)", rows)
+    source = dict(db.execute("SELECT key, value FROM info")).get("source", "")
+    night_source = "NYPD complaints and shootings; NYC storefront registry; OpenStreetMap shops and lit paths"
+    if night_source not in source:
+        db.execute("UPDATE info SET value = ? WHERE key = 'source'", (f"{source}; {night_source}",))
+    from datetime import datetime, timezone
+    db.execute("UPDATE info SET value = ? WHERE key = 'format'", (str(FORMAT),))
+    db.execute("INSERT OR REPLACE INTO info VALUES ('night', ?)",
+               (datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),))
+    db.commit()
+    db.execute("VACUUM")
+    db.close()
+    print(f"{walkgraph}: {os.path.getsize(walkgraph) / 1e6:.1f} MB")
+
+
+def open_built_walkways(walkgraph):
+    """`open_walkways` on a built graph, as `build` now does: the bridges' car-only blocks made
+    paths, the corners between two paths at their junctions made path corners, and the
+    walkable parts joined and numbered again, biggest first."""
+    import sqlite3
+    import zlib
+    from array import array
+    g, names = read_graph(walkgraph)
+    block_count = len(g["block_a"])
+    ends = [(g["block_a"][b], g["block_b"][b]) for b in range(block_count)]
+    walkable = [g["block_class"][b] in (CLASS_CODE[WALK], CLASS_CODE[PATH_]) for b in range(block_count)]
+    labels = [names.get(g["block_name"][b], "") for b in range(block_count)]
+    opened = walkway_chains(ends, walkable, labels, [g["block_length"][b] / 10 for b in range(block_count)],
+                            list(g["node_part"]))
+    if not opened:
+        print("nothing to open")
+        return
+    cls = list(g["block_class"])
+    rw = list(g["block_rw"])
+    for b in opened:
+        cls[b] = CLASS_CODE[PATH_]
+        # As `open_walkways`: an approach the walkway runs along is the bridge's, not a ramp
+        if rw[b] == RAMP:
+            rw[b] = BRIDGE
+    # Corners between two paths, or a path's dead end, at the junctions they touch
+    corner_fix = {}
+    for n in {j for b in opened for j in ends[b]}:
+        start, stop = g["arm_start"][n], g["arm_start"][n + 1]
+        k = stop - start
+        for slot in range(k):
+            b1, b2 = g["arm_block"][start + slot], g["arm_block"][start + (slot + 1) % k]
+            if cls[b1] == cls[b2] == CLASS_CODE[PATH_] or k == 1 and cls[b1] != CLASS_CODE[WALK]:
+                corner_fix[(n, slot)] = CORNER_PATH
+    # The parts joined across the opened blocks, numbered again biggest first
+    parent = {}
+
+    def find(x):
+        while parent.get(x, x) != x:
+            parent[x] = parent.get(parent[x], parent[x])
+            x = parent[x]
+        return x
+
+    for b in opened:
+        ra, rb = find(g["node_part"][ends[b][0]]), find(g["node_part"][ends[b][1]])
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+    joined = [find(p) for p in g["node_part"]]
+    rank = {root: i for i, (root, _) in enumerate(sorted(Counter(joined).items(), key=lambda kv: (-kv[1], kv[0])))}
+    part = [rank[p] for p in joined]
+    print(f"  parts: {len(set(g['node_part']))} before, {len(rank)} after; biggest "
+          f"{Counter(part)[0]} of {len(part)} junctions")
+    db = sqlite3.connect(walkgraph)
+    wanted = ("node_id", "node_arms", "block_id", "block_class", "block_rw", "node_part", "corner_kind", "corner_dx",
+              "corner_dy")
+    tiles = defaultdict(dict)
+    for x, y, name, data in db.execute(f"SELECT x, y, name, data FROM tiles WHERE name IN {wanted}"):
+        a = array(ARRAY_TYPES[name])
+        a.frombytes(zlib.decompress(data, -15))
+        if sys.byteorder != "little":
+            a.byteswap()
+        tiles[(x, y)][name] = a
+    for (x, y), tile in tiles.items():
+        changed = set()
+        for i, b in enumerate(tile["block_id"]):
+            if tile["block_class"][i] != cls[b]:
+                tile["block_class"][i] = cls[b]
+                changed.add("block_class")
+            if tile["block_rw"][i] != rw[b]:
+                tile["block_rw"][i] = rw[b]
+                changed.add("block_rw")
+        at = 0
+        for i, n in enumerate(tile["node_id"]):
+            if tile["node_part"][i] != part[n]:
+                tile["node_part"][i] = part[n]
+                changed.add("node_part")
+            for slot in range(tile["node_arms"][i]):
+                if (n, slot) in corner_fix:
+                    tile["corner_kind"][at + slot] = corner_fix[(n, slot)]
+                    tile["corner_dx"][at + slot] = 0
+                    tile["corner_dy"][at + slot] = 0
+                    changed.update(("corner_kind", "corner_dx", "corner_dy"))
+            at += tile["node_arms"][i]
+        for name in changed:
+            a = array(ARRAY_TYPES[name], tile[name])
+            if sys.byteorder != "little":
+                a.byteswap()
+            db.execute("UPDATE tiles SET data = ? WHERE x = ? AND y = ? AND name = ?", (deflate(a.tobytes()), x, y, name))
+    from datetime import datetime, timezone
+    db.execute("INSERT OR REPLACE INTO info VALUES ('walkways', ?)",
+               (datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),))
+    db.commit()
+    db.execute("VACUUM")
+    db.close()
+    print(f"{walkgraph}: {os.path.getsize(walkgraph) / 1e6:.1f} MB")
+
+
 if __name__ == "__main__":
-    commands = {"inspect": (inspect, 3), "debug": (debug, 4), "build": (build, 7), "graph-debug": (graph_debug, 2)}
+    commands = {"inspect": (inspect, 3), "debug": (debug, 4), "build": (build, 7), "graph-debug": (graph_debug, 2),
+                "night": (add_night, 2), "walkways": (open_built_walkways, 1)}
     if len(sys.argv) < 2 or sys.argv[1] not in commands or len(sys.argv) != 2 + commands[sys.argv[1]][1]:
         sys.exit(f"usage: {sys.argv[0]} inspect cscl.geojson osm_paths.json osm_parks.json\n"
                  f"       {sys.argv[0]} debug cscl.geojson osm_paths.json osm_parks.json out_dir\n"
                  f"       {sys.argv[0]} build cscl.geojson osm_paths.json osm_parks.json osm_sidewalks.json "
                  f"sidewalks.sqlite safety_dir walkgraph.sqlite\n"
-                 f"       {sys.argv[0]} graph-debug walkgraph.sqlite out_dir")
+                 f"       {sys.argv[0]} graph-debug walkgraph.sqlite out_dir\n"
+                 f"       {sys.argv[0]} night walkgraph.sqlite night_dir\n"
+                 f"       {sys.argv[0]} walkways walkgraph.sqlite")
     function, _ = commands[sys.argv[1]]
     function(*sys.argv[2:])
