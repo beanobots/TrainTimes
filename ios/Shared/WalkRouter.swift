@@ -29,11 +29,16 @@ enum WalkCosts {
     static let turnReach = 8.0
     /// Degrees a way turns before it's a turn.
     static let turning = 30.0
-    /// Seconds for crossing both streets at a corner the street you're on first: the street
-    /// ahead first is the way people do it, straight on and then turning to cross, so it's
-    /// said simply. More than the crossings' widths differ by, as both orders have the
-    /// junction's one light.
-    static let turnFirst = 5.0
+    /// Seconds for crossing both streets at a corner the street you're on first, when a route
+    /// is found again to cross them the other way (`ordered`): the street ahead first is the
+    /// way people do it, straight on and then turning to cross, so it's said simply. Not in
+    /// the first search, where it'd send a walk down other streets instead.
+    static let turnFirst = 10.0
+    /// Seconds more a walk may take crossing the street ahead first at its corners.
+    static let reorderSlack = 15.0
+    /// Metres round the first route the search crossing the street ahead first keeps to, in
+    /// the 100 m cells they reach: it's to keep to the same streets anyway.
+    static let reorderBand = 30.0
 
     // A crossing, per carriageway crossed
     static let perMetreWide = 0.8
@@ -221,6 +226,10 @@ final class WalkRouter {
     /// Whether, since that stretch of sidewalk, the walk's crossed its street (`turnFirst`):
     /// carried as `heading` is.
     private var crossedAlong: [Bool] = []
+    /// Whether the way to the state crossed a street it was on before the one ahead, at a corner.
+    private var ownFirst: [Bool] = []
+    /// `ownFirst` for the last search's route.
+    private var foundOwnFirst = false
     private var stamp: [UInt32] = []
     private var generation: UInt32 = 0
     /// The blocks along the way a walk was going (`Options.along`), for this search.
@@ -358,6 +367,8 @@ final class WalkRouter {
         /// After dark, whether the night costs took it another way, clear of more crime, dark
         /// paths or empty streets than `WalkCosts.saferAtNight` (`nightCost`): "via safer streets".
         var saferAtNight = false
+        /// Whether it was found again to cross the street ahead first at its corners (`ordered`).
+        var reordered = false
     }
 
     struct Route: Sendable {
@@ -377,7 +388,7 @@ final class WalkRouter {
         defer { followed = []; night = nil }
         // Where it starts and ends doesn't change with the weight: found once for every search
         let starts = snaps(near: start), ends = snaps(near: end)
-        guard let fastest = search(from: start, to: end, starts: starts, ends: ends,
+        guard let fastest = ordered(from: start, to: end, starts: starts, ends: ends,
                                    weight: WalkCosts.weight(.fastest), options: options)
         else { return nil }
         if options.preference == .fastest { return finish(fastest, fastestSeconds: fastest.stats.seconds) }
@@ -385,12 +396,12 @@ final class WalkRouter {
         var weight = WalkCosts.weight(options.preference)
         night = options.time
         for _ in 0..<4 {
-            if var route = search(from: start, to: end, starts: starts, ends: ends, weight: weight, options: options),
+            if var route = ordered(from: start, to: end, starts: starts, ends: ends, weight: weight, options: options),
                route.stats.seconds <= budget {
                 if options.time.band != .day {
                     // The way it'd go without the night costs, to say whether they changed it
                     night = nil
-                    let without = search(from: start, to: end, starts: starts, ends: ends, weight: weight, options: options)
+                    let without = ordered(from: start, to: end, starts: starts, ends: ends, weight: weight, options: options)
                     night = options.time
                     if let without, nightCost(of: without, options: options) - nightCost(of: route, options: options)
                         >= WalkCosts.saferAtNight {
@@ -623,8 +634,53 @@ final class WalkRouter {
         static func < (a: Entry, b: Entry) -> Bool { a.f < b.f }
     }
 
+    /// `search`; and where its route crosses the street it's on before the one ahead at a
+    /// corner, found again with that costing `turnFirst`, its own sides (not crosswalks) at
+    /// `followShare` to keep to its streets. That route if it does keep to them, no more than
+    /// `reorderSlack` slower, with no more unsignalled crossings or ramps. Its risk and costs
+    /// are as found, with its sides at `followShare`.
+    private func ordered(from start: Walk.Point, to end: Walk.Point, starts: [Snap], ends: [Snap],
+                         weight: Double, options: Options) -> Route? {
+        guard let route = search(from: start, to: end, starts: starts, ends: ends, weight: weight, options: options)
+        else { return nil }
+        guard foundOwnFirst else { return route }
+        let saved = followed
+        defer { followed = saved }
+        for case let .side(block, _, _, _, _, _) in route.legs where !graph.flags(of: block).contains(.crosswalk) {
+            followed.insert(block)
+        }
+        let line = points(of: route).map(Self.xy)
+        var band = Set<Cell>()
+        for (a, b) in zip(line, line.dropFirst()) {
+            band.formUnion(Self.cells(from: a, to: b, pad: WalkCosts.reorderBand))
+        }
+        guard let other = search(from: start, to: end, starts: starts, ends: ends, weight: weight, options: options,
+                                 orderCost: WalkCosts.turnFirst, within: band),
+              streets(of: other) == streets(of: route),
+              other.stats.seconds <= route.stats.seconds + WalkCosts.reorderSlack,
+              other.stats.unsignalled <= route.stats.unsignalled,
+              other.stats.unsignalledWide <= route.stats.unsignalledWide,
+              other.stats.ramps <= route.stats.ramps
+        else { return route }
+        var stats = other.stats
+        stats.reordered = true
+        return Route(legs: other.legs, stats: stats, costs: other.costs)
+    }
+
+    /// The streets a route walks along, in order: each block's name it walks 30 m or more of.
+    private func streets(of route: Route) -> [UInt32] {
+        var names: [UInt32] = []
+        for case let .side(block, _, _, _, from, to) in route.legs where abs(to - from) >= 30 {
+            let name = graph.blockName[block]
+            if names.last != name { names.append(name) }
+        }
+        return names
+    }
+
+    /// The cheapest route, its crossings at corners in either order unless `orderCost`; only
+    /// by corners in the cells `within`, if given.
     private func search(from start: Walk.Point, to end: Walk.Point, starts: [Snap], ends: [Snap],
-                        weight: Double, options: Options) -> Route? {
+                        weight: Double, options: Options, orderCost: Double = 0, within: Set<Cell>? = nil) -> Route? {
         // Both ends in one walkable part: of those both are near, the one they're nearest
         // (a start by a loose bit of park path still goes by the streets)
         func part(_ snap: Snap) -> UInt32 { graph.nodePart[Int(graph.blockA[snap.block])] }
@@ -643,6 +699,7 @@ final class WalkRouter {
             parent = [Int32](repeating: -1, count: states)
             heading = [Int32](repeating: -1, count: states)
             crossedAlong = [Bool](repeating: false, count: states)
+            ownFirst = [Bool](repeating: false, count: states)
             stamp = [UInt32](repeating: 0, count: states)
             generation = 0
         }
@@ -661,7 +718,11 @@ final class WalkRouter {
             return (dx * dx + dy * dy).squareRoot() / Float(WalkCosts.pace) * lowest
         }
         func relax(_ state: Int, _ value: Double, from previous: Int32, _ move: Move, heading came: Int32,
-                   crossed: Bool = false) {
+                   crossed: Bool = false, late: Bool = false) {
+            if let within {
+                let corner = state / 3, size = Float(Self.cellSize)
+                guard within.contains(Cell(x: Int32(cornerX[corner] / size), y: Int32(cornerY[corner] / size))) else { return }
+            }
             let v = Float(value)
             if stamp[state] != generation || v < cost[state] {
                 stamp[state] = generation
@@ -669,6 +730,7 @@ final class WalkRouter {
                 parent[state] = previous
                 heading[state] = came
                 crossedAlong[state] = crossed
+                ownFirst[state] = late || (previous >= 0 && ownFirst[Int(previous)])
                 heap.push(Entry(f: v + h(state / 3), state: Int32(state)))
             }
         }
@@ -724,14 +786,15 @@ final class WalkRouter {
             let corner = state / 3, came = state % 3
             let into = heading[state]
             // Over the street come along at a corner, then the other: the street ahead first
-            // instead (`turnFirst`). A crossing over `name`, `metres` across, as a crosswalk or
-            // at a junction: whether the street come along's crossed after it, and the extra
+            // instead (`orderCost`). A crossing over `name`, `metres` across, as a crosswalk or
+            // at a junction: whether the street come along's crossed after it, whether this is
+            // the street ahead after it, and the extra
             let along = into >= 0 ? graph.blockName[Int(graph.armBlock[Int(into)])] : 0
             let crossed = crossedAlong[state]
-            func over(_ name: UInt32, metres: Double) -> (crossed: Bool, extra: Double) {
-                guard metres >= 1, name != 0, along != 0 else { return (crossed, 0) }
-                if name == along { return (true, 0) }
-                return (crossed, crossed ? WalkCosts.turnFirst : 0)
+            func over(_ name: UInt32, metres: Double) -> (crossed: Bool, late: Bool, extra: Double) {
+                guard metres >= 1, name != 0, along != 0 else { return (crossed, false, 0) }
+                if name == along { return (true, false, 0) }
+                return (crossed, crossed, crossed ? orderCost : 0)
             }
             if let out = exits[corner] {
                 for (exitCost, snap) in out where g + exitCost < (best?.cost ?? .infinity) {
@@ -758,7 +821,7 @@ final class WalkRouter {
                 // A stretch of sidewalk turns from the last one; crosswalks and bits between
                 // carry it on
                 var onward = into
-                var crossedOn = crossed
+                var crossedOn = crossed, late = false
                 if Self.setsHeading(graph, block) {
                     if into >= 0 { step += turnCost(into: Int(into), outOf: arm) }
                     onward = Int32(arrive == 0 ? destination : graph.next(destination, at: graph.node(ofArm: destination)))
@@ -767,8 +830,10 @@ final class WalkRouter {
                     let crossing = over(graph.blockName[block], metres: graph.length(of: block))
                     step += crossing.extra
                     crossedOn = crossing.crossed
+                    late = crossing.late
                 }
-                relax(destination * 3 + arrive, g + step, from: Int32(state), move, heading: onward, crossed: crossedOn)
+                relax(destination * 3 + arrive, g + step, from: Int32(state), move, heading: onward, crossed: crossedOn,
+                      late: late)
             }
             // Between a city corner and its OSM sidewalk junction, either way
             let linked = graph.cornerLink[corner]
@@ -794,10 +859,11 @@ final class WalkRouter {
                 else { continue }
                 let crossing = over(graph.blockName[Int(graph.armBlock[arm])], metres: crossingMetres(from: corner, to: destination))
                 relax(destination * 3 + 2, g + step + crossing.extra, from: Int32(state), move, heading: into,
-                      crossed: crossing.crossed)
+                      crossed: crossing.crossed, late: crossing.late)
             }
         }
         guard let best else { return nil }
+        foundOwnFirst = best.state >= 0 && ownFirst[Int(best.state)]
         return reconstruct(best: best, sources: startCost, weight: weight, options: options, start: start, end: end)
     }
 

@@ -206,7 +206,7 @@ import Testing
         ], seconds: 200, meters: 216, crossings: [[path[1], path[2]], [path[2], path[3]]],
                         lights: [.signal, .unsignalledWide], streets: ["W 17th St", "5th Ave"])
         walk.addCrossingSteps()
-        #expect(walk.steps.map(\.instruction) == ["Cross W 17th St, then turn right and continue on W 17th St after crossing 5th Ave",
+        #expect(walk.steps.map(\.instruction) == ["Cross W 17th St, then turn right to cross 5th Ave and continue on W 17th St",
                                                   "The destination is on your left"])
         #expect(walk.steps[0].points.last == path[1])
         #expect(walk.steps[1].points == Array(path[1...]))
@@ -229,6 +229,7 @@ import Testing
                                                   "The destination is on your left"])
         #expect(walk.steps[0].turn == .right)
         #expect(walk.steps[0].light == .leading)
+        #expect(Walk.street(in: walk.steps[0].instruction) == "W 17th St")
         #expect(walk.steps[1].points == Array(path[1...]))
         #expect(abs(walk.steps.map(\.meters).reduce(0, +) - 216) < 0.5)
     }

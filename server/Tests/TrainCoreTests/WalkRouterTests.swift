@@ -223,6 +223,14 @@ import Testing
         #expect(streets == ["4 AVE", "12 ST"], "\(streets)")
     }
 
+    /// Astoria, Broadway to 43rd St: found again to cross the street ahead first at its
+    /// corners, along the same streets (`ordered`).
+    @Test func theStreetAheadIsCrossedFirst() throws {
+        let router = try router()
+        let walk = try route(router, (40.762, -73.9253), (40.7568, -73.917))
+        #expect(walk.stats.reordered)
+    }
+
     /// Over the Brooklyn Bridge on its walkway, the way Apple Maps goes, with no road crossed on it.
     @Test func theBridgeIsWalkedOver() throws {
         let router = try router()

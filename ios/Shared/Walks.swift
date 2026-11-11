@@ -362,6 +362,11 @@ struct Walk: Codable, Hashable, Sendable {
     /// Ave", "Ocean Pkwy" from "Continue on Ocean Pkwy toward Coney Island". Nil where what
     /// follows isn't a street's name, as "The destination is on your left".
     static func street(in instruction: String) -> String? {
+        // "Cross 5th Ave, then cross W 17th St and turn right onto it": the street crossed second
+        if instruction.hasSuffix(" onto it"), let then = instruction.range(of: ", then cross "),
+           let and = instruction.range(of: " and turn ", range: then.upperBound..<instruction.endIndex) {
+            return String(instruction[then.upperBound..<and.lowerBound])
+        }
         for word in [" onto ", " on "] {
             guard let range = instruction.range(of: word, options: .backwards) else { continue }
             var street = instruction[range.upperBound...]
